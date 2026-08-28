@@ -6,7 +6,6 @@ import { inferFiletype } from "../../filetype";
 import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
 import { parseDirectoryResults, parseNmap, splitHttpResponse, unifiedEditDiff } from "../../tool-renderers";
-import { FaraiSpinner } from "../../common/spinner";
 import { useTuiStore } from "../../context/store";
 import { args, firstResultLine, tailLines } from "./text-utils";
 import {
@@ -17,6 +16,8 @@ import {
 } from "../../tool-presentation";
 import { titleFromPrompt } from "../../../session-title";
 import { ExpandedPanel } from "./expanded-panel";
+import { TranscriptMarker } from "./transcript-marker";
+import { createPrimaryClickGesture } from "../../input/mouse";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 5;
 
@@ -65,29 +66,23 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
     return fullResult();
   };
   const hasInput = () => Object.keys(input()).length > 0;
+  const headerLabel = () => isMcp() ? `${active() ? "calling" : "called"} ${mcpInvocation()}` : title();
+  const headerColor = () => active() ? COLOR.accent : toolColor(props.row.status);
+  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
+  const previewClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   const visibleOutputLines = () => active()
     ? tailLines(visibleOutput(), 3)
     : previewOutputLines(visibleOutput(), TOOL_OUTPUT_PREVIEW_LINES);
   if (props.row.tool === "agent_task") return <AgentTaskRow row={props.row} />;
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => tui.actions.cellExpandedToggle(props.row.id)}>
-      <box style={{ flexDirection: "row" }}>
-        <Show
-          when={isMcp()}
-          fallback={
-            <Show when={isActiveToolStatus(props.row.status)} fallback={<text fg={toolColor(props.row.status)}>{`• ${title()}`}</text>}>
-              <FaraiSpinner label={title()} color={COLOR.accent} />
-            </Show>
-          }
-        >
-          <Show when={isActiveToolStatus(props.row.status)} fallback={<text fg={toolColor(props.row.status)}>{`• called ${mcpInvocation()}`}</text>}>
-            <FaraiSpinner label={`calling ${mcpInvocation()}`} color={COLOR.accent} />
-          </Show>
-        </Show>
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={headerColor()} spinning={active()} />
+        <text fg={headerColor()}>{headerLabel()}</text>
       </box>
 
       <Show when={!expanded() && !isMcp() && visibleOutput()}>
-        <box style={{ flexDirection: "column", paddingLeft: 2 }}>
+        <box style={{ flexDirection: "column", paddingLeft: 2 }} {...previewClick}>
           <Index each={visibleOutputLines()}>
             {(line, index) => <text fg={COLOR.dim}>{`${active() ? "│ " : index === 0 ? "└ " : "  "}${truncateLine(line(), contentWidth())}`}</text>}
           </Index>
@@ -95,7 +90,7 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
       </Show>
 
       <Show when={!expanded() && isMcp() && mcpResult().length > 0}>
-        <box style={{ flexDirection: "column", paddingLeft: 2 }}>
+        <box style={{ flexDirection: "column", paddingLeft: 2 }} {...previewClick}>
           <For each={previewOutputLines(mcpResult().join("\n"), TOOL_OUTPUT_PREVIEW_LINES)}>
             {(line, index) => <text fg={COLOR.dim}>{`${index() === 0 ? "└ " : "  "}${truncateLine(line, contentWidth())}`}</text>}
           </For>
@@ -152,22 +147,22 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
   const duration = () => agentDuration(activity()?.startedAt ?? activity()?.createdAt, activity()?.completedAt);
   const width = () => Math.max(24, dims().width - 4);
   const toggle = () => tui.actions.cellExpandedToggle(props.row.id);
+  const toggleClick = createPrimaryClickGesture(toggle);
   return (
     <box
       style={{
         flexDirection: "column",
-        marginBottom: 1,
-        paddingLeft: 1
+        marginBottom: 1
       }}
-      onMouseUp={toggle}
     >
-      <box style={{ flexDirection: "row" }}>
-        <Show when={active()} fallback={<text fg={delegationColor(status())}>{`${delegationGlyph(status())} ${truncateLine(title(), Math.max(12, width() - 18))}`}</text>}>
-          <FaraiSpinner label={truncateLine(title(), Math.max(12, width() - 18))} color={COLOR.accent} />
-        </Show>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={delegationColor(status())} glyph={delegationGlyph(status())} spinning={active()} />
+        <text fg={delegationColor(status())}>{truncateLine(title(), Math.max(12, width() - 18))}</text>
         <text fg={delegationColor(status())}>{`  ${status()}`}</text>
       </box>
-      <text fg={COLOR.dim}>{`  ${[lane(), mode(), duration()].filter(Boolean).join(" · ")}`}</text>
+      <box style={{ paddingLeft: 2 }}>
+        <text fg={COLOR.dim}>{[lane(), mode(), duration()].filter(Boolean).join(" · ")}</text>
+      </box>
       <Show when={expanded()}>
         <ExpandedPanel>
           <text fg={COLOR.dim}>{active() ? "live result" : "result"}</text>
@@ -239,12 +234,12 @@ export function ExplorationRow(props: ExplorationRowProps): JSX.Element {
   const dims = useTerminalDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const active = () => isActiveToolStatus(props.row.status);
+  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => tui.actions.cellExpandedToggle(props.row.id)}>
-      <box style={{ flexDirection: "row" }}>
-        <Show when={active()} fallback={<text fg={COLOR.text}>{"• explored"}</text>}>
-          <FaraiSpinner label="exploring" color={COLOR.accent} />
-        </Show>
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={active() ? COLOR.accent : COLOR.text} spinning={active()} />
+        <text fg={active() ? COLOR.accent : COLOR.text}>{active() ? "exploring" : "explored"}</text>
       </box>
       <box style={{ flexDirection: "column", paddingLeft: 2 }}>
         <For each={props.row.items}>{(item) => <ExplorationItemRow item={item} expanded={expanded()} width={dims().width} />}</For>

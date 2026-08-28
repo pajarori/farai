@@ -7,7 +7,7 @@ import { timeoutBackgroundResult } from "../shared/background-result";
 
 export const httpRequestTool: ToolDefinition = {
   name: "http_request",
-  description: "Send a deliberate HTTP request from the managed Kali environment. Browser automation remains the default for ordinary web interaction. Use mode=protocol_test with pathAsIs or an explicit HTTP version when browser normalization would invalidate an exact-path or protocol check.",
+  description: "Send an HTTP request from the managed Kali environment, with optional exact-path and HTTP-version controls.",
   inputSchema: {
     type: "object",
     required: ["url"],

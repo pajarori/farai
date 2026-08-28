@@ -8,6 +8,7 @@ import { isVisibleSlashCommand, listCommands, type Command } from "../command-re
 import { slashMatches as matchSlashCommands } from "../slash-autocomplete";
 import { truncateLine } from "../renderers";
 import type { DialogOption } from "../dialog/fuzzy";
+import { isPrimaryClick } from "../input/mouse";
 
 export function composerHeightFromVisualLines(visualLines: number): number {
   return Math.min(6, Math.max(1, visualLines));
@@ -144,14 +145,14 @@ export function Composer(): JSX.Element {
               <box
                 style={{ flexDirection: "row" }}
                 onMouseUp={(event) => {
-                  if (event.button !== 0 || event.isDragging) return;
+                  if (!isPrimaryClick(event)) return;
                   composer.setDraft(`${option.title} `);
                   tui.actions.slashSuppress(undefined);
                   composer.focus();
                 }}
               >
-                <text fg={active() ? COLOR.accent : COLOR.text}>{`  ${command()}`}</text>
-                <text fg={COLOR.dim}>{desc()}</text>
+                <text selectable={false} fg={active() ? COLOR.accent : COLOR.text}>{`  ${command()}`}</text>
+                <text selectable={false} fg={COLOR.dim}>{desc()}</text>
               </box>
             );
           }}</For>

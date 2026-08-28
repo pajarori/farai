@@ -16,6 +16,7 @@ import { inferFiletype } from "../filetype";
 import { truncateLine } from "../renderers";
 import { syntax } from "../syntax";
 import { COLOR } from "../theme";
+import { isPrimaryClick } from "../input/mouse";
 
 type CenterSurfaceViewProps = {
   frame: CenterSurfaceFrame;
@@ -277,18 +278,20 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
       <box style={{ height: 1, flexShrink: 0, flexDirection: "row" }}>
         <text
           fg={tui.store.ui.proxyWebSocketSection === 0 ? COLOR.accent : COLOR.dim}
-          onMouseUp={() => tui.actions.proxyWebSocketSectionSet(0)}
+          onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyWebSocketSectionSet(0); }}
+          selectable={false}
         >{tui.store.ui.proxyWebSocketSection === 0 ? "› [h] handshake" : "  [h] handshake"}</text>
         <text fg={COLOR.dim}>{"   "}</text>
         <text
           fg={tui.store.ui.proxyWebSocketSection === 1 ? COLOR.accent : COLOR.dim}
-          onMouseUp={() => tui.actions.proxyWebSocketSectionSet(1)}
+          onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyWebSocketSectionSet(1); }}
+          selectable={false}
         >{`${tui.store.ui.proxyWebSocketSection === 1 ? "›" : " "} [m] messages (${props.flow.messages.length})`}</text>
       </box>
       <Show when={tui.store.ui.proxyWebSocketSection === 0} fallback={
         <box style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column", paddingTop: 1 }}>
-          <box style={{ height: 1, flexShrink: 0 }} onMouseUp={() => tui.actions.proxyDetailPaneSet(0)}>
-            <text fg={COLOR.dim}>{webSocketFrameHeader(contentWidth())}</text>
+          <box style={{ height: 1, flexShrink: 0 }} onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyDetailPaneSet(0); }}>
+            <text selectable={false} fg={COLOR.dim}>{webSocketFrameHeader(contentWidth())}</text>
           </box>
           <scrollbox
             ref={messageScroll}
@@ -300,9 +303,9 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
                 <box
                   id={`ws-frame-${props.flow.id}-${index()}`}
                   style={{ height: 1, flexShrink: 0 }}
-                  onMouseUp={() => tui.actions.proxyWebSocketMessageSet(index())}
+                  onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyWebSocketMessageSet(index()); }}
                 >
-                  <text fg={index() === selectedIndex() ? COLOR.accent : COLOR.text}>
+                  <text selectable={false} fg={index() === selectedIndex() ? COLOR.accent : COLOR.text}>
                     {webSocketFrameRow(message, index(), index() === selectedIndex(), contentWidth())}
                   </text>
                 </box>
@@ -318,9 +321,9 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
           <Show when={inspectorGap() > 0}>
             <box style={{ height: 1, flexShrink: 0 }} />
           </Show>
-          <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }} onMouseUp={() => tui.actions.proxyDetailPaneSet(1)}>
-            <text fg={tui.store.ui.proxyDetailPane === 1 ? COLOR.accent : COLOR.text}>{truncateLine(webSocketMessageTitle(selectedMessage(), selectedIndex()), Math.max(12, contentWidth() - 12))}</text>
-            <text fg={COLOR.dim}>{webSocketMessageFiletype(selectedMessage())}</text>
+          <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }} onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyDetailPaneSet(1); }}>
+            <text selectable={false} fg={tui.store.ui.proxyDetailPane === 1 ? COLOR.accent : COLOR.text}>{truncateLine(webSocketMessageTitle(selectedMessage(), selectedIndex()), Math.max(12, contentWidth() - 12))}</text>
+            <text selectable={false} fg={COLOR.dim}>{webSocketMessageFiletype(selectedMessage())}</text>
           </box>
           <scrollbox
             ref={payloadScroll}
@@ -377,9 +380,9 @@ function FlowMessagePanel(props: {
 }): JSX.Element {
   return (
     <box style={{ flexGrow: props.flexGrow, flexShrink: 1, flexBasis: 0, minWidth: 0, minHeight: 0, flexDirection: "column", paddingRight: props.rightPadding ? props.compact ? 3 : 4 : 0, paddingBottom: props.bottomPadding ? props.compact ? 1 : 2 : 0 }}>
-      <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }} onMouseUp={props.onActivate}>
-        <text fg={props.active ? COLOR.accent : COLOR.text}>{props.active ? `› ${props.panel.title}` : `  ${props.panel.title}`}</text>
-        <text fg={COLOR.dim}>{props.panel.filetype}</text>
+      <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }} onMouseUp={(event) => { if (isPrimaryClick(event)) props.onActivate(); }}>
+        <text selectable={false} fg={props.active ? COLOR.accent : COLOR.text}>{props.active ? `› ${props.panel.title}` : `  ${props.panel.title}`}</text>
+        <text selectable={false} fg={COLOR.dim}>{props.panel.filetype}</text>
       </box>
       <scrollbox ref={props.setScrollRef} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1, minHeight: 0, paddingTop: 1 }}>
         <code content={props.panel.content} filetype={props.panel.filetype} syntaxStyle={syntax()} fg={COLOR.text} />

@@ -7,6 +7,7 @@ type FaraiSpinnerProps = {
   label?: string;
   color?: string;
   animated?: boolean;
+  selectable?: boolean;
 };
 
 export function FaraiSpinner(props: FaraiSpinnerProps): JSX.Element {
@@ -17,9 +18,9 @@ export function FaraiSpinner(props: FaraiSpinnerProps): JSX.Element {
   return (
     <Show
       when={props.animated !== false}
-      fallback={<text fg={color()}>{`${FRAMES[0]}${props.label ? ` ${props.label}` : ""}`}</text>}
+      fallback={<text {...(props.selectable === undefined ? {} : { selectable: props.selectable })} fg={color()}>{`${FRAMES[0]}${props.label ? ` ${props.label}` : ""}`}</text>}
     >
-      <text fg={color()}>{`${FRAMES[frame()]}${props.label ? ` ${props.label}` : ""}`}</text>
+      <text {...(props.selectable === undefined ? {} : { selectable: props.selectable })} fg={color()}>{`${FRAMES[frame()]}${props.label ? ` ${props.label}` : ""}`}</text>
     </Show>
   );
 }

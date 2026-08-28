@@ -41,7 +41,8 @@ export async function runOpenTui(input: TuiInput): Promise<void> {
       let resumeHint: string | undefined;
       try {
         const session = await resolveResumeSession(input.runtime, activeSessionId);
-        resumeHint = formatResumeHint(session.id, session.title);
+        const resumable = (await input.runtime.listSessions()).some((candidate) => candidate.id === session.id);
+        if (resumable) resumeHint = formatResumeHint(session.id, session.title);
       } catch {  }
       try { await input.runtime.dispose(); } catch {  }
       managedRenderer.disposeResize();

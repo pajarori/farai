@@ -25,6 +25,7 @@ const RECON = new Set([
   "port_scan", "nmap_scan", "subdomain_enum", "dir_enum", "exploit_search", "kali_tool_search", "notes_add", "evidence_save"
 ]);
 const BROWSER_KERNEL = [
+  "browser_context",
   "browser_navigate",
   "browser_snapshot",
   "browser_find",
@@ -64,7 +65,7 @@ function hasAssessmentIntent(text: string): boolean {
   return matches(text, /\b(audit|assess(?:ment)?|security[ -]?(?:audit|test(?:ing)?)|pentest|scan|target|host|ctf|vulnerability|vuln|exploit|enumerat(?:e|ion)|recon|uji keamanan|cek keamanan|periksa keamanan)\b/);
 }
 
-export function isBrowserFirstTask(session: Session, userText = ""): boolean {
+export function isInteractiveWebTask(session: Session, userText = ""): boolean {
   const text = userText.toLowerCase();
   const assessmentPhase = ["recon", "enumeration", "hypothesis", "verification", "exploit_lab", "post_exploit_lab"].includes(session.phase);
   const hostnameTarget = containsHostnameTarget(text);
@@ -93,55 +94,6 @@ export function isExplicitRawHttpTask(userText = ""): boolean {
   if (/\b(?:ffuf|fuzz(?:er|ing)?|wordlist|brute[ -]?force|load test|benchmark)\b/.test(text)) return true;
   return /\b(?:script|scripting|automate|repeatable|regression|integration test|api test|testing)\b/.test(text)
     && /\b(?:http|https|api|request|response|endpoint)\b/.test(text);
-}
-
-export function rawHttpPlannerPolicyError(input: {
-  session: Session;
-  userText?: string;
-  tool: string;
-  args?: unknown;
-}): string | undefined {
-  if (!isBrowserFirstTask(input.session, input.userText) || isExplicitRawHttpTask(input.userText)) return undefined;
-  const tool = canonicalToolName(input.tool);
-  const args = input.args && typeof input.args === "object" && !Array.isArray(input.args)
-    ? input.args as Record<string, unknown>
-    : {};
-  const deferredName = tool === "tool_invoke" ? canonicalToolName(String(args.name ?? "")) : "";
-  const shellCommand = tool === "shell_exec" ? String(args.command ?? "") : "";
-  const rawArgs = deferredName === "http_request" && args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
-    ? args.arguments as Record<string, unknown>
-    : args;
-  const rawHttp = tool === "http_request"
-    || deferredName === "http_request"
-    || (tool === "shell_exec" && shellUsesAdHocHttp(shellCommand));
-  if (!rawHttp) return undefined;
-  if ((tool === "http_request" || deferredName === "http_request") && isDeliberateRawHttpArgs(rawArgs)) return undefined;
-  if (tool === "shell_exec" && shellUsesExactProtocolHttp(shellCommand)) return undefined;
-  return "Raw HTTP is blocked for ordinary web exploration. Use browser_navigate and browser network tools for normal application behavior. For an exact-path or protocol test that browser normalization would invalidate, use http_request with mode=protocol_test and the required pathAsIs or httpVersion option.";
-}
-
-function shellUsesAdHocHttp(command: string): boolean {
-  return /(?:^|[\s;&|()])(?:curl|wget|httpie|xh)(?:\s|$)/i.test(command)
-    || /\brequests\.(?:get|post|put|patch|delete|request)\s*\(/i.test(command)
-    || /\burllib\.request\./i.test(command);
-}
-
-function isDeliberateRawHttpArgs(args: Record<string, unknown>): boolean {
-  if (args.mode === "protocol_test" || args.mode === "scripted_test") return true;
-  if (args.pathAsIs === true) return true;
-  if (typeof args.httpVersion === "string" && args.httpVersion !== "auto") return true;
-  return typeof args.url === "string" && hasExactProtocolPayload(args.url);
-}
-
-function shellUsesExactProtocolHttp(command: string): boolean {
-  return shellUsesAdHocHttp(command) && (
-    /--path-as-is|--http(?:1\.0|1\.1|2|3)(?:\s|$)|\b(?:raw http|protocol test)\b/i.test(command)
-    || hasExactProtocolPayload(command)
-  );
-}
-
-function hasExactProtocolPayload(value: string): boolean {
-  return /(?:^|[/:])\.\.(?:[/?#]|$)|%(?:00|0a|0d|25|2e|2f|5c)/i.test(value);
 }
 
 function browserKernelOperation(name: string): string | undefined {
@@ -184,7 +136,7 @@ export function selectCapabilities(input: {
     || matches(text, /\b(port|http|https|url|domain|endpoint|directory|nmap)\b/);
   const callback = matches(text, /\b(reverse shell|callback|listener|lhost|oast|out.of.band|ssrf|xxe)\b/);
   const campaign = Boolean(input.session.campaignId);
-  const browserFirst = isBrowserFirstTask(input.session, text);
+  const interactiveWeb = isInteractiveWebTask(input.session, text);
   const rawHttp = isExplicitRawHttpTask(text);
   const selected = new Set<string>(ALWAYS);
   const reasons: Record<string, string> = {};
@@ -196,15 +148,15 @@ export function selectCapabilities(input: {
   }
   if (coding) for (const name of CODING) { selected.add(name); reasons[name] = "coding task"; }
   if (recon) for (const name of RECON) { selected.add(name); reasons[name] = "recon task"; }
-  if (browserFirst) {
+  if (interactiveWeb) {
     for (const tool of selectBrowserKernel(input.tools)) {
       selected.add(tool.name);
-      reasons[tool.name] = "browser-first web task";
+      reasons[tool.name] = "interactive web task";
     }
   }
-  if (rawHttp) {
+  if (interactiveWeb || rawHttp) {
     selected.add("http_request");
-    reasons.http_request = "explicit raw HTTP scripting, testing, fuzzing, or protocol task";
+    reasons.http_request = rawHttp ? "explicit HTTP task" : "network assessment task";
   }
   if (campaign) for (const name of CAMPAIGN) { selected.add(name); reasons[name] = "active campaign"; }
   if (campaign && input.session.phase === "verification") {
@@ -221,7 +173,6 @@ export function selectCapabilities(input: {
   }
 
   for (const tool of input.tools) {
-    if (tool.name === "http_request" && !rawHttp) continue;
     if (exactToolMention(text, tool.name)) {
       selected.add(tool.name);
       reasons[tool.name] = "explicit tool mention";

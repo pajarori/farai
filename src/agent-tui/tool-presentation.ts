@@ -92,6 +92,7 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
   agent_task: ["delegated", "delegating"],
   session_poll: ["checked background work", "checking background work"],
   session_stop: ["stopped background work", "stopping background work"],
+  browser_context: ["managed", "managing"],
   browser_navigate: ["opened", "opening"],
   browser_snapshot: ["captured", "capturing"],
   browser_find: ["searched", "searching"],
@@ -107,6 +108,7 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
 
 const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   agent_task: ["title", "lane", "prompt"],
+  browser_context: ["action", "name", "browser"],
   browser_click: ["element", "target"],
   browser_type: ["element", "target", "text"],
   browser_find: ["text", "regex"],
@@ -277,6 +279,13 @@ function unique(values: string[]): string[] {
 
 function browserToolTitle(tool: string, input: Record<string, unknown>, active: boolean): string | undefined {
   const action = toolActionLabel(tool, active);
+  if (tool === "browser_context") {
+    const contextAction = typeof input.action === "string" ? input.action : "list";
+    const selector = typeof input.name === "string" ? input.name : typeof input.browser === "string" ? input.browser : "";
+    if (contextAction === "create") return `${active ? "creating" : "created"} browser${selector ? ` ${selector}` : ""}`;
+    if (contextAction === "close") return `${active ? "closing" : "closed"} browser${selector ? ` ${selector}` : ""}`;
+    return active ? "listing browsers" : "listed browsers";
+  }
   if (tool === "browser_fill_form") {
     const fields = Array.isArray(input.fields) ? input.fields : [];
     const names = fields.flatMap((field) => field && typeof field === "object" && !Array.isArray(field) && typeof (field as Record<string, unknown>).name === "string"

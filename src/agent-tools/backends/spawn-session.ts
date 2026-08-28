@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type { BackendSession, BackendSessionStatus } from "./types";
 import { id } from "../../utils";
 
@@ -30,17 +31,25 @@ export class SpawnSessionStore {
     const exit = new Promise<void>((resolve) => { settle = resolve; });
     const entry: SessionEntry = { child, stdout: "", stderr: "", allStdout: "", allStderr: "", status: "running", exitCode: null, lastUsedAt: Date.now(), exit };
     this.sessions.set(sessionId, entry);
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     child.stdout.on("data", (chunk) => {
-      const text = chunk.toString();
+      const text = stdoutDecoder.write(chunk);
       entry.stdout = appendBounded(entry.stdout, text);
       entry.allStdout = appendBounded(entry.allStdout, text);
     });
     child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
+      const text = stderrDecoder.write(chunk);
       entry.stderr = appendBounded(entry.stderr, text);
       entry.allStderr = appendBounded(entry.allStderr, text);
     });
     child.on("close", (exitCode) => {
+      const stdoutTail = stdoutDecoder.end();
+      const stderrTail = stderrDecoder.end();
+      entry.stdout = appendBounded(entry.stdout, stdoutTail);
+      entry.allStdout = appendBounded(entry.allStdout, stdoutTail);
+      entry.stderr = appendBounded(entry.stderr, stderrTail);
+      entry.allStderr = appendBounded(entry.allStderr, stderrTail);
       entry.status = exitCode === 0 ? "done" : "error";
       entry.exitCode = exitCode;
       settle();

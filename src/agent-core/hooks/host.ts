@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { localFaraiDir } from "../global-config";
@@ -100,12 +101,16 @@ function runCommandHook(hook: HookDefinition, payload: HookPayload): Promise<str
       stdio: ["pipe", "pipe", "ignore"]
     });
     let stdout = "";
+    const stdoutDecoder = new StringDecoder("utf8");
     let settled = false;
     const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
     const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {  } finish(() => reject(new Error(`hook timed out after ${timeoutMs}ms`))); }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); if (stdout.length > HOOK_OUTPUT_MAX_BYTES * 2) stdout = stdout.slice(0, HOOK_OUTPUT_MAX_BYTES * 2); });
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += stdoutDecoder.write(chunk);
+      if (stdout.length > HOOK_OUTPUT_MAX_BYTES * 2) stdout = stdout.slice(0, HOOK_OUTPUT_MAX_BYTES * 2);
+    });
     child.on("error", (error) => finish(() => reject(error)));
-    child.on("close", () => finish(() => resolve(stdout)));
+    child.on("close", () => finish(() => resolve(`${stdout}${stdoutDecoder.end()}`)));
     try { child.stdin.write(JSON.stringify(payload)); child.stdin.end(); } catch {  }
   });
 }

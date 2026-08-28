@@ -23,17 +23,17 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     prompt: "Perform only the delegated reconnaissance scope. Prefer typed discovery tools, preserve evidence, avoid duplicate probes, and return deduplicated assets with source status and uncertainty.",
     tools: [
       "subdomain_enum", "port_scan", "nmap_scan", "dir_enum", "exploit_search", "kali_tool_search", "shell_exec",
-      "browser_navigate", "browser_snapshot", "browser_find", "browser_network_requests", "browser_network_request",
+      "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_network_requests", "browser_network_request",
       "campaign_asset", "campaign_observe", "campaign_hypothesis", "campaign_search", "notes_add", "evidence_save",
       "session_poll", "session_stop", "tool_output_read"
     ]
   },
   {
     id: "web",
-    description: "browser-first web application exploration and verification",
-    prompt: "Audit only the delegated web scope. Start with browser behavior, use raw HTTP only for deliberate protocol tests, preserve exact evidence, and return proven findings separately from uncertainty.",
+    description: "web application exploration and verification",
+    prompt: "Audit only the delegated web scope. Use browser, HTTP, and shell capabilities as appropriate, preserve exact evidence, and return proven findings separately from uncertainty.",
     tools: [
-      "browser_navigate", "browser_snapshot", "browser_find", "browser_click", "browser_fill_form", "browser_type",
+      "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_click", "browser_fill_form", "browser_type",
       "browser_press_key", "browser_wait_for", "browser_tabs", "browser_network_requests", "browser_network_request",
       "http_request", "dir_enum", "exploit_search", "kali_tool_search", "shell_exec", "campaign_observe",
       "campaign_hypothesis", "campaign_test", "notes_add", "evidence_save", "session_poll", "session_stop", "tool_output_read"
@@ -53,7 +53,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     description: "independent verification of evidence and candidate findings",
     prompt: "Independently verify only the delegated claim. Establish a baseline, run the smallest discriminating test, save evidence, and return proven, disproven, or inconclusive with exact reasoning.",
     tools: [
-      "browser_navigate", "browser_snapshot", "browser_find", "browser_network_requests", "browser_network_request",
+      "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_network_requests", "browser_network_request",
       "http_request", "shell_exec", "campaign_search", "campaign_test", "campaign_verify", "evidence_save",
       "report_add_finding", "tool_output_read"
     ]

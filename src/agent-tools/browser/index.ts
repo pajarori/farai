@@ -1,5 +1,6 @@
 import type { ToolDefinition, ToolResult } from "../../types";
 import { callMcpCapabilityTool, isMcpErrorResult, renderMcpToolResult } from "../mcp-manager";
+import { browserContextManager, type BrowserContextActivity } from "./context-manager";
 import { browserHumanOutput, browserObservationSignature, browserProtocolWarning } from "./observation";
 
 export { browserHumanOutput, browserObservationSignature } from "./observation";
@@ -12,34 +13,57 @@ export async function executeBrowserOperation(input: {
   session: Parameters<BrowserCapabilityCall>[0]["session"];
   args: Record<string, unknown>;
   signal?: AbortSignal;
-}, call: BrowserCapabilityCall = callMcpCapabilityTool): Promise<ToolResult> {
-  const invoke = async (tool: string, args: Record<string, unknown>): Promise<unknown> => await call({
+}, call?: BrowserCapabilityCall): Promise<ToolResult> {
+  const browserArgs = { ...input.args };
+  const browserSelector = typeof browserArgs.browser === "string" ? browserArgs.browser : undefined;
+  delete browserArgs.browser;
+  if (call || !input.session) {
+    const capabilityCall = call ?? callMcpCapabilityTool;
+    const invoke = async (tool: string, args: Record<string, unknown>): Promise<unknown> => await capabilityCall({
+      workspace: input.workspace,
+      ...(input.session ? { session: input.session } : {}),
+      preferredServer: "playwright",
+      tool,
+      args,
+      ...(input.signal ? { signal: input.signal } : {})
+    });
+    return await performBrowserOperation(input.operation, browserArgs, invoke);
+  }
+  const routed = await browserContextManager.runOperation({
     workspace: input.workspace,
-    ...(input.session ? { session: input.session } : {}),
-    preferredServer: "playwright",
-    tool,
-    args,
+    session: input.session,
+    ...(browserSelector !== undefined ? { browser: browserSelector } : {}),
     ...(input.signal ? { signal: input.signal } : {})
-  });
-  const result = await invoke(input.operation, input.args);
+  }, async (invoke, context) => await performBrowserOperation(input.operation, browserArgs, invoke, context));
+  return routed.value;
+}
+
+async function performBrowserOperation(
+  operation: string,
+  args: Record<string, unknown>,
+  invoke: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
+  context?: BrowserContextActivity
+): Promise<ToolResult> {
+  const result = await invoke(operation, args);
   let output = renderBrowserResult(result);
   if (isMcpErrorResult(result)) {
     const normalized = normalizeBrowserOutput(output);
     return {
       ok: false,
-      summary: `${input.operation} failed`,
+      summary: `${operation} failed`,
       output: normalized,
       metadata: {
         browserBackend: "mcp",
-        browserOperation: input.operation,
-        observationSignature: browserObservationSignature(input.operation, normalized)
+        browserOperation: operation,
+        ...(context ? { browserContextId: context.id, browserContextName: context.name } : {}),
+        observationSignature: browserObservationSignature(operation, normalized, context?.id)
       }
     };
   }
 
   let snapshotInlined = false;
   let snapshotError: string | undefined;
-  if (input.operation === "browser_navigate" && hasInternalBrowserArtifact(output)) {
+  if (operation === "browser_navigate" && hasInternalBrowserArtifact(output)) {
     output = normalizeBrowserOutput(output);
     try {
       const snapshot = await invoke("browser_snapshot", {});
@@ -57,18 +81,19 @@ export async function executeBrowserOperation(input: {
     output = normalizeBrowserOutput(output);
   }
 
-  const protocolWarning = browserProtocolWarning(input.operation, input.args, output);
+  const protocolWarning = browserProtocolWarning(operation, args, output);
   if (protocolWarning) output = `${output}\n\n### Protocol Verification Required\n${protocolWarning}`;
 
   return {
     ok: true,
-    summary: `${input.operation} completed`,
+    summary: `${operation} completed`,
     output,
     metadata: {
       browserBackend: "mcp",
-      browserOperation: input.operation,
-      observationSignature: browserObservationSignature(input.operation, output),
-      ...(input.operation === "browser_navigate" ? { snapshotInlined } : {}),
+      browserOperation: operation,
+      ...(context ? { browserContextId: context.id, browserContextName: context.name } : {}),
+      observationSignature: browserObservationSignature(operation, output, context?.id),
+      ...(operation === "browser_navigate" ? { snapshotInlined } : {}),
       ...(protocolWarning ? { exactProtocolVerificationRequired: true } : {}),
       ...(snapshotError ? { snapshotError } : {})
     }
@@ -84,11 +109,11 @@ function browserTool(input: {
 }): ToolDefinition {
   return {
     name: input.name,
-    description: `${input.description} Uses the session's persistent Playwright-compatible browser backend.`,
-    inputSchema: input.inputSchema,
+    description: `${input.description} Optionally target a named browser context.`,
+    inputSchema: withBrowserSelector(input.inputSchema),
     mutates: input.mutates,
     timeoutMs: 120_000,
-    parallel: false,
+    parallel: true,
     concurrencyScope: "session",
     renderHuman: (result) => browserHumanOutput(result.output ?? "") || (result.ok ? "" : result.summary),
     renderModel: (result) => result.output ?? result.summary,
@@ -141,7 +166,107 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
   additionalProperties: false
 });
 
+function withBrowserSelector(schema: Record<string, unknown>): Record<string, unknown> {
+  const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+    ? schema.properties as Record<string, unknown>
+    : {};
+  return {
+    ...schema,
+    properties: {
+      browser: { type: "string", description: "Context name or UUID." },
+      ...properties
+    }
+  };
+}
+
+const browserContextTool: ToolDefinition = {
+  name: "browser_context",
+  description: "Create, list, or close isolated named browser contexts.",
+  inputSchema: objectSchema({
+    action: { type: "string", enum: ["create", "list", "close"] },
+    name: { type: "string", description: "Unique context name." },
+    browser: { type: "string", description: "Context name or UUID." }
+  }, ["action"]),
+  mutates: true,
+  timeoutMs: 120_000,
+  parallel: true,
+  concurrencyScope: "session",
+  renderHuman: browserContextHumanOutput,
+  renderModel: (result) => result.output ?? result.summary,
+  run: async (args, context): Promise<ToolResult> => {
+    const input = args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {};
+    const action = String(input.action ?? "");
+    try {
+      if (action === "list") {
+        const contexts = browserContextManager.list(context.session);
+        return {
+          ok: true,
+          summary: `listed ${contexts.length} browser context${contexts.length === 1 ? "" : "s"}`,
+          output: contexts.length > 0 ? JSON.stringify(contexts, null, 2) : "No browser contexts are active.",
+          metadata: { browserContextAction: "list", browserContexts: contexts }
+        };
+      }
+      if (action === "create") {
+        if (typeof input.name !== "string") throw new Error("browser_context create requires name");
+        const created = await browserContextManager.create({
+          workspace: context.workspace,
+          session: context.session,
+          name: input.name,
+          ...(context.signal ? { signal: context.signal } : {})
+        });
+        return {
+          ok: true,
+          summary: `browser ${created.name} ready`,
+          output: JSON.stringify(created, null, 2),
+          metadata: { browserContextAction: "create", browserContext: created, browserContextId: created.id, browserContextName: created.name }
+        };
+      }
+      if (action === "close") {
+        if (typeof input.browser !== "string") throw new Error("browser_context close requires browser");
+        const closed = await browserContextManager.close({
+          session: context.session,
+          browser: input.browser,
+          ...(context.signal ? { signal: context.signal } : {})
+        });
+        return {
+          ok: true,
+          summary: `browser ${closed.name} closed`,
+          output: `Closed browser ${closed.name} (${closed.id}).`,
+          metadata: { browserContextAction: "close", browserContext: closed, browserContextId: closed.id, browserContextName: closed.name }
+        };
+      }
+      throw new Error(`Unsupported browser_context action: ${action || "(missing)"}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, summary: `browser_context ${action || "operation"} failed`, output: message };
+    }
+  }
+};
+
+function browserContextHumanOutput(result: ToolResult): string {
+  if (!result.ok) return result.output ?? result.summary;
+  const action = result.metadata?.browserContextAction;
+  if (action === "list") {
+    const contexts = Array.isArray(result.metadata?.browserContexts)
+      ? result.metadata.browserContexts as BrowserContextActivity[]
+      : [];
+    if (contexts.length === 0) return "No browsers active.";
+    return contexts.map((context) => formatBrowserContext(context)).join("\n");
+  }
+  const context = result.metadata?.browserContext;
+  if (context && typeof context === "object" && !Array.isArray(context)) {
+    const activity = context as BrowserContextActivity;
+    return formatBrowserContext(activity, action === "close" ? "closed" : undefined);
+  }
+  return result.summary;
+}
+
+function formatBrowserContext(context: BrowserContextActivity, status: string = context.status): string {
+  return `${context.name} · ${status} · ${context.id}`;
+}
+
 export const browserTools: ToolDefinition[] = [
+  browserContextTool,
   browserTool({
     name: "browser_navigate",
     operation: "browser_navigate",

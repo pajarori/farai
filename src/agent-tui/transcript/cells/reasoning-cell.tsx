@@ -4,9 +4,10 @@ import type { TimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
 import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
-import { FaraiSpinner } from "../../common/spinner";
 import { useTuiStore } from "../../context/store";
 import { ExpandedPanel } from "./expanded-panel";
+import { TranscriptMarker } from "./transcript-marker";
+import { createPrimaryClickGesture } from "../../input/mouse";
 
 type ReasoningRowProps = {
   row: Extract<TimelineRow, { kind: "thinking" }>;
@@ -17,12 +18,12 @@ export function ReasoningRow(props: ReasoningRowProps): JSX.Element {
   const dims = useTerminalDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const label = () => truncateLine(props.row.title === "reasoning" ? "thinking" : props.row.title, Math.max(1, dims().width - 4));
+  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => tui.actions.cellExpandedToggle(props.row.id)}>
-      <box style={{ flexDirection: "row" }}>
-        <Show when={props.row.streaming} fallback={<text fg={COLOR.dim}>{`• ${label()}`}</text>}>
-          <FaraiSpinner label={label()} color={COLOR.dim} />
-        </Show>
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={COLOR.dim} spinning={props.row.streaming} />
+        <text fg={COLOR.dim}>{label()}</text>
       </box>
       <Show when={expanded() && props.row.body.trim()}>
         <ExpandedPanel>

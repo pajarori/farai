@@ -58,6 +58,7 @@ type ManagedMcpServer = {
   client: McpStdioClient;
   toolNames: Set<string>;
   proxyStarted: boolean;
+  proxyStartTask?: Promise<void>;
 };
 
 type McpRefreshPlan = {
@@ -91,6 +92,8 @@ export class McpServerManager {
   private readonly lastConfigPathByScope = new Map<string, string>();
   private readonly refreshEpochs = new Map<string, number>();
   private nextRefreshEpoch = 0;
+
+  constructor(private readonly options: { reservedServers?: readonly string[]; reserveServer?: (config: ExternalMcpServer) => boolean } = {}) {}
 
   listTools(session?: Session | string): ToolDefinition[] {
     return [...(this.toolsByScope.get(mcpScope(session))?.values() ?? [])];
@@ -164,6 +167,26 @@ export class McpServerManager {
     return this.servers.has(scopedServerKey(session, name));
   }
 
+  async ensureProxyReady(input: McpRefreshInput, expectedPort?: number): Promise<void> {
+    await this.refresh({ ...input, background: false, includeResources: false });
+    const scope = mcpScope(input.session);
+    const managed = [...this.servers.entries()]
+      .filter(([key]) => key.startsWith(`${scope}:`))
+      .map(([, server]) => server)
+      .find((server) => server.config.mitmproxy?.autoStartProxy
+        && (expectedPort === undefined || server.config.mitmproxy.port === expectedPort));
+    if (!managed) {
+      const port = expectedPort === undefined ? "" : ` on port ${expectedPort}`;
+      throw new Error(`No enabled managed mitmproxy server is configured${port}`);
+    }
+    await this.ensureInitialized(managed);
+    if (!managed.toolNames.has("start_proxy")) {
+      throw new Error(`MCP server ${managed.config.name} does not provide start_proxy`);
+    }
+    await this.autostartServer(input, managed);
+    this.updateProxyStatus(input, scope, managed.config.name, managed);
+  }
+
   async refresh(input: McpRefreshInput): Promise<ToolDefinition[]> {
     const plan = this.prepareRefreshPlan(input);
     this.applyStatusPlaceholders(plan);
@@ -215,7 +238,10 @@ export class McpServerManager {
     this.lastConfigPathByScope.set(scope, [configPath("global"), configPath("project", input.workspace)].join(", "));
     const allConfigs = mcpServersFromConfig(loadConfig(input.workspace).mcpServers ?? {});
     const effectivePort = resolveMcpPort(allConfigs, input.portOffset ?? 0);
-    const resolvedConfigs = allConfigs.map((config) => applyMcpPortTemplate(config, effectivePort));
+    const reserved = new Set(this.options.reservedServers ?? []);
+    const resolvedConfigs = allConfigs
+      .filter((config) => !reserved.has(config.name) && !this.options.reserveServer?.(config))
+      .map((config) => applyMcpPortTemplate(config, effectivePort));
     const configs = resolvedConfigs.filter((server) => server.enabled);
     const active = new Set(configs.map((server) => scopedServerKey(input.session, server.name)));
     return {
@@ -518,30 +544,7 @@ export class McpServerManager {
   }
 
   private async prepareConfig(input: McpRefreshInput, config: ExternalMcpServer): Promise<ExternalMcpServer> {
-    if (!config.runInContainer) {
-      return {
-        ...config,
-        cwd: config.cwd ?? input.workspace
-      };
-    }
-    if (!input.session) throw new Error(`MCP server ${config.name} requires a session for container execution`);
-    const result = await new KaliContainerBackend({ workspace: input.workspace, containerName: containerNameForSession(input.session.id) }).startPersistent();
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || `Could not start MCP container ${containerNameForSession(input.session.id)}`);
-    }
-    return {
-      ...config,
-      command: "docker",
-      args: [
-        "exec",
-        "-i",
-        containerNameForSession(input.session.id),
-        "bash",
-        "-lc",
-        containerMcpShellCommand(config, containerMcpRuntimeDir(input.session.id, config.name))
-      ],
-      cwd: input.workspace
-    };
+    return await prepareMcpServerProcess(input, config);
   }
 
   private async ensureInitialized(server: ManagedMcpServer): Promise<void> {
@@ -594,14 +597,24 @@ export class McpServerManager {
     const mitmproxy = server.config.mitmproxy;
     if (!mitmproxy?.autoStartProxy) return;
     if (!server.toolNames.has("start_proxy")) return;
-    if (!server.proxyStarted) {
-      const args: Record<string, unknown> = { port: mitmproxy.port };
-      if (mitmproxy.dumpFile) args.dump_file = mitmproxy.dumpFile;
-      if (mitmproxy.upstreamProxy) args.upstream_proxy = mitmproxy.upstreamProxy;
-      await server.client.callTool("start_proxy", args);
-      server.proxyStarted = true;
+    if (server.proxyStartTask) return await server.proxyStartTask;
+    const task = (async () => {
+      if (!server.proxyStarted) {
+        const args: Record<string, unknown> = { port: mitmproxy.port };
+        if (mitmproxy.dumpFile) args.dump_file = mitmproxy.dumpFile;
+        if (mitmproxy.upstreamProxy) args.upstream_proxy = mitmproxy.upstreamProxy;
+        await server.client.callTool("start_proxy", args);
+        server.proxyStarted = true;
+      }
+      await this.enableTransparentProxy(input, server, mitmproxy.port);
+    })();
+    server.proxyStartTask = task;
+    try {
+      await task;
+    } catch (error) {
+      if (server.proxyStartTask === task) delete server.proxyStartTask;
+      throw error;
     }
-    await this.enableTransparentProxy(input, server, mitmproxy.port);
   }
 
   private async enableTransparentProxy(input: McpRefreshInput, server: ManagedMcpServer, proxyPort: number): Promise<void> {
@@ -809,7 +822,7 @@ export function applyMcpPortTemplate(config: ExternalMcpServer, port: number): E
   };
 }
 
-export const mcpServerManager = new McpServerManager();
+export const mcpServerManager = new McpServerManager({ reserveServer: isPlaywrightMcpServer });
 
 export async function refreshMcpTools(input: McpRefreshInput): Promise<ToolDefinition[]> {
   return await mcpServerManager.refresh(input);
@@ -841,6 +854,49 @@ export async function callMcpServerTool(input: McpRefreshInput & { server: strin
 
 export async function callMcpCapabilityTool(input: McpRefreshInput & { preferredServer?: string; tool: string; args?: Record<string, unknown> }): Promise<unknown> {
   return await mcpServerManager.callCapabilityTool(input);
+}
+
+export async function ensureMcpProxyReady(input: McpRefreshInput, expectedPort?: number): Promise<void> {
+  await mcpServerManager.ensureProxyReady(input, expectedPort);
+}
+
+export function configuredMcpServer(workspace: string, preferredName: string): ExternalMcpServer | undefined {
+  const rawConfigs = mcpServersFromConfig(loadConfig(workspace).mcpServers ?? {});
+  const effectivePort = resolveMcpPort(rawConfigs);
+  const configs = rawConfigs.map((config) => applyMcpPortTemplate(config, effectivePort)).filter((config) => config.enabled);
+  return configs.find((config) => config.name === preferredName)
+    ?? (preferredName === "playwright" ? configs.find(isPlaywrightMcpServer) : configs.find((config) => config.command.includes(preferredName)));
+}
+
+function isPlaywrightMcpServer(config: ExternalMcpServer): boolean {
+  const command = [config.command, ...config.args].join(" ").toLowerCase();
+  return config.name === "playwright" || command.includes("playwright-mcp") || command.includes("@playwright/mcp");
+}
+
+export async function prepareMcpServerProcess(input: McpRefreshInput, config: ExternalMcpServer): Promise<ExternalMcpServer> {
+  if (!config.runInContainer) {
+    return {
+      ...config,
+      cwd: config.cwd ?? input.workspace
+    };
+  }
+  if (!input.session) throw new Error(`MCP server ${config.name} requires a session for container execution`);
+  const containerName = containerNameForSession(input.session.id);
+  const result = await new KaliContainerBackend({ workspace: input.workspace, containerName }).startPersistent();
+  if (result.exitCode !== 0) throw new Error(result.stderr || `Could not start MCP container ${containerName}`);
+  return {
+    ...config,
+    command: "docker",
+    args: [
+      "exec",
+      "-i",
+      containerName,
+      "bash",
+      "-lc",
+      containerMcpShellCommand(config, containerMcpRuntimeDir(input.session.id, config.name))
+    ],
+    cwd: input.workspace
+  };
 }
 
 export function mcpToolName(server: string, tool: string): string {

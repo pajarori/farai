@@ -5,6 +5,7 @@ import type { AgentPromptResult, BackgroundJob, Message, MessageWithParts, Note,
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/registry";
 import { formatMcpInventory, listMcpServerStatuses, stopMcpToolsForSession } from "../agent-tools/mcp-manager";
+import { stopBrowserContextsForSession } from "../agent-tools/browser/context-manager";
 import { renderCtfNotes } from "../agent-report/markdown";
 import { serviceRegistry } from "../agent-tools/services/registry";
 import { containerNameForSession, KaliContainerBackend, type ContainerStatus } from "../agent-container/kali";
@@ -41,7 +42,6 @@ import { loadConfig, type FaraiConfig } from "./config";
 import { canonicalToolName } from "../tool-names";
 import { LspManager } from "../agent-lsp";
 import { BACKGROUND_MAILBOX_BATCH_SIZE, backgroundCompletionArtifact, renderMailboxItems } from "./mailbox-render";
-import { rawHttpPlannerPolicyError } from "./capability-admission";
 import { browserObservationSignature } from "../agent-tools/browser/observation";
 import { classifyModelRetry, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from "./provider/retry";
 import { isInternalMetaReasoning, normalizeReasoningSummary } from "./reasoning-summary";
@@ -265,6 +265,7 @@ export class AgentRuntime {
         }
         if (this.store.isOpen()) {
           for (const session of this.store.listSessions(10_000, { includeArchived: true })) {
+            await stopBrowserContextsForSession(session.id);
             await stopMcpToolsForSession(session.id);
             serviceRegistry.unregisterSession(session.id);
           }
@@ -579,7 +580,6 @@ export class AgentRuntime {
       ...(model ? { model } : {}),
       ...options
     });
-    this.recordSession(session);
     return session;
   }
 
@@ -724,19 +724,6 @@ export class AgentRuntime {
     return undefined;
   }
 
-  private latestUserRequest(sessionId: string): string | undefined {
-    const messages = this.store.listContextMessages(sessionId, 100_000);
-    for (const message of [...messages].reverse()) {
-      if (message.role !== "user") continue;
-      for (const part of [...message.parts].reverse()) {
-        if (part.type !== "text") continue;
-        const text = (part.payload as { text?: unknown }).text;
-        if (typeof text === "string" && text.trim()) return text.trim();
-      }
-    }
-    return undefined;
-  }
-
   private drainPendingUserInput(session: Session, turn: Turn): ProviderSlot | undefined {
     const items = this.mailbox.claim(session.id, "interrupt");
     if (items.length === 0) return undefined;
@@ -852,6 +839,7 @@ export class AgentRuntime {
     this.store.cancelMailbox(sessionId);
     const session = this.store.archiveSession(sessionId);
     await this.lsp.shutdownSession(sessionId).catch(() => {});
+    await stopBrowserContextsForSession(sessionId).catch(() => {});
     await stopMcpToolsForSession(sessionId).catch(() => {});
     await new KaliContainerBackend({ workspace: this.workspace, containerName: containerNameForSession(sessionId) })
       .stopPersistent()
@@ -878,6 +866,7 @@ export class AgentRuntime {
       this.store.cancelMailbox(session.id);
       await this.cancelSessionJobs(session.id);
       await this.lsp.shutdownSession(session.id).catch(() => {});
+      await stopBrowserContextsForSession(session.id).catch(() => {});
       await stopMcpToolsForSession(session.id).catch(() => {});
       serviceRegistry.unregisterSession(session.id);
       if (options.stopContainers !== false) {
@@ -955,6 +944,8 @@ export class AgentRuntime {
   }
 
   async stopContainer(sessionId: string): Promise<void> {
+    await stopBrowserContextsForSession(sessionId).catch(() => {});
+    await stopMcpToolsForSession(sessionId).catch(() => {});
     const result = await new KaliContainerBackend({ workspace: this.workspace, containerName: containerNameForSession(sessionId) }).stopPersistent();
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not stop Kali container");
   }
@@ -1191,6 +1182,7 @@ export class AgentRuntime {
     this.hooks = undefined;
     this.reconcileBackgroundJobs(session.id);
     const turn = this.store.createTurn(session.id, source === "user" ? input : "background completion", this.runtimeId);
+    this.recordSession(session);
     let contextMessage: Message;
     if (source === "user") {
       const userMessage = this.store.createMessage({ sessionId: session.id, turnId: turn.id, role: "user" });
@@ -2111,22 +2103,6 @@ export class AgentRuntime {
       this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "planner_error", payload });
       return { shouldContinue: !sawResponse };
     }
-    const latestUserRequest = this.latestUserRequest(session.id);
-    const policyError = rawHttpPlannerPolicyError({
-      session,
-      ...(latestUserRequest ? { userText: latestUserRequest } : {}),
-      tool: action.tool,
-      args: action.args
-    });
-    if (policyError) {
-      const toolCallId = action.toolCallId ?? action.tool;
-      this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "tool_call", payload: { record: { id: toolCallId, tool: action.tool, args: action.args } } });
-      this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "tool_result", payload: { toolCallId, tool: action.tool, result: policyError } });
-      const payload = { turnId: turn.id, step, tool: action.tool, error: policyError, recoverable: true, policy: "browser_first" };
-      this.event(session.id, "planner_error", payload);
-      this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "planner_error", payload });
-      return { shouldContinue: true };
-    }
     if (action.tool === "subdomain_enum") {
       const duplicate = this.store.listToolCalls(session.id, 200).find((call) => (
         call.turnId === turn.id
@@ -2733,17 +2709,17 @@ export class AgentRuntime {
       list.push(controller);
       this.turnControllers.set(turnId, list);
     }
-    let liveOutputBuffer = "";
+    let liveRawOutputBuffer = "";
     let lastLiveFlush = 0;
     let liveOutputVisible = false;
     let liveOutputSettled = false;
     let liveOutputTimer: ReturnType<typeof setTimeout> | undefined;
     const timelinePartId = toolCall.timelinePartId;
     const flushLiveOutput = (): void => {
-      if (!lease.isActive() || !timelinePartId || liveOutputSettled || !liveOutputBuffer) return;
+      if (!lease.isActive() || !timelinePartId || liveOutputSettled || !liveRawOutputBuffer) return;
       liveOutputVisible = true;
       lastLiveFlush = Date.now();
-      this.store.updatePartPayload(timelinePartId, { record: { ...toolCall, liveOutput: liveOutputBuffer } });
+      this.store.updatePartPayload(timelinePartId, { record: { ...toolCall, liveOutput: sanitizeToolOutput(liveRawOutputBuffer) } });
     };
     const settleLiveOutput = (): void => {
       liveOutputSettled = true;
@@ -2752,7 +2728,7 @@ export class AgentRuntime {
     };
     const onOutputChunk = timelinePartId
       ? (chunk: string): void => {
-          liveOutputBuffer = takeBytes(sanitizeToolOutput(liveOutputBuffer + chunk), LIVE_OUTPUT_MAX_BYTES, "tail");
+          liveRawOutputBuffer = takeBytes(liveRawOutputBuffer + chunk, LIVE_OUTPUT_MAX_BYTES, "tail");
           if (!liveOutputVisible) {
             liveOutputTimer ??= setTimeout(() => {
               liveOutputTimer = undefined;

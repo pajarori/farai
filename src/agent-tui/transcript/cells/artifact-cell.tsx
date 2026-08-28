@@ -6,6 +6,8 @@ import { COLOR } from "../../theme";
 import { useTuiStore } from "../../context/store";
 import { syntax } from "../../syntax";
 import { ExpandedPanel } from "./expanded-panel";
+import { TranscriptMarker } from "./transcript-marker";
+import { createPrimaryClickGesture } from "../../input/mouse";
 
 type ArtifactRowProps = {
   row: Extract<TimelineRow, { kind: "artifact" }>;
@@ -24,14 +26,17 @@ export function ArtifactRow(props: ArtifactRowProps): JSX.Element {
   const dims = useTerminalDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const widths = () => artifactLineWidths(dims().width, props.row.title, props.row.detail);
+  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => tui.actions.cellExpandedToggle(props.row.id)}>
-      <box style={{ flexDirection: "row" }}>
-        <text fg={COLOR.dim}>{"• "}</text>
-        <text fg={COLOR.text}>{truncateLine(props.row.title, widths().title)}</text>
-        <Show when={widths().detail > 0 && props.row.detail}>
-          {(detail) => <text fg={COLOR.dim}>{truncateLine(` · ${detail()}`, widths().detail)}</text>}
-        </Show>
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={COLOR.dim} />
+        <box style={{ flexDirection: "row" }}>
+          <text fg={COLOR.text}>{truncateLine(props.row.title, widths().title)}</text>
+          <Show when={widths().detail > 0 && props.row.detail}>
+            {(detail) => <text fg={COLOR.dim}>{truncateLine(` · ${detail()}`, widths().detail)}</text>}
+          </Show>
+        </box>
       </box>
       <Show when={expanded() && props.row.body}>
         {(body) => (
@@ -66,10 +71,11 @@ export function McpInventoryRow(props: McpInventoryRowProps): JSX.Element {
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const lines = () => props.row.text.split("\n");
   const preview = () => expanded() ? lines() : lines().slice(0, 12);
+  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => tui.actions.cellExpandedToggle(props.row.id)}>
-      <box style={{ flexDirection: "row" }}>
-        <text fg={COLOR.dim}>{"• "}</text>
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={COLOR.dim} />
         <text fg={COLOR.text}>{"mcp tools"}</text>
       </box>
       <box style={{ flexDirection: "column", paddingLeft: 2, ...(expanded() ? { marginTop: 1, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: COLOR.panelActive } : {}) }}>
@@ -88,11 +94,15 @@ export function FindingRow(props: FindingRowProps): JSX.Element {
   const tui = useTuiStore();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const color = () => severityColor(props.row.severity);
+  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => tui.actions.cellExpandedToggle(props.row.id)}>
-      <box style={{ flexDirection: "row" }}>
-        <text fg={color()}>{`• ${props.row.severity.toLowerCase()} `}</text>
-        <text fg={COLOR.text}>{props.row.title}</text>
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={color()} />
+        <box style={{ flexDirection: "row" }}>
+          <text fg={color()}>{props.row.severity.toLowerCase()}</text>
+          <text fg={COLOR.text}>{` ${props.row.title}`}</text>
+        </box>
       </box>
       <Show when={props.row.detail}>
         {(detail) => <text fg={COLOR.dim}>{`  └ ${detail()}`}</text>}

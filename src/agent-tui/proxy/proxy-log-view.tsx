@@ -9,6 +9,7 @@ import { useTuiStore } from "../context/store";
 import { proxyFlowsForFilter, type ProxyViewFilter } from "../store";
 import { ProxyFlowSplitView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
+import { isPrimaryClick } from "../input/mouse";
 
 export function proxyListHeightFromDrag(startHeight: number, startY: number, pointerY: number): number {
   return startHeight + pointerY - startY;
@@ -196,7 +197,7 @@ export function ProxyLogView(): JSX.Element {
                 id={flow.id}
                 style={{ height: 1, flexDirection: "row" }}
                 onMouseUp={(event) => {
-                  if (suppressProxyRowMouseUp) {
+                  if (!isPrimaryClick(event) || suppressProxyRowMouseUp) {
                     event.preventDefault();
                     return;
                   }
@@ -260,8 +261,9 @@ function ProxySubTabs(props: {
         <>
           <Show when={index() > 0}><text fg={COLOR.border}>{gap()}</text></Show>
           <text
+            selectable={false}
             fg={props.active === tab.filter ? COLOR.accent : COLOR.dim}
-            onMouseUp={() => props.onSelect(tab.filter)}
+            onMouseUp={(event) => { if (isPrimaryClick(event)) props.onSelect(tab.filter); }}
           >{proxySubTabLabel(tab.filter, count(tab.filter), props.width)}</text>
         </>
       )}</For>
@@ -390,23 +392,23 @@ function ProxyRow(props: { flow: ProxyRowFlow; filter: ProxyViewFilter; selected
   return (
     <Show when={props.width >= 96} fallback={
       <>
-        <text fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
-        <text fg={COLOR.dim}>{pad(presentation().kind, 7)}</text>
-        <text fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
-        <text fg={statusColor(props.flow.status)}>{pad(String(props.flow.status ?? "-"), 5)}</text>
-        <text fg={props.selected ? COLOR.accent : COLOR.text}>{compactTarget()}</text>
+        <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
+        <text selectable={false} fg={COLOR.dim}>{pad(presentation().kind, 7)}</text>
+        <text selectable={false} fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
+        <text selectable={false} fg={statusColor(props.flow.status)}>{pad(String(props.flow.status ?? "-"), 5)}</text>
+        <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{compactTarget()}</text>
       </>
     }>
-      <text fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
-      <text fg={COLOR.dim}>{pad(shortTime(props.flow.timestamp), 9)}</text>
-      <text fg={COLOR.dim}>{pad(presentation().kind, 7)}</text>
-      <text fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
-      <text fg={statusColor(props.flow.status)}>{pad(String(props.flow.status ?? "-"), 5)}</text>
-      <text fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.host, 29), 30)}</text>
-      <text fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.path || "/", pathWidth() - 1), pathWidth())}</text>
-      <text fg={COLOR.dim}>{pad(truncate(normalizeContentType(props.flow.contentType), 15), 16)}</text>
-      <text fg={COLOR.dim}>{pad(formatBytes(props.flow.responseBytes ?? props.flow.requestBytes), 8)}</text>
-      <text fg={COLOR.dim}>{formatDuration(props.flow.durationMs)}</text>
+      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
+      <text selectable={false} fg={COLOR.dim}>{pad(shortTime(props.flow.timestamp), 9)}</text>
+      <text selectable={false} fg={COLOR.dim}>{pad(presentation().kind, 7)}</text>
+      <text selectable={false} fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
+      <text selectable={false} fg={statusColor(props.flow.status)}>{pad(String(props.flow.status ?? "-"), 5)}</text>
+      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.host, 29), 30)}</text>
+      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.path || "/", pathWidth() - 1), pathWidth())}</text>
+      <text selectable={false} fg={COLOR.dim}>{pad(truncate(normalizeContentType(props.flow.contentType), 15), 16)}</text>
+      <text selectable={false} fg={COLOR.dim}>{pad(formatBytes(props.flow.responseBytes ?? props.flow.requestBytes), 8)}</text>
+      <text selectable={false} fg={COLOR.dim}>{formatDuration(props.flow.durationMs)}</text>
     </Show>
   );
 }

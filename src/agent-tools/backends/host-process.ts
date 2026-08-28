@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { spawn as spawnPty } from "bun-pty";
 import { truncate } from "../../utils";
 import type { BackendExecResult, BackendSessionResult, ExecutionBackend, SessionKind } from "./types";
@@ -29,6 +30,8 @@ export class HostProcessBackend implements ExecutionBackend {
       const child = spawn("bash", ["-lc", command], { cwd: this.cwd, stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
       let converted = false;
       const timer = setTimeout(() => {
         converted = true;
@@ -45,12 +48,14 @@ export class HostProcessBackend implements ExecutionBackend {
       const abort = () => child.kill("SIGTERM");
       if (opts.signal?.aborted) abort();
       else opts.signal?.addEventListener("abort", abort, { once: true });
-      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+      child.stdout.on("data", (chunk) => { stdout += stdoutDecoder.write(chunk); });
+      child.stderr.on("data", (chunk) => { stderr += stderrDecoder.write(chunk); });
       child.on("close", (exitCode) => {
         clearTimeout(timer);
         opts.signal?.removeEventListener("abort", abort);
         if (converted) return;
+        stdout += stdoutDecoder.end();
+        stderr += stderrDecoder.end();
         resolve({ exitCode, stdout: truncate(stdout), stderr: truncate(stderr), durationMs: Date.now() - started, timedOut: false });
       });
     });

@@ -49,6 +49,23 @@ type BackgroundToolSettlementInput = {
 };
 type BackgroundToolSettlement = { toolCall: ToolCallRecord; timelinePart?: Part };
 
+const RESUMABLE_SESSION_PREDICATE = `(
+  s.summary is not null
+  or exists (select 1 from turns where session_id = s.id)
+  or exists (select 1 from messages where session_id = s.id)
+  or exists (select 1 from tool_calls where session_id = s.id)
+  or exists (select 1 from background_jobs where session_id = s.id)
+  or exists (select 1 from session_mailbox where session_id = s.id)
+  or exists (select 1 from evidence where session_id = s.id)
+  or exists (select 1 from notes where session_id = s.id)
+  or exists (select 1 from findings where session_id = s.id)
+  or exists (select 1 from usage where session_id = s.id)
+  or exists (select 1 from compaction_boundaries where session_id = s.id)
+  or exists (select 1 from memory_items where session_id = s.id)
+  or exists (select 1 from todos where session_id = s.id)
+  or exists (select 1 from output_artifacts where session_id = s.id)
+)`;
+
 export type StoreChange =
   | { kind: "event"; sessionId: string; event: SessionEvent }
   | { kind: "transientEvent"; sessionId: string; event: SessionEvent }
@@ -201,6 +218,23 @@ export class SqliteStore {
         : "select * from sessions where archived_at is null order by updated_at desc limit $limit")
       .all({ $limit: limit }) as Row[];
     return rows.map(sessionFromRow);
+  }
+
+  listResumableSessions(limit = 20, options: { includeArchived?: boolean } = {}): Session[] {
+    const archived = options.includeArchived ? "" : "s.archived_at is null and";
+    const rows = this.database()
+      .query(`select s.* from sessions s
+        where ${archived} ${RESUMABLE_SESSION_PREDICATE}
+        order by s.updated_at desc limit $limit`)
+      .all({ $limit: limit }) as Row[];
+    return rows.map(sessionFromRow);
+  }
+
+  isSessionResumable(sessionId: string): boolean {
+    const row = this.database()
+      .query(`select 1 as resumable from sessions s where s.id = $session and ${RESUMABLE_SESSION_PREDICATE}`)
+      .get({ $session: sessionId }) as Row | null;
+    return Boolean(row);
   }
 
   updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "provider" | "model" | "toolScope">>): Session {

@@ -4,6 +4,8 @@ import { useTuiStore } from "../../context/store";
 import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
 import { ExpandedPanel } from "./expanded-panel";
+import { TranscriptMarker } from "./transcript-marker";
+import { createPrimaryClickGesture } from "../../input/mouse";
 
 type NoticeRowProps = {
   row: Extract<TimelineRow, { kind: "loop_stop" | "compaction" | "error" | "notice" }>;
@@ -31,9 +33,15 @@ export function NoticeRow(props: NoticeRowProps): JSX.Element {
     return undefined;
   };
   const expandable = () => Boolean(body());
+  const toggleClick = createPrimaryClickGesture(() => {
+    if (expandable()) tui.actions.cellExpandedToggle(props.row.id);
+  });
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => expandable() && tui.actions.cellExpandedToggle(props.row.id)}>
-      <text fg={color()}>{`• ${label()}${props.row.kind !== "error" && detail() ? ` · ${detail()}` : ""}`}</text>
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={color()} />
+        <text fg={color()}>{`${label()}${props.row.kind !== "error" && detail() ? ` · ${detail()}` : ""}`}</text>
+      </box>
       <Show when={props.row.kind === "error" && detail()}>
         <box style={{ flexDirection: "column", paddingLeft: 2 }}>
           <text fg={COLOR.dim}>{`└ ${detail()}`}</text>

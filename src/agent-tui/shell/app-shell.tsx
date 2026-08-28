@@ -11,6 +11,7 @@ import { ProxyLogView } from "../proxy/proxy-log-view";
 import { BottomPane } from "../bottom-pane/bottom-pane";
 import { CenterSurfaceView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
+import { isPrimaryClick } from "../input/mouse";
 
 export function AppShell(): JSX.Element {
   const tui = useTuiStore();
@@ -89,9 +90,9 @@ function MainTabs(): JSX.Element {
   };
   return (
     <box style={{ height: 1, flexShrink: 0, flexDirection: "row", paddingLeft: 1, paddingRight: 1 }}>
-      <text fg={active() === "chat" ? COLOR.accent : COLOR.dim} onMouseUp={openChat}>{"[1] chat"}</text>
+      <text selectable={false} fg={active() === "chat" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openChat(); }}>{"[1] chat"}</text>
       <text fg={COLOR.dim}>{"  "}</text>
-      <text fg={active() === "proxy" ? COLOR.accent : COLOR.dim} onMouseUp={openProxy}>{`[2] proxy${proxyCount() ? ` (${proxyCount()})` : ""}`}</text>
+      <text selectable={false} fg={active() === "proxy" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openProxy(); }}>{`[2] proxy${proxyCount() ? ` (${proxyCount()})` : ""}`}</text>
     </box>
   );
 }

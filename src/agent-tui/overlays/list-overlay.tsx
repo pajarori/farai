@@ -9,6 +9,7 @@ import { COLOR } from "../theme";
 import type { OverlayFrame } from "../store";
 import type { AgentThreadSummary } from "../runtime-port";
 import { useTuiStore } from "../context/store";
+import { isPrimaryClick } from "../input/mouse";
 
 type ListOverlayProps = {
   frame: OverlayFrame;
@@ -171,14 +172,14 @@ function OptionRow(props: OptionRowProps): JSX.Element {
     <box
       style={{ flexDirection: "row" }}
       onMouseUp={(event) => {
-        if (event.button !== 0 || event.isDragging || props.row.disabled) return;
+        if (!isPrimaryClick(event) || props.row.disabled) return;
         props.onSelect(props.row.option.id);
       }}
     >
-      <text fg={active() ? COLOR.accent : COLOR.dim}>{prefix()}</text>
-      <text fg={props.row.disabled ? COLOR.dim : COLOR.text}>{truncateLine(title(), Math.max(4, props.descCol - prefix().length - 2))}</text>
+      <text selectable={false} fg={active() ? COLOR.accent : COLOR.dim}>{prefix()}</text>
+      <text selectable={false} fg={props.row.disabled ? COLOR.dim : COLOR.text}>{truncateLine(title(), Math.max(4, props.descCol - prefix().length - 2))}</text>
       <Show when={description()}>
-        <text fg={COLOR.dim}>{`${" ".repeat(gap())}${truncateLine(description(), descWidth())}`}</text>
+        <text selectable={false} fg={COLOR.dim}>{`${" ".repeat(gap())}${truncateLine(description(), descWidth())}`}</text>
       </Show>
     </box>
   );
@@ -240,18 +241,18 @@ function McpServerRow(props: { row: OptionOverlayRow; width: number; onSelect: (
     <box
       style={{ flexDirection: "column" }}
       onMouseUp={(event) => {
-        if (event.button !== 0 || event.isDragging || props.row.disabled) return;
+        if (!isPrimaryClick(event) || props.row.disabled) return;
         props.onSelect(props.row.option.id);
       }}
     >
       <box style={{ flexDirection: "row" }}>
-        <text fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
-        <text fg={color()}>{statusGlyph(statusText())}</text>
-        <text fg={COLOR.text}>{` ${title()}`}</text>
-        <text fg={COLOR.dim}>{` ${statusText()}${footer()}`}</text>
+        <text selectable={false} fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
+        <text selectable={false} fg={color()}>{statusGlyph(statusText())}</text>
+        <text selectable={false} fg={COLOR.text}>{` ${title()}`}</text>
+        <text selectable={false} fg={COLOR.dim}>{` ${statusText()}${footer()}`}</text>
       </box>
       <Show when={detail()}>
-        <text fg={option().id === "mcp-error" || detail().startsWith("error:") ? COLOR.error : COLOR.dim}>{`    ${detail()}`}</text>
+        <text selectable={false} fg={option().id === "mcp-error" || detail().startsWith("error:") ? COLOR.error : COLOR.dim}>{`    ${detail()}`}</text>
       </Show>
     </box>
   );
@@ -326,7 +327,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
                 item().model
               ].filter(Boolean).join(" · ");
             const select = (event: { button: number; isDragging?: boolean }) => {
-              if (event.button !== 0 || event.isDragging) return;
+              if (!isPrimaryClick(event)) return;
               const enabled = props.matches.filter((match) => !match.option.disabled);
               const index = enabled.findIndex((match) => match.option.id === row.option.id);
               if (props.frame.expandedId === row.option.id) {
@@ -348,12 +349,12 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
                 onMouseUp={select}
               >
                 <box style={{ width: "100%", flexDirection: "row" }}>
-                  <text fg={row.selected ? COLOR.accent : COLOR.dim}>{row.selected ? "› " : "  "}</text>
-                  <text fg={agentColor(item())}>{`${agentGlyph(item())} `}</text>
-                  <text fg={COLOR.text}>{truncateLine(item().title, titleWidth())}</text>
-                  <text fg={COLOR.dim}>{`  ${status()}`}</text>
+                  <text selectable={false} fg={row.selected ? COLOR.accent : COLOR.dim}>{row.selected ? "› " : "  "}</text>
+                  <text selectable={false} fg={agentColor(item())}>{`${agentGlyph(item())} `}</text>
+                  <text selectable={false} fg={COLOR.text}>{truncateLine(item().title, titleWidth())}</text>
+                  <text selectable={false} fg={COLOR.dim}>{`  ${status()}`}</text>
                 </box>
-                <text fg={COLOR.dim}>{`    ${truncateLine(metadata(), Math.max(8, props.width - 6))}`}</text>
+                <text selectable={false} fg={COLOR.dim}>{`    ${truncateLine(metadata(), Math.max(8, props.width - 6))}`}</text>
                 <Show when={expanded()}>
                   <box style={{ flexDirection: "column", paddingLeft: 3, paddingTop: 1, paddingBottom: 1 }}>
                     <For each={agentDetailLines(item())}>

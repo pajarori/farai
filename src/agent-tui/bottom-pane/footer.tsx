@@ -76,6 +76,7 @@ export function Footer(props: FooterProps): JSX.Element {
   const rightItems = createMemo(() => footerRightItems(
     tui.store.snapshot.backgroundActivities,
     tui.store.snapshot.subagents,
+    tui.store.snapshot.browserContexts,
     tui.store.snapshot.queuedPrompts.length,
     tui.store.ui.statusDetail,
     contextUsage()

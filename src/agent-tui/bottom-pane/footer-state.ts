@@ -1,4 +1,5 @@
 import type { BackgroundActivitySummary, SubagentActivity } from "../runtime-port";
+import type { BrowserContextActivity } from "../../agent-tools/browser/context-manager";
 import type { ContextUsage } from "../store";
 import type { TimelineRow } from "../renderers";
 
@@ -24,7 +25,7 @@ export type FooterState = {
 
 export type FooterItem = {
   id: string;
-  kind: "context" | "agents" | "background" | "queue" | "message";
+  kind: "context" | "agents" | "browsers" | "background" | "queue" | "message";
   text: string;
   count?: number;
 };
@@ -98,6 +99,7 @@ export function contextualFooter(state: FooterState): string {
 export function footerRightItems(
   backgroundActivities: BackgroundActivitySummary[],
   subagents: SubagentActivity[],
+  browserContexts: BrowserContextActivity[],
   queueSize: number,
   statusDetail: string | undefined,
   contextUsage?: ContextUsage
@@ -119,6 +121,15 @@ export function footerRightItems(
       kind: "agents",
       text: `${activeAgents} agent${activeAgents === 1 ? "" : "s"}`,
       count: activeAgents
+    });
+  }
+  const activeBrowsers = browserContexts.filter((item) => ["starting", "ready", "busy", "closing"].includes(item.status)).length;
+  if (activeBrowsers > 0) {
+    items.push({
+      id: "browsers",
+      kind: "browsers",
+      text: `${activeBrowsers} browser${activeBrowsers === 1 ? "" : "s"}`,
+      count: activeBrowsers
     });
   }
   items.push(...backgroundActivities

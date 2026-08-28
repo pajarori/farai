@@ -221,6 +221,10 @@ async function initLab(args: string[]): Promise<void> {
 
 async function launchTui(workspace: string, sessionId: string | undefined): Promise<void> {
   ensureDefaultUserConfig();
+  if (import.meta.path.endsWith(".ts")) {
+    const sourceTuiPreload = "@opentui/solid/preload";
+    await import(sourceTuiPreload);
+  }
   const { launchOpenTui, SessionResolutionError } = await import("../agent-tui");
   try {
     await launchOpenTui(workspace, sessionId);

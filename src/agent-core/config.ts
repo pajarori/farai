@@ -422,7 +422,7 @@ port = 31337
 
 [mcp_servers.playwright]
 command = "playwright-mcp"
-args = ["--headless", "--browser", "chromium", "--executable-path", "/usr/bin/chromium", "--no-sandbox", "--ignore-https-errors"]
+args = ["--headless", "--browser", "chromium", "--executable-path", "/usr/bin/chromium", "--no-sandbox", "--ignore-https-errors", "--isolated"]
 run_in_container = true
 enabled = true
 required = false

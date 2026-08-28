@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export function browserObservationSignature(operation: string, output: string): string {
+export function browserObservationSignature(operation: string, output: string, contextId?: string): string {
   const normalizedOperation = operation === "browser_navigate" || operation.endsWith("_browser_navigate")
     ? "browser_navigate"
     : operation;
@@ -8,14 +8,16 @@ export function browserObservationSignature(operation: string, output: string): 
   const pageTitle = lastBrowserField(output, "Page Title");
   const httpStatus = lastBrowserField(output, "HTTP status");
   const identity = normalizedOperation === "browser_navigate" && pageUrl
-    ? {
+      ? {
         operation: normalizedOperation,
+        ...(contextId ? { contextId } : {}),
         pageUrl: canonicalBrowserUrl(pageUrl),
         pageTitle: normalizeObservationText(pageTitle ?? ""),
         httpStatus: normalizeObservationText(httpStatus ?? "")
       }
-    : {
+      : {
         operation: normalizedOperation,
+        ...(contextId ? { contextId } : {}),
         output: stableBrowserObservation(output)
       };
   return `browser:${createHash("sha256").update(JSON.stringify(identity)).digest("hex").slice(0, 24)}`;

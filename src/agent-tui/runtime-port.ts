@@ -28,6 +28,7 @@ import type { ModelChoiceInfo } from "../agent-core/model-choices";
 import { listModelChoices } from "../agent-core/model-choices";
 import { loadModelProfiles } from "../agent-core/model-profiles";
 import type { ContextManifest } from "../agent-core/context-engine";
+import { browserContextManager, type BrowserContextActivity } from "../agent-tools/browser/context-manager";
 
 export type TuiEvent =
   | { type: "event.appended"; sessionId: string; event: SessionEvent }
@@ -47,6 +48,7 @@ export type SessionSnapshot = {
   toolCalls: ToolCallRecord[];
   toolInputPreviews: import("../types").ToolInputPreview[];
   backgroundActivities: BackgroundActivitySummary[];
+  browserContexts: BrowserContextActivity[];
   subagents?: SubagentActivity[];
   todos: TodoItem[];
   evidence: Evidence[];
@@ -59,7 +61,7 @@ export type SessionSnapshot = {
   compactionBoundary?: CompactionBoundary | undefined;
 };
 
-export type ActivityState = Pick<SessionSnapshot, "backgroundActivities" | "subagents" | "queuedPrompts">;
+export type ActivityState = Pick<SessionSnapshot, "backgroundActivities" | "browserContexts" | "subagents" | "queuedPrompts">;
 
 export type BackgroundActivitySummary = {
   id: string;
@@ -179,6 +181,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
 
   let activeSessionId: string | undefined;
   let unsubscribeStore: (() => void) | undefined;
+  let unsubscribeBrowserContexts: (() => void) | undefined;
   let eventSubscription: EventSubscription | undefined;
   let eventCursor = 0;
   let sessionsCache: string | undefined;
@@ -333,6 +336,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     const events = store.listEvents(sessionId, 400);
     const toolCalls = store.listToolCalls(sessionId, 25);
     const backgroundActivities = summarizeBackgroundActivities(store, sessionId);
+    const browserContexts = browserContextManager.list(sessionId);
     const subagents = summarizeSubagents(store, sessionId);
     const todos = store.listTodos(sessionId, { limit: 25 });
     const evidence = store.listEvidence(sessionId);
@@ -348,6 +352,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       toolCalls,
       toolInputPreviews: [],
       backgroundActivities,
+      browserContexts,
       subagents,
       todos,
       evidence,
@@ -362,9 +367,9 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
   }
 
   return {
-    async listSessions() { return runtime.listSessions(true); },
+    async listSessions() { return store.listResumableSessions(100, { includeArchived: true }); },
     async listSessionItems() {
-      return runtime.listSessions(true).map((session) => ({
+      return store.listResumableSessions(100, { includeArchived: true }).map((session) => ({
         session,
         evidenceCount: store.listEvidence(session.id).length,
         findingCount: store.listFindings(session.id).length,
@@ -510,6 +515,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     async loadActivityState(sessionId) {
       return {
         backgroundActivities: summarizeBackgroundActivities(store, sessionId),
+        browserContexts: browserContextManager.list(sessionId),
         subagents: summarizeSubagents(store, sessionId),
         queuedPrompts: runtime.listQueuedUserInputs(sessionId)
       };
@@ -548,7 +554,14 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     async cancelTurn(turnId, reason) { return runtime.cancelTurn(turnId, reason); },
     setActiveSession(sessionId) {
       if (sessionId === activeSessionId) return;
+      unsubscribeBrowserContexts?.();
+      unsubscribeBrowserContexts = undefined;
       activeSessionId = sessionId;
+      if (sessionId) {
+        unsubscribeBrowserContexts = browserContextManager.subscribe(sessionId, () => {
+          enqueue({ type: "snapshot.changed", sessionId });
+        });
+      }
       for (let index = pending.length - 1; index >= 0; index -= 1) {
         const event = pending[index]!;
         if (event.type !== "sessions.changed" && event.sessionId !== sessionId) pending.splice(index, 1);
@@ -584,6 +597,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       if (disposed) return;
       disposed = true;
       unsubscribeStore?.(); unsubscribeStore = undefined;
+      unsubscribeBrowserContexts?.(); unsubscribeBrowserContexts = undefined;
       eventSubscription?.close(); eventSubscription = undefined;
       stopFallback();
       if (flushTimer) clearTimeout(flushTimer);

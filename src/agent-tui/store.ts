@@ -8,6 +8,7 @@ import type { ServiceStatus } from "../agent-tools/services/types";
 import type { CompactionBoundary, Evidence, Finding, MemoryItem, MessageWithParts, Note, QueuedUserInput, Session, SessionEvent, TodoItem, ToolCallRecord, ToolInputPreview } from "../types";
 import type { OverlayKind } from "./input/router";
 import { subagentActivityFromJob, type AgentThreadSummary, type BackgroundActivitySummary, type SessionListItem, type SessionSnapshot, type SubagentActivity } from "./runtime-port";
+import type { BrowserContextActivity } from "../agent-tools/browser/context-manager";
 
 export type OverlayFrame =
   | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory" | "mcp"; query: string; index: number }
@@ -55,6 +56,7 @@ export type StoreSnapshot = {
   toolCalls: ToolCallRecord[];
   toolInputPreviews: ToolInputPreview[];
   backgroundActivities: BackgroundActivitySummary[];
+  browserContexts: BrowserContextActivity[];
   subagents: SubagentActivity[];
   todos: TodoItem[];
   evidence: Evidence[];
@@ -217,6 +219,7 @@ function emptySnapshot(): StoreSnapshot {
     toolCalls: [],
     toolInputPreviews: [],
     backgroundActivities: [],
+    browserContexts: [],
     subagents: [],
     todos: [],
     evidence: [],

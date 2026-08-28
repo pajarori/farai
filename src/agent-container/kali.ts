@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { spawn as spawnPty } from "bun-pty";
 import { join } from "node:path";
 import { truncate } from "../utils";
@@ -303,16 +304,18 @@ export class KaliContainerBackend implements ExecutionBackend {
       const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
       let converted = false;
       const onStdout = (chunk: Buffer) => {
-        const text = chunk.toString();
+        const text = stdoutDecoder.write(chunk);
         stdout += text;
-        this.onOutputChunk?.(text, "stdout");
+        if (text) this.onOutputChunk?.(text, "stdout");
       };
       const onStderr = (chunk: Buffer) => {
-        const text = chunk.toString();
+        const text = stderrDecoder.write(chunk);
         stderr += text;
-        this.onOutputChunk?.(text, "stderr");
+        if (text) this.onOutputChunk?.(text, "stderr");
       };
       const timer = setTimeout(() => {
         converted = true;
@@ -337,6 +340,12 @@ export class KaliContainerBackend implements ExecutionBackend {
         clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
         if (converted) return;
+        const stdoutTail = stdoutDecoder.end();
+        const stderrTail = stderrDecoder.end();
+        stdout += stdoutTail;
+        stderr += stderrTail;
+        if (stdoutTail) this.onOutputChunk?.(stdoutTail, "stdout");
+        if (stderrTail) this.onOutputChunk?.(stderrTail, "stderr");
         resolve({
           exitCode,
           stdout: truncate(stdout, maxOutputChars),
@@ -540,11 +549,13 @@ async function runProcess(command: string, args: string[]): Promise<ContainerExe
   }
   let stdout = "";
   let stderr = "";
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
   proc.stdout?.on("data", (chunk) => {
-    stdout += chunk.toString();
+    stdout += stdoutDecoder.write(chunk);
   });
   proc.stderr?.on("data", (chunk) => {
-    stderr += chunk.toString();
+    stderr += stderrDecoder.write(chunk);
   });
   const exitCode = await new Promise<number | null>((resolve) => {
     const timer = setTimeout(() => {
@@ -558,6 +569,8 @@ async function runProcess(command: string, args: string[]): Promise<ContainerExe
     });
     proc.once("close", (code) => {
       clearTimeout(timer);
+      stdout += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
       resolve(code);
     });
   });

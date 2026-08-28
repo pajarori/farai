@@ -103,6 +103,7 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
       events: snapshot.events,
       toolCalls: snapshot.toolCalls,
       backgroundActivities: snapshot.backgroundActivities,
+      browserContexts: snapshot.browserContexts,
       subagents: snapshot.subagents ?? [],
       todos: snapshot.todos,
       evidence: snapshot.evidence,
