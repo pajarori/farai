@@ -1,0 +1,17 @@
+research/
+.claude/
+.git.old/
+test/
+.farai/*
+artifacts/
+node_modules/
+dist/
+.DS_Store
+.env
+.env.*
+!.farai/config.toml.example
+*.md
+!README.md
+!src/agent-skills/library/
+!src/agent-skills/library/**/
+!src/agent-skills/library/**/SKILL.md

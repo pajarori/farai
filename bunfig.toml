@@ -1,0 +1,21 @@
+preload = ["@opentui/solid/preload"]
+
+[install]
+exact = true
+minimumReleaseAge = 259200
+minimumReleaseAgeExcludes = [
+  "@opentui/core",
+  "@opentui/core-darwin-arm64",
+  "@opentui/core-darwin-x64",
+  "@opentui/core-linux-arm64",
+  "@opentui/core-linux-arm64-musl",
+  "@opentui/core-linux-x64",
+  "@opentui/core-linux-x64-musl",
+  "@opentui/core-win32-arm64",
+  "@opentui/core-win32-x64",
+  "@opentui/solid",
+  "opentui-spinner",
+]
+
+[test]
+preload = ["@opentui/solid/preload"]

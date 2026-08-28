@@ -1,0 +1,15 @@
+base {
+  log_debug = off;
+  log_info = off;
+  log = "stderr";
+  daemon = on;
+  redirector = iptables;
+}
+
+redsocks {
+  local_ip = 127.0.0.1;
+  local_port = __LOCAL_PORT__;
+  ip = 127.0.0.1;
+  port = __PROXY_PORT__;
+  type = http-connect;
+}
