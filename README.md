@@ -24,23 +24,12 @@ For CSI/CyBench materials and exploratory benchmark artifacts, see [farai-csi-be
 ## Installation
 
 ```bash
-npm install -g farai
-farai setup
-farai
-```
-
-Or with Bun:
-
-```bash
 bun install -g farai
-farai setup
-farai
 ```
 
 Requirements:
 
 - Bun 1.1+
-- Node.js 20+
 - Docker
 - A model provider/API key, unless using an already configured default provider
 
@@ -52,66 +41,12 @@ Configure Farai and prepare the local runtime:
 farai setup
 ```
 
-Configure a model provider during setup:
-
-```bash
-farai setup \
-  --model openai:gpt-5 \
-  --base-url https://api.openai.com/v1 \
-  --api-key-env OPENAI_API_KEY
-```
-
-Skip heavier setup steps when needed:
-
-```bash
-farai setup --no-docker
-farai setup --no-kb
-```
-
-Check the environment:
-
-```bash
-farai doctor
-```
-
 ## Usage
 
-Open the interactive TUI:
+Open the interactive:
 
 ```bash
 farai
-```
-
-Run a one-shot prompt:
-
-```bash
-farai run "scan the target and summarize exposed services"
-```
-
-Create a named session:
-
-```bash
-farai init --name htb-box --target 10.10.10.10
-```
-
-Resume a session:
-
-```bash
-farai resume htb-box
-```
-
-Change or add a model provider:
-
-```bash
-farai model
-farai model add openai/gpt-5 --base-url https://api.openai.com/v1 --api-key-env OPENAI_API_KEY --set-default
-```
-
-Run benchmark manifests:
-
-```bash
-farai bench run manifest.json --artifacts /tmp/farai-results
-farai bench suite suite.json --artifacts /tmp/farai-results
 ```
 
 ## Commands

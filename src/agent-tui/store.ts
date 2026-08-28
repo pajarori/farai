@@ -20,7 +20,7 @@ export type CenterSurfaceFrame =
   | { kind: "confirm"; title: string; body: string; confirmLabel?: string; cancelLabel?: string }
   | { kind: "proxy_flow"; flow: ProxyFlowDetail }
   | { kind: "report" }
-  | { kind: "container" };
+  | { kind: "container"; refreshToken?: number };
 
 export type UiFrame = OverlayFrame | CenterSurfaceFrame;
 
@@ -36,6 +36,10 @@ export function proxyFlowsForFilter(flows: readonly ProxyFlowSummary[], filter: 
 }
 
 function preferredProxyDetailPane(flow: ProxyFlowSummary | undefined, filter: ProxyViewFilter): 0 | 1 {
+  return flow?.kind === "websocket" && filter !== "http" ? 1 : 0;
+}
+
+function preferredWebSocketSection(flow: ProxyFlowSummary | undefined, filter: ProxyViewFilter): 0 | 1 {
   return flow?.kind === "websocket" && filter !== "http" ? 1 : 0;
 }
 
@@ -88,6 +92,7 @@ export type FaraiTuiStore = {
     proxyFilter: ProxyViewFilter;
     proxySelectedIndex: number;
     proxyDetailPane: 0 | 1;
+    proxyWebSocketSection: 0 | 1;
     proxyWebSocketMessageIndex: number;
     expandedCells: Record<string, boolean>;
     containerStatus: "running" | "stopped" | "missing" | "unknown";
@@ -155,6 +160,7 @@ export type StoreActions = {
   proxySelectedSet: (index: number) => void;
   proxyDetailPaneSet: (pane: 0 | 1) => void;
   proxyDetailPaneMove: (delta: number) => void;
+  proxyWebSocketSectionSet: (section: 0 | 1) => void;
   proxyWebSocketMessageSet: (index: number) => void;
   proxyWebSocketMessageMove: (delta: number) => void;
   cellExpandedToggle: (id: string) => void;
@@ -250,6 +256,7 @@ export function initialStore(workspace: string): FaraiTuiStore {
       proxyFilter: "all",
       proxySelectedIndex: 0,
       proxyDetailPane: 0,
+      proxyWebSocketSection: 0,
       proxyWebSocketMessageIndex: 0,
       expandedCells: {},
       containerStatus: "unknown",
@@ -311,11 +318,13 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.proxyFilter = "all";
         s.ui.proxySelectedIndex = 0;
         s.ui.proxyDetailPane = 0;
+        s.ui.proxyWebSocketSection = 0;
         s.ui.proxyWebSocketMessageIndex = 0;
         s.ui.expandedCells = {};
         s.ui.containerStatus = "unknown";
         s.ui.services = [];
         s.ui.mcpStatuses = [];
+        s.ui.agentThreads = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
         s.ui.mcpStatusError = undefined;
         s.ui.lastError = undefined;
@@ -462,7 +471,12 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       }));
     },
     mainTabSet(tab: FaraiTuiStore["ui"]["activeMainTab"]): void {
-      setStore("ui", "activeMainTab", tab);
+      setStore(produce((s) => {
+        s.ui.activeMainTab = tab;
+        s.ui.overlayStack = [];
+        s.ui.centerSurfaceStack = [];
+        s.ui.centerScroll = { action: "down", sequence: 0 };
+      }));
     },
     proxyFilterSet(filter: ProxyViewFilter): void {
       setStore(produce((s) => {
@@ -472,6 +486,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         const nextIndex = selectedId ? rows.findIndex((flow) => flow.id === selectedId) : -1;
         s.ui.proxySelectedIndex = nextIndex === -1 ? 0 : nextIndex;
         s.ui.proxyDetailPane = preferredProxyDetailPane(rows[s.ui.proxySelectedIndex], filter);
+        s.ui.proxyWebSocketSection = preferredWebSocketSection(rows[s.ui.proxySelectedIndex], filter);
         s.ui.proxyWebSocketMessageIndex = 0;
       }));
     },
@@ -485,6 +500,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         const selectedIndex = selectedId ? rows.findIndex((flow) => flow.id === selectedId) : -1;
         s.ui.proxySelectedIndex = selectedIndex === -1 ? 0 : selectedIndex;
         s.ui.proxyDetailPane = preferredProxyDetailPane(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
+        s.ui.proxyWebSocketSection = preferredWebSocketSection(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
         s.ui.proxyWebSocketMessageIndex = 0;
       }));
     },
@@ -497,12 +513,14 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         if (wasAtNewest || !selectedId) {
           s.ui.proxySelectedIndex = 0;
           s.ui.proxyDetailPane = preferredProxyDetailPane(rows[0], s.ui.proxyFilter);
+          s.ui.proxyWebSocketSection = preferredWebSocketSection(rows[0], s.ui.proxyFilter);
           s.ui.proxyWebSocketMessageIndex = 0;
           return;
         }
         const nextIndex = rows.findIndex((flow) => flow.id === selectedId);
         s.ui.proxySelectedIndex = nextIndex === -1 ? clampIndex(s.ui.proxySelectedIndex, rows.length) : nextIndex;
         s.ui.proxyDetailPane = preferredProxyDetailPane(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
+        s.ui.proxyWebSocketSection = preferredWebSocketSection(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
         if (nextIndex === -1) s.ui.proxyWebSocketMessageIndex = 0;
         else s.ui.proxyWebSocketMessageIndex = Math.min(s.ui.proxyWebSocketMessageIndex, proxyWebSocketMessageLimit(s.ui));
       }));
@@ -512,6 +530,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         const rows = proxyFlowsForFilter(s.ui.proxyFlows, s.ui.proxyFilter);
         s.ui.proxySelectedIndex = clampIndex(s.ui.proxySelectedIndex + delta, rows.length);
         s.ui.proxyDetailPane = preferredProxyDetailPane(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
+        s.ui.proxyWebSocketSection = preferredWebSocketSection(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
         s.ui.proxyWebSocketMessageIndex = 0;
       }));
     },
@@ -520,6 +539,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         const rows = proxyFlowsForFilter(s.ui.proxyFlows, s.ui.proxyFilter);
         s.ui.proxySelectedIndex = clampIndex(index, rows.length);
         s.ui.proxyDetailPane = preferredProxyDetailPane(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
+        s.ui.proxyWebSocketSection = preferredWebSocketSection(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
         s.ui.proxyWebSocketMessageIndex = 0;
       }));
     },
@@ -528,6 +548,9 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     proxyDetailPaneMove(delta: number): void {
       setStore("ui", "proxyDetailPane", (pane) => (pane + delta + 2) % 2 as 0 | 1);
+    },
+    proxyWebSocketSectionSet(section: 0 | 1): void {
+      setStore("ui", "proxyWebSocketSection", section);
     },
     proxyWebSocketMessageSet(index: number): void {
       setStore(produce((s) => {

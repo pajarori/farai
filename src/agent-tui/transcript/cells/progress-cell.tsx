@@ -24,7 +24,7 @@ export function ProgressRow(props: ProgressRowProps): JSX.Element {
 export function PhaseRow(props: PhaseRowProps): JSX.Element {
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
-      <text fg={COLOR.dim}>{`• phase changed · ${props.row.phase}`}</text>
+      <text fg={COLOR.dim}>{`• phase changed · ${props.row.phase}${props.row.detail ? ` · ${props.row.detail}` : ""}`}</text>
     </box>
   );
 }

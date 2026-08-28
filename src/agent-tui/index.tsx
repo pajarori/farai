@@ -23,34 +23,42 @@ export async function runOpenTui(input: TuiInput): Promise<void> {
   const capabilities: TuiCapabilities = input.capabilities ?? { compact: true, cancel: true };
   const initialSessionId = await ensureSession(input);
   let activeSessionId = initialSessionId;
-  const managedRenderer = await createManagedRenderer();
+  let handleRendererDestroy: (() => void) | undefined;
+  const managedRenderer = await createManagedRenderer(() => handleRendererDestroy?.());
   const renderer = managedRenderer.renderer;
 
   let done!: () => void;
   const finished = new Promise<void>((resolve) => { done = resolve; });
-  let exiting = false;
+  let exitPromise: Promise<void> | undefined;
   const onSigint = () => { void exitCleanly(); };
   const onSigterm = () => { void exitCleanly(); };
 
-  const exitCleanly = async (): Promise<void> => {
-    if (exiting) return;
-    exiting = true;
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
-    let resumeHint: string | undefined;
-    try {
-      const session = await resolveResumeSession(input.runtime, activeSessionId);
-      resumeHint = formatResumeHint(session.id, session.title);
-    } catch {  }
-    try { await input.runtime.dispose(); } catch {  }
-    managedRenderer.disposeResize();
-    try { await destroyRenderer(renderer); } catch {  }
-    if (resumeHint) console.log(resumeHint);
-    done();
+  const exitCleanly = (): Promise<void> => {
+    if (exitPromise) return exitPromise;
+    exitPromise = (async () => {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      let resumeHint: string | undefined;
+      try {
+        const session = await resolveResumeSession(input.runtime, activeSessionId);
+        resumeHint = formatResumeHint(session.id, session.title);
+      } catch {  }
+      try { await input.runtime.dispose(); } catch {  }
+      managedRenderer.disposeResize();
+      try { await destroyRenderer(renderer); } catch {  }
+      if (resumeHint) console.log(resumeHint);
+      done();
+    })();
+    return exitPromise;
   };
 
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
+  handleRendererDestroy = () => { void exitCleanly(); };
+  if (renderer.isDestroyed) {
+    await exitCleanly();
+    return;
+  }
 
   try {
     await render(
@@ -87,9 +95,9 @@ async function destroyRenderer(renderer: CliRenderer): Promise<void> {
   try { renderer.destroy(); } catch {  }
 }
 
-async function createManagedRenderer(): Promise<ManagedRenderer> {
+async function createManagedRenderer(onDestroy: () => void): Promise<ManagedRenderer> {
   const existingListeners = new Set(process.listeners("SIGWINCH") as SignalListener[]);
-  const renderer = await createCliRenderer({ autoFocus: false });
+  const renderer = await createCliRenderer({ autoFocus: false, exitOnCtrlC: false, onDestroy });
   const rendererListeners = (process.listeners("SIGWINCH") as SignalListener[]).filter((listener) => !existingListeners.has(listener));
   for (const listener of rendererListeners) process.off("SIGWINCH", listener);
   if (rendererListeners.length === 0) return { renderer, disposeResize: () => {} };

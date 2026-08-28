@@ -174,7 +174,7 @@ export type TimelineRow =
   | { kind: "todo_list"; title: string; items: TodoListRowItem[]; id: string }
   | { kind: "plan"; title: string; explanation?: string; items: PlanItem[]; markdown?: string; streaming: boolean; id: string }
   | { kind: "mcp_inventory"; text: string; id: string }
-  | { kind: "artifact"; title: string; detail: string; body?: string; id: string }
+  | { kind: "artifact"; title: string; detail: string; body?: string; bodyFormat?: "markdown" | "text"; id: string }
   | { kind: "finding"; title: string; severity: string; target: string; detail: string; body?: string; id: string }
   | { kind: "progress"; title: string; detail: string; status: "running" | "done" | "info"; id: string }
   | { kind: "phase"; phase: string; detail: string; id: string }
@@ -431,7 +431,7 @@ function partToRow(
         kind: "progress",
         title: "tool progress",
         detail: toolProgressDetail(part.payload, width),
-        status: "info",
+        status: progressStatus(part.payload),
         id: part.id
       };
     case "phase_change":
@@ -792,6 +792,13 @@ function toolProgressDetail(payload: unknown, width: number): string {
   ].filter(Boolean).join(" · "), width);
 }
 
+function progressStatus(payload: unknown): "running" | "done" | "info" {
+  const status = extractField(payload, "status") ?? extractField(payload, "stage");
+  if (status === "running" || status === "started" || status === "in_progress") return "running";
+  if (status === "done" || status === "completed" || status === "finished" || status === "succeeded") return "done";
+  return "info";
+}
+
 function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "artifact" }> {
   const payload = part.payload;
   const kind = extractField(payload, "kind") ?? "artifact";
@@ -805,6 +812,7 @@ function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "a
         title: status === "succeeded" ? `${name} completed` : `${name} ${status}`,
         detail: truncateLine(singleLine(summary), width),
         body: summary.trim(),
+        bodyFormat: "text",
         id: part.id
       };
     }
@@ -814,6 +822,7 @@ function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "a
       title: status === "succeeded" ? "background job completed" : `background job ${status}`,
       detail: truncateLine(singleLine(summary), width),
       body: summary.trim(),
+      bodyFormat: "text",
       id: part.id
     };
   }

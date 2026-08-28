@@ -181,7 +181,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
   let unsubscribeStore: (() => void) | undefined;
   let eventSubscription: EventSubscription | undefined;
   let eventCursor = 0;
-  let sessionsCache: number = -1;
+  let sessionsCache: string | undefined;
   const runningTurnByTurnId = new Map<string, Turn["status"]>();
   let cachedRunningTurnId: string | undefined;
 
@@ -285,17 +285,30 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     const sessionId = activeSessionId;
     try {
       const list = store.listSessions(50, { includeArchived: true });
-      if (sessionsCache === -1) sessionsCache = list.length;
-      else if (list.length !== sessionsCache) {
-        sessionsCache = list.length;
+      const fingerprint = JSON.stringify(list.map((session) => ({
+        id: session.id,
+        title: session.title,
+        provider: session.provider,
+        model: session.model,
+        phase: session.phase,
+        archivedAt: session.archivedAt,
+        updatedAt: session.updatedAt,
+        running: store.listTurns(session.id, 5).some((turn) => isRunning(turn.status))
+      })));
+      if (sessionsCache === undefined) sessionsCache = fingerprint;
+      else if (fingerprint !== sessionsCache) {
+        sessionsCache = fingerprint;
         enqueue({ type: "sessions.changed" });
       }
     } catch {  }
     try {
+      let changed = false;
       for (const event of store.listEventsAfter(sessionId, eventCursor, 400)) {
         eventCursor = event.sequence ?? eventCursor;
         enqueue({ type: "event.appended", sessionId, event });
+        changed = true;
       }
+      if (changed) enqueue({ type: "snapshot.changed", sessionId });
     } catch {  }
     try {
       const turns = store.listTurns(sessionId, 20);
@@ -311,7 +324,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
   function stopFallback(): void {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
     eventCursor = 0;
-    sessionsCache = -1;
+    sessionsCache = undefined;
   }
 
   function readSnapshot(sessionId: string): SessionSnapshot {

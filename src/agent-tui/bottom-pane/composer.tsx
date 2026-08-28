@@ -73,7 +73,7 @@ export function Composer(): JSX.Element {
   });
 
   createEffect(() => {
-    const blocked = tui.store.ui.overlayStack.length > 0;
+    const blocked = tui.store.ui.overlayStack.length > 0 || tui.store.ui.centerSurfaceStack.length > 0;
     if (!textareaRef) return;
     if (blocked) textareaRef.blur();
     else textareaRef.focus();
@@ -110,6 +110,7 @@ export function Composer(): JSX.Element {
       <box style={{ flexDirection: "row", height: composerHeight(), backgroundColor: COLOR.panel }}>
         <text fg={COLOR.dim}>{"› "}</text>
         <textarea
+          id="composer-input"
           ref={(node) => {
             textareaRef = node;
             composer.setRef(node);
@@ -140,7 +141,15 @@ export function Composer(): JSX.Element {
             const command = () => truncateLine(option.title.padEnd(commandWidth()), commandWidth());
             const desc = () => truncateLine(option.description ?? "", descWidth());
             return (
-              <box style={{ flexDirection: "row" }}>
+              <box
+                style={{ flexDirection: "row" }}
+                onMouseUp={(event) => {
+                  if (event.button !== 0 || event.isDragging) return;
+                  composer.setDraft(`${option.title} `);
+                  tui.actions.slashSuppress(undefined);
+                  composer.focus();
+                }}
+              >
                 <text fg={active() ? COLOR.accent : COLOR.text}>{`  ${command()}`}</text>
                 <text fg={COLOR.dim}>{desc()}</text>
               </box>

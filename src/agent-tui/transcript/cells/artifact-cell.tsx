@@ -1,5 +1,7 @@
 import { For, Show, type JSX } from "solid-js";
+import { useTerminalDimensions } from "@opentui/solid";
 import type { TimelineRow } from "../../renderers";
+import { truncateLine } from "../../renderers";
 import { COLOR } from "../../theme";
 import { useTuiStore } from "../../context/store";
 import { syntax } from "../../syntax";
@@ -19,25 +21,44 @@ type FindingRowProps = {
 
 export function ArtifactRow(props: ArtifactRowProps): JSX.Element {
   const tui = useTuiStore();
+  const dims = useTerminalDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
+  const widths = () => artifactLineWidths(dims().width, props.row.title, props.row.detail);
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }} onMouseUp={() => tui.actions.cellExpandedToggle(props.row.id)}>
       <box style={{ flexDirection: "row" }}>
         <text fg={COLOR.dim}>{"• "}</text>
-        <text fg={COLOR.text}>{props.row.title}</text>
-        <Show when={props.row.detail}>
-          {(detail) => <text fg={COLOR.dim}>{` · ${detail()}`}</text>}
+        <text fg={COLOR.text}>{truncateLine(props.row.title, widths().title)}</text>
+        <Show when={widths().detail > 0 && props.row.detail}>
+          {(detail) => <text fg={COLOR.dim}>{truncateLine(` · ${detail()}`, widths().detail)}</text>}
         </Show>
       </box>
       <Show when={expanded() && props.row.body}>
         {(body) => (
-          <ExpandedPanel>
-            <markdown content={body()} streaming={false} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.text} />
+          <ExpandedPanel id={`${props.row.id}:expanded`}>
+            <Show
+              when={props.row.bodyFormat === "text"}
+              fallback={<markdown content={body()} streaming={false} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.text} />}
+            >
+              <code content={body()} filetype="text" syntaxStyle={syntax()} fg={COLOR.text} />
+            </Show>
           </ExpandedPanel>
         )}
       </Show>
     </box>
   );
+}
+
+export function artifactLineWidths(totalWidth: number, title: string, detail: string): { title: number; detail: number } {
+  const available = Math.max(1, Math.floor(totalWidth) - 4);
+  if (!detail) return { title: available, detail: 0 };
+  const decoratedDetailLength = detail.length + 3;
+  if (title.length + decoratedDetailLength <= available) {
+    return { title: title.length, detail: decoratedDetailLength };
+  }
+  const reservedDetail = Math.min(decoratedDetailLength, Math.max(0, Math.floor(available * 0.4)));
+  const titleWidth = Math.max(1, Math.min(title.length, available - reservedDetail));
+  return { title: titleWidth, detail: Math.max(0, available - titleWidth) };
 }
 
 export function McpInventoryRow(props: McpInventoryRowProps): JSX.Element {

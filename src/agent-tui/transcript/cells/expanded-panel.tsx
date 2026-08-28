@@ -4,11 +4,12 @@ import { COLOR } from "../../theme";
 type ExpandedPanelProps = {
   children: JSX.Element;
   marginBottom?: number;
+  id?: string;
 };
 
 export function ExpandedPanel(props: ExpandedPanelProps): JSX.Element {
   return (
-    <box style={{
+    <box {...(props.id ? { id: props.id } : {})} style={{
       width: "100%",
       flexDirection: "column",
       marginTop: 1,

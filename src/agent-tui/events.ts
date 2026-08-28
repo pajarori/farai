@@ -9,6 +9,7 @@ export type EventContext = {
   beginAsyncRefresh?: (kind: AsyncRefreshKind, sessionId?: string) => () => boolean;
   setStatusDetail?: (detail: string | undefined, timeoutMs?: number) => void;
   refreshSnapshot?: (sessionId: string) => Promise<void>;
+  refreshSessions?: () => Promise<void>;
   onSnapshot?: (snapshot: SessionSnapshot) => void;
   afterTurnSettled?: () => void | Promise<void>;
 };
@@ -125,6 +126,10 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
 
   switch (evt.type) {
     case "sessions.changed": {
+      if (ctx.refreshSessions) {
+        await ctx.refreshSessions();
+        return;
+      }
       const isCurrent = ctx.beginAsyncRefresh?.("sessions") ?? (() => true);
       const items = await ctx.port.listSessionItems();
       if (!isCurrent()) return;
@@ -191,9 +196,11 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
     }
     case "store.changed":
       ctx.actions.storeChangeApplied(evt.change);
+      if (evt.change.kind === "job") await refreshActivityState(evt.sessionId);
       break;
     case "store.batch":
       ctx.actions.storeChangesApplied(evt.changes);
+      if (evt.changes.some((change) => change.kind === "job")) await refreshActivityState(evt.sessionId);
       break;
     case "snapshot.changed":
       await refreshSnapshot(evt.sessionId);

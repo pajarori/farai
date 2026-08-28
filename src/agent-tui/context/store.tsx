@@ -46,16 +46,22 @@ type TuiStoreProviderProps = {
 };
 
 export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
-  const { port, workspace } = useTuiRuntime();
+  const { port, workspace, capabilities } = useTuiRuntime();
   const dims = useTerminalDimensions();
   const { store, setStore: _set, actions } = createFaraiStore(workspace);
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
   const proxyRefreshes = new Map<string, Promise<void>>();
-  const mcpRefreshes = new Map<string, Promise<void>>();
+  const mcpRefreshes = new Map<string, { epoch: number; promise: Promise<void> }>();
   const snapshotRefreshes = new Map<string, { generation: number; promise: Promise<void> }>();
   const snapshotGenerations = new Map<string, number>();
   const promptSubmissions = new Map<string, { generation: number }>();
-  let agentThreadsRefresh: Promise<void> | undefined;
+  const agentThreadRefreshes = new Map<string, { epoch: number; promise: Promise<void> }>();
+  const containerToggles = new Map<string, Promise<void>>();
+  let sessionRefreshGeneration = 0;
+  let modelRefreshGeneration = 0;
+  let sessionSelectionIntent = 0;
+  let mcpOverlayGeneration = 0;
+  let disposed = false;
   const timelineRows = createMemo(() => projectMessagesToRows(
     store.snapshot.messages,
     Math.max(1, dims().width - 4),
@@ -65,21 +71,38 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   ));
 
   function setStatusDetail(detail: string | undefined, timeoutMs?: number): void {
+    if (disposed) return;
     if (statusTimer) { clearTimeout(statusTimer); statusTimer = undefined; }
     actions.statusDetailSet(detail);
     if (!detail || !timeoutMs) return;
     statusTimer = setTimeout(() => {
       statusTimer = undefined;
+      if (disposed) return;
       if (store.ui.statusDetail === detail) actions.statusDetailSet(undefined);
     }, timeoutMs);
   }
 
+  function captureSessionOwner(sessionId = store.activeSessionId): { sessionId: string; epoch: number } | undefined {
+    if (disposed || !sessionId || store.activeSessionId !== sessionId) return undefined;
+    return { sessionId, epoch: sessionSelectionIntent };
+  }
+
+  function ownsSession(owner: { sessionId: string; epoch: number }): boolean {
+    return !disposed
+      && store.activeSessionId === owner.sessionId
+      && sessionSelectionIntent === owner.epoch;
+  }
+
   async function refreshSessions(): Promise<void> {
+    if (disposed) return;
+    const generation = ++sessionRefreshGeneration;
     const items = await port.listSessionItems();
+    if (disposed || sessionRefreshGeneration !== generation) return;
     actions.sessionItemsLoaded(items);
   }
 
   async function refreshSnapshot(): Promise<void> {
+    if (disposed) return;
     const sid = store.activeSessionId;
     if (!sid) return;
     await requestSnapshotRefresh(sid);
@@ -92,15 +115,17 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   }
 
   function requestSnapshotRefresh(sid: string): Promise<void> {
+    if (disposed) return Promise.resolve();
     return refreshSnapshotFor(sid, invalidateSnapshot(sid));
   }
 
   function refreshSnapshotFor(sid: string, generation = snapshotGenerations.get(sid) ?? 0): Promise<void> {
+    if (disposed) return Promise.resolve();
     const existing = snapshotRefreshes.get(sid);
     if (existing?.generation === generation) return existing.promise;
     const refresh = (async () => {
       const snapshot = await port.loadSnapshot(sid);
-      if (store.activeSessionId !== sid || snapshotGenerations.get(sid) !== generation) return;
+      if (disposed || store.activeSessionId !== sid || snapshotGenerations.get(sid) !== generation) return;
       actions.snapshotApplied(snapshot);
       for (const entry of promptHistoryFromMessages(snapshot.messages)) {
         actions.promptHistoryAdd(entry, "session");
@@ -116,6 +141,13 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   }
 
   async function selectSession(sessionId: string): Promise<void> {
+    if (disposed || sessionId === store.activeSessionId) return;
+    const intent = ++sessionSelectionIntent;
+    await selectSessionForIntent(sessionId, intent);
+  }
+
+  async function selectSessionForIntent(sessionId: string, intent: number): Promise<void> {
+    if (disposed || sessionSelectionIntent !== intent) return;
     if (sessionId === store.activeSessionId) return;
     actions.activeSessionSet(sessionId);
     const pendingSubmission = promptSubmissions.get(sessionId);
@@ -125,67 +157,79 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     try {
       await requestSnapshotRefresh(sessionId);
     } catch (error) {
-      if (store.activeSessionId !== sessionId) return;
+      if (disposed || sessionSelectionIntent !== intent || store.activeSessionId !== sessionId) return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     }
-    void refreshSessionMcp(sessionId);
+    if (!disposed && sessionSelectionIntent === intent && store.activeSessionId === sessionId) void refreshSessionMcp(sessionId);
   }
 
   function refreshSessionMcp(sessionId: string): Promise<void> {
+    const owner = captureSessionOwner(sessionId);
+    if (!owner) return Promise.resolve();
     const existing = mcpRefreshes.get(sessionId);
-    if (existing) return existing;
+    if (existing?.epoch === owner.epoch) return existing.promise;
     const refresh = (async () => {
-      if (store.activeSessionId !== sessionId) return;
+      if (!ownsSession(owner)) return;
       setStatusDetail("starting mcp");
       try {
         await port.refreshMcp();
-        if (store.activeSessionId !== sessionId) return;
+        if (!ownsSession(owner)) return;
         const [statuses, services] = await Promise.all([port.listMcpStatuses(), port.listServices()]);
-        if (store.activeSessionId !== sessionId) return;
+        if (!ownsSession(owner)) return;
         actions.mcpStatusesSet(statuses);
         actions.servicesSet(services);
       } catch (error) {
-        if (store.activeSessionId !== sessionId) return;
+        if (!ownsSession(owner)) return;
         actions.errorSet(error instanceof Error ? error.message : String(error));
       } finally {
-        if (store.activeSessionId === sessionId && store.ui.statusDetail === "starting mcp") setStatusDetail(undefined);
+        if (ownsSession(owner) && store.ui.statusDetail === "starting mcp") setStatusDetail(undefined);
       }
     })();
-    mcpRefreshes.set(sessionId, refresh);
-    void refresh.finally(() => {
-      if (mcpRefreshes.get(sessionId) === refresh) mcpRefreshes.delete(sessionId);
-    });
+    const entry = { epoch: owner.epoch, promise: refresh };
+    mcpRefreshes.set(sessionId, entry);
+    const cleanup = () => {
+      if (mcpRefreshes.get(sessionId) === entry) mcpRefreshes.delete(sessionId);
+    };
+    void refresh.then(cleanup, cleanup);
     return refresh;
   }
 
   async function createSession(): Promise<void> {
+    if (disposed) return;
+    const intent = ++sessionSelectionIntent;
     try {
       const session = await port.createSession();
+      if (disposed || sessionSelectionIntent !== intent) return;
       await refreshSessions();
-      await selectSession(session.id);
+      await selectSessionForIntent(session.id, intent);
     } catch (error) {
+      if (disposed || sessionSelectionIntent !== intent) return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function forkCurrentSession(): Promise<void> {
+    if (disposed) return;
     const sid = store.activeSessionId;
     if (!sid) return;
+    const intent = ++sessionSelectionIntent;
     try {
       const session = await port.forkSession(sid);
+      if (disposed || sessionSelectionIntent !== intent) return;
       await refreshSessions();
-      await selectSession(session.id);
+      await selectSessionForIntent(session.id, intent);
     } catch (error) {
+      if (disposed || sessionSelectionIntent !== intent) return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function refreshContainerStatus(): Promise<void> {
-    const sid = store.activeSessionId;
-    if (!sid) return;
+    const owner = captureSessionOwner();
+    if (!owner) return;
     try {
       const status = await port.containerStatus();
-      if (store.activeSessionId !== sid) return;
+      if (!ownsSession(owner)) return;
       actions.containerStatusSet(containerState(
         status.imageExists,
         status.imageContractCurrent,
@@ -193,112 +237,153 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
         status.persistentImageCurrent
       ));
     } catch {
-      if (store.activeSessionId !== sid) return;
+      if (!ownsSession(owner)) return;
       actions.containerStatusSet("missing");
     }
   }
 
   async function refreshServices(): Promise<void> {
-    const sid = store.activeSessionId;
-    if (!sid) return;
+    const owner = captureSessionOwner();
+    if (!owner) return;
     try {
       const services = await port.listServices();
-      if (store.activeSessionId !== sid) return;
+      if (!ownsSession(owner)) return;
       actions.servicesSet(services);
     } catch {
-      if (store.activeSessionId !== sid) return;
+      if (!ownsSession(owner)) return;
       actions.servicesSet([]);
     }
   }
 
   function refreshProxyFlows(): Promise<void> {
-    const sid = store.activeSessionId;
-    if (!sid) return Promise.resolve();
-    const inFlight = proxyRefreshes.get(sid);
+    const owner = captureSessionOwner();
+    if (!owner) return Promise.resolve();
+    const key = `${owner.sessionId}:${owner.epoch}`;
+    const inFlight = proxyRefreshes.get(key);
     if (inFlight) return inFlight;
     const refresh = (async () => {
       try {
         // Keep one protocol-complete source list; proxy sub-tabs are local projections.
         const flows = await port.listProxyFlows(proxyRefreshQuery());
-        if (store.activeSessionId !== sid) return;
+        if (!ownsSession(owner)) return;
         actions.proxyFlowsSet(sortProxyFlowsNewestFirst(flows));
       } catch {
         // A transient MCP failure must not blank a previously useful traffic view.
       }
     })();
-    proxyRefreshes.set(sid, refresh);
-    void refresh.finally(() => {
-      if (proxyRefreshes.get(sid) === refresh) proxyRefreshes.delete(sid);
-    });
+    proxyRefreshes.set(key, refresh);
+    const cleanup = () => {
+      if (proxyRefreshes.get(key) === refresh) proxyRefreshes.delete(key);
+    };
+    void refresh.then(cleanup, cleanup);
     return refresh;
   }
 
   async function refreshAvailableModels(): Promise<void> {
+    if (disposed) return;
+    const generation = ++modelRefreshGeneration;
     try {
       const models = await port.listAvailableModels();
+      if (disposed || modelRefreshGeneration !== generation) return;
       actions.availableModelsSet(models);
     } catch {
+      if (disposed || modelRefreshGeneration !== generation) return;
       actions.availableModelsSet([]);
     }
   }
 
   function refreshAgentThreads(): Promise<void> {
-    const sid = store.activeSessionId;
-    if (!sid) return Promise.resolve();
-    if (agentThreadsRefresh) return agentThreadsRefresh;
+    const owner = captureSessionOwner();
+    if (!owner) return Promise.resolve();
+    const inFlight = agentThreadRefreshes.get(owner.sessionId);
+    if (inFlight?.epoch === owner.epoch) return inFlight.promise;
     const refresh = (async () => {
-      const threads = await port.listAgentThreads(sid);
-      if (store.activeSessionId === sid) actions.agentThreadsSet(threads);
+      try {
+        const threads = await port.listAgentThreads(owner.sessionId);
+        if (ownsSession(owner)) actions.agentThreadsSet(threads);
+      } catch (error) {
+        if (ownsSession(owner)) actions.errorSet(error instanceof Error ? error.message : String(error));
+      }
     })();
-    agentThreadsRefresh = refresh;
-    void refresh.finally(() => {
-      if (agentThreadsRefresh === refresh) agentThreadsRefresh = undefined;
-    });
+    const entry = { epoch: owner.epoch, promise: refresh };
+    agentThreadRefreshes.set(owner.sessionId, entry);
+    const cleanup = () => {
+      if (agentThreadRefreshes.get(owner.sessionId) === entry) agentThreadRefreshes.delete(owner.sessionId);
+    };
+    void refresh.then(cleanup, cleanup);
     return refresh;
   }
 
   async function openAgentsOverlay(): Promise<void> {
+    const owner = captureSessionOwner();
+    if (!owner) return;
     actions.overlayOpen("agents");
     try {
       await Promise.all([refreshSessions(), refreshAgentThreads()]);
     } catch (error) {
+      if (!ownsSession(owner)) return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function openMcpOverlay(): Promise<void> {
-    const sid = store.activeSessionId;
-    if (!sid) return;
+    const owner = captureSessionOwner();
+    if (!owner) return;
+    const generation = ++mcpOverlayGeneration;
     setStatusDetail("refreshing mcp");
     actions.mcpStatusErrorSet(undefined);
     actions.overlayOpen("mcp");
     try {
       await port.refreshMcp();
-      if (store.activeSessionId !== sid) return;
-      await refreshServices();
-      if (store.activeSessionId !== sid) return;
-      const statuses = await port.listMcpStatuses();
-      if (store.activeSessionId !== sid) return;
+      if (mcpOverlayGeneration !== generation || !ownsSession(owner)) return;
+      const [services, statuses] = await Promise.all([port.listServices(), port.listMcpStatuses()]);
+      if (mcpOverlayGeneration !== generation || !ownsSession(owner)) return;
+      actions.servicesSet(services);
       actions.mcpStatusesSet(statuses);
     } catch (error) {
-      if (store.activeSessionId !== sid) return;
+      if (mcpOverlayGeneration !== generation || !ownsSession(owner)) return;
       actions.mcpStatusErrorSet(error instanceof Error ? error.message : String(error));
     } finally {
-      if (store.activeSessionId === sid) setStatusDetail(undefined);
+      if (mcpOverlayGeneration === generation && ownsSession(owner) && store.ui.statusDetail === "refreshing mcp") {
+        setStatusDetail(undefined);
+      }
     }
   }
 
-  async function toggleContainer(): Promise<void> {
-    try {
-      if (store.ui.containerStatus === "running") await port.stopContainer();
-      else await port.startContainer();
-      await refreshContainerStatus();
-    } catch (error) {
-      actions.errorSet(error instanceof Error ? error.message : String(error));
-    }
+  function toggleContainer(): Promise<void> {
+    const owner = captureSessionOwner();
+    if (!owner) return Promise.resolve();
+    const existing = containerToggles.get(owner.sessionId);
+    if (existing) return existing;
+    const toggle = (async () => {
+      try {
+        const status = await port.containerStatus();
+        if (!ownsSession(owner)) return;
+        const current = containerState(
+          status.imageExists,
+          status.imageContractCurrent,
+          status.persistentRunning,
+          status.persistentImageCurrent
+        );
+        if (current === "running") await port.stopContainer();
+        else await port.startContainer();
+        if (!ownsSession(owner)) return;
+        await refreshContainerStatus();
+      } catch (error) {
+        if (!ownsSession(owner)) return;
+        actions.errorSet(error instanceof Error ? error.message : String(error));
+      }
+    })();
+    containerToggles.set(owner.sessionId, toggle);
+    const cleanup = () => {
+      if (containerToggles.get(owner.sessionId) === toggle) containerToggles.delete(owner.sessionId);
+    };
+    void toggle.then(cleanup, cleanup);
+    return toggle;
   }
 
   async function submitPrompt(text: string): Promise<void> {
+    if (disposed) return;
     const sid = store.activeSessionId;
     if (!sid || !text.trim()) return;
     if (promptSubmissions.has(sid) || isAgentBusy(store) || port.getRunningTurnId(sid)) {
@@ -311,38 +396,46 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     try {
       await port.prompt(sid, text);
     } catch (error) {
-      if (store.activeSessionId !== sid) return;
+      if (disposed || store.activeSessionId !== sid) return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     } finally {
       if (promptSubmissions.get(sid) === submission) {
         promptSubmissions.delete(sid);
-        if (store.activeSessionId !== sid) return;
+        if (disposed || store.activeSessionId !== sid) return;
         actions.promptSubmissionFinished(submission.generation);
         try {
           await requestSnapshotRefresh(sid);
         } catch (error) {
-          if (store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
+          if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
         }
       }
     }
   }
 
   async function queuePrompt(text: string): Promise<void> {
+    if (disposed) return;
     const sid = store.activeSessionId;
     if (!sid || !text.trim()) return;
+    const owner = captureSessionOwner(sid);
+    if (!owner) return;
     const queued = port.queueInput(sid, text);
     if (!queued) return;
     actions.snapshotPatched({ queuedPrompts: mergeQueuedPrompts(store.snapshot.queuedPrompts, queued) });
     actions.promptHistoryAdd(text);
     try {
       const activity = await port.loadActivityState(sid);
-      if (store.activeSessionId !== sid) return;
+      if (!ownsSession(owner)) return;
       actions.snapshotPatched(activity);
     } catch {
     }
   }
 
   async function compact(instructions?: string): Promise<void> {
+    if (disposed) return;
+    if (!capabilities.compact) {
+      actions.errorSet("context compaction is unavailable in this TUI session");
+      return;
+    }
     const sid = store.activeSessionId;
     if (!sid || store.ui.compacting) return;
     if (store.ui.submitting || store.snapshot.runningTurnId || port.getRunningTurnId(sid)) {
@@ -352,19 +445,20 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     actions.compactStarted();
     try {
       await port.compact(sid, instructions);
-      if (store.activeSessionId !== sid) return;
+      if (disposed || store.activeSessionId !== sid) return;
       await refreshSnapshot();
       setStatusDetail("context compacted", 1_500);
     } catch (error) {
-      if (store.activeSessionId !== sid) return;
+      if (disposed || store.activeSessionId !== sid) return;
       const message = error instanceof Error ? error.message : String(error);
       if (!/abort|cancel/i.test(message)) actions.errorSet(message);
     } finally {
-      if (store.activeSessionId === sid) actions.compactFinished();
+      if (!disposed && store.activeSessionId === sid) actions.compactFinished();
     }
   }
 
   async function clearCurrentSession(): Promise<void> {
+    if (disposed) return;
     const sid = store.activeSessionId;
     if (!sid) return;
     if (isAgentBusy(store) || port.getRunningTurnId(sid)) {
@@ -373,17 +467,22 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     }
     try {
       await port.clearSession(sid);
-      if (store.activeSessionId !== sid) return;
+      if (disposed || store.activeSessionId !== sid) return;
       await refreshSnapshot();
       actions.chatCleared();
       setStatusDetail("conversation cleared", 1_500);
     } catch (error) {
-      if (store.activeSessionId !== sid) return;
+      if (disposed || store.activeSessionId !== sid) return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function cancelCurrentTurn(): Promise<void> {
+    if (disposed) return;
+    if (!capabilities.cancel) {
+      actions.errorSet("turn cancellation is unavailable in this TUI session");
+      return;
+    }
     const sid = store.activeSessionId;
     if (!sid) return;
     if (store.ui.compacting) {
@@ -396,9 +495,14 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     try {
       await port.cancelTurn(turnId, "cancelled by user");
     } catch (error) {
+      if (disposed || store.activeSessionId !== sid) return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     }
-    await refreshSnapshot();
+    try {
+      await requestSnapshotRefresh(sid);
+    } catch (error) {
+      if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
+    }
   }
 
   const eventDispatcher = createTuiEventDispatcher({
@@ -407,13 +511,22 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     actions,
     setStatusDetail,
     refreshSnapshot: requestSnapshotRefresh,
+    refreshSessions,
     onSnapshot: () => undefined
-  }, (error) => actions.errorSet(error instanceof Error ? error.message : String(error)));
+  }, (error) => {
+    if (!disposed) actions.errorSet(error instanceof Error ? error.message : String(error));
+  });
   const off = port.event.on((event) => {
+    if (disposed) return;
     if (event.type === "store.changed" || event.type === "store.batch") invalidateSnapshot(event.sessionId);
     eventDispatcher.dispatch(event);
   });
   onCleanup(() => {
+    disposed = true;
+    sessionSelectionIntent += 1;
+    sessionRefreshGeneration += 1;
+    modelRefreshGeneration += 1;
+    mcpOverlayGeneration += 1;
     off();
     eventDispatcher.dispose();
     if (statusTimer) clearTimeout(statusTimer);
@@ -446,9 +559,9 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
       const seed = props.initialSessionId ?? store.sessions[0]?.id;
       if (seed) await selectSession(seed);
     } catch (error) {
-      actions.errorSet(error instanceof Error ? error.message : String(error));
+      if (!disposed) actions.errorSet(error instanceof Error ? error.message : String(error));
     } finally {
-      actions.setStatus("ready");
+      if (!disposed) actions.setStatus("ready");
     }
   })();
 

@@ -1,5 +1,5 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { For, Show, createEffect, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, untrack, type JSX } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import type {
   ProxyDnsMessage,
@@ -27,10 +27,13 @@ export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
   const title = () => surfaceTitle(props.frame);
   const kindLabel = () => props.frame.kind;
   let scrollRef!: ScrollBoxRenderable;
+  let lastScrollSequence = 0;
 
   createEffect(() => {
     const request = tui.store.ui.centerScroll;
-    if (request.sequence === 0 || !scrollRef || props.frame.kind === "proxy_flow") return;
+    if (request.sequence === 0 || request.sequence === lastScrollSequence) return;
+    lastScrollSequence = request.sequence;
+    if (!scrollRef || untrack(() => props.frame.kind) === "proxy_flow") return;
     applyScroll(scrollRef, request.action);
   });
 
@@ -81,7 +84,7 @@ export function centerSurfaceFooter(frame: CenterSurfaceFrame): string {
       return `${frame.confirmLabel ?? "enter ok"} · ${frame.cancelLabel ?? "esc cancel"}`;
     case "proxy_flow":
       return frame.flow.kind === "websocket"
-        ? "h handshake · m messages · p/n message · esc back"
+        ? "h handshake · m messages · [ ]/tab pane · p/n message · esc back"
         : `[ ]/tab pane · ${flowPanelLabels(frame.flow)} · esc back`;
     case "alert":
     case "detail":
@@ -120,6 +123,7 @@ function createSurfaceLoader(frame: () => CenterSurfaceFrame): { body: () => str
     }
 
     if (current.kind === "container") {
+      void current.refreshToken;
       setBody("loading container status…");
       void port.containerStatus()
         .then((status) => { if (id === loadId) setBody(JSON.stringify(status, null, 2)); })
@@ -183,11 +187,13 @@ function ProxyPanelPair(props: { flow: ProxyFlowDetail; compact?: boolean }): JS
   const panels = () => proxyFlowPanels(props.flow);
   let requestScroll!: ScrollBoxRenderable;
   let responseScroll!: ScrollBoxRenderable;
+  let lastScrollSequence = 0;
 
   createEffect(() => {
     const request = tui.store.ui.centerScroll;
-    if (request.sequence === 0) return;
-    const activeScroll = tui.store.ui.proxyDetailPane === 0 ? requestScroll : responseScroll;
+    if (request.sequence === 0 || request.sequence === lastScrollSequence) return;
+    lastScrollSequence = request.sequence;
+    const activeScroll = untrack(() => tui.store.ui.proxyDetailPane) === 0 ? requestScroll : responseScroll;
     if (activeScroll) applyScroll(activeScroll, request.action);
   });
 
@@ -225,6 +231,7 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
   let messageScroll!: ScrollBoxRenderable;
   let payloadScroll!: ScrollBoxRenderable;
   let activeFlowId = "";
+  let lastScrollSequence = 0;
   const selectedIndex = createMemo(() => Math.min(
     Math.max(0, tui.store.ui.proxyWebSocketMessageIndex),
     Math.max(0, props.flow.messages.length - 1)
@@ -246,8 +253,13 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
 
   createEffect(() => {
     const request = tui.store.ui.centerScroll;
-    if (request.sequence === 0) return;
-    const activeScroll = tui.store.ui.proxyDetailPane === 0 ? requestScroll : payloadScroll;
+    if (request.sequence === 0 || request.sequence === lastScrollSequence) return;
+    lastScrollSequence = request.sequence;
+    const section = untrack(() => tui.store.ui.proxyWebSocketSection);
+    const pane = untrack(() => tui.store.ui.proxyDetailPane);
+    const activeScroll = section === 0
+      ? pane === 0 ? requestScroll : responseScroll
+      : pane === 0 ? messageScroll : payloadScroll;
     if (activeScroll) applyScroll(activeScroll, request.action);
   });
 
@@ -264,18 +276,18 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
     <box style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column", paddingTop: props.compact ? 0 : 1 }}>
       <box style={{ height: 1, flexShrink: 0, flexDirection: "row" }}>
         <text
-          fg={tui.store.ui.proxyDetailPane === 0 ? COLOR.accent : COLOR.dim}
-          onMouseUp={() => tui.actions.proxyDetailPaneSet(0)}
-        >{tui.store.ui.proxyDetailPane === 0 ? "› [h] handshake" : "  [h] handshake"}</text>
+          fg={tui.store.ui.proxyWebSocketSection === 0 ? COLOR.accent : COLOR.dim}
+          onMouseUp={() => tui.actions.proxyWebSocketSectionSet(0)}
+        >{tui.store.ui.proxyWebSocketSection === 0 ? "› [h] handshake" : "  [h] handshake"}</text>
         <text fg={COLOR.dim}>{"   "}</text>
         <text
-          fg={tui.store.ui.proxyDetailPane === 1 ? COLOR.accent : COLOR.dim}
-          onMouseUp={() => tui.actions.proxyDetailPaneSet(1)}
-        >{`${tui.store.ui.proxyDetailPane === 1 ? "›" : " "} [m] messages (${props.flow.messages.length})`}</text>
+          fg={tui.store.ui.proxyWebSocketSection === 1 ? COLOR.accent : COLOR.dim}
+          onMouseUp={() => tui.actions.proxyWebSocketSectionSet(1)}
+        >{`${tui.store.ui.proxyWebSocketSection === 1 ? "›" : " "} [m] messages (${props.flow.messages.length})`}</text>
       </box>
-      <Show when={tui.store.ui.proxyDetailPane === 0} fallback={
+      <Show when={tui.store.ui.proxyWebSocketSection === 0} fallback={
         <box style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column", paddingTop: 1 }}>
-          <box style={{ height: 1, flexShrink: 0 }}>
+          <box style={{ height: 1, flexShrink: 0 }} onMouseUp={() => tui.actions.proxyDetailPaneSet(0)}>
             <text fg={COLOR.dim}>{webSocketFrameHeader(contentWidth())}</text>
           </box>
           <scrollbox
@@ -306,8 +318,8 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
           <Show when={inspectorGap() > 0}>
             <box style={{ height: 1, flexShrink: 0 }} />
           </Show>
-          <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }}>
-            <text fg={COLOR.text}>{truncateLine(webSocketMessageTitle(selectedMessage(), selectedIndex()), Math.max(12, contentWidth() - 12))}</text>
+          <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }} onMouseUp={() => tui.actions.proxyDetailPaneSet(1)}>
+            <text fg={tui.store.ui.proxyDetailPane === 1 ? COLOR.accent : COLOR.text}>{truncateLine(webSocketMessageTitle(selectedMessage(), selectedIndex()), Math.max(12, contentWidth() - 12))}</text>
             <text fg={COLOR.dim}>{webSocketMessageFiletype(selectedMessage())}</text>
           </box>
           <scrollbox
@@ -327,22 +339,22 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
         <box style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: dims().width >= 112 ? "row" : "column", paddingTop: 1 }}>
           <FlowMessagePanel
             panel={{ title: "request", content: renderWebSocketRequest(props.flow), filetype: "http" }}
-            active
+            active={tui.store.ui.proxyDetailPane === 0}
             flexGrow={1}
             rightPadding={dims().width >= 112}
             bottomPadding={dims().width < 112}
             compact={props.compact === true}
-            onActivate={() => {}}
+            onActivate={() => tui.actions.proxyDetailPaneSet(0)}
             setScrollRef={(ref) => { requestScroll = ref; }}
           />
           <FlowMessagePanel
             panel={{ title: "response", content: renderWebSocketResponse(props.flow), filetype: "http" }}
-            active={false}
+            active={tui.store.ui.proxyDetailPane === 1}
             flexGrow={1}
             rightPadding={false}
             bottomPadding={false}
             compact={props.compact === true}
-            onActivate={() => {}}
+            onActivate={() => tui.actions.proxyDetailPaneSet(1)}
             setScrollRef={(ref) => { responseScroll = ref; }}
           />
         </box>

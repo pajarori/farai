@@ -11,7 +11,7 @@ export function Transcript(): JSX.Element {
   const tui = useTuiStore();
   const dims = useTerminalDimensions();
   let scrollRef!: ScrollBoxRenderable;
-  let navigationIndex = -1;
+  const navigation = createMessageNavigationState(tui.store.ui.messageNavigation.sequence);
   const rowCache = new Map<string, TimelineRow>();
 
   const transcriptRows = createMemo(() => {
@@ -51,11 +51,10 @@ export function Transcript(): JSX.Element {
 
   createEffect(() => {
     const request = tui.store.ui.messageNavigation;
-    if (request.sequence === 0 || !scrollRef) return;
-    const users = transcriptRows().filter((row) => row.kind === "user");
-    if (users.length === 0) return;
-    navigationIndex = nextNavigationIndex(request.direction, navigationIndex, users.length);
-    try { scrollRef.scrollChildIntoView(users[navigationIndex]!.id); } catch {  }
+    const userIds = transcriptRows().filter((row) => row.kind === "user").map((row) => row.id);
+    const targetId = resolveMessageNavigationTarget(navigation, tui.store.activeSessionId, request, userIds);
+    if (!targetId || !scrollRef) return;
+    try { scrollRef.scrollChildIntoView(targetId); } catch {  }
   });
 
   return (
@@ -87,6 +86,37 @@ export function Transcript(): JSX.Element {
       </Show>
     </scrollbox>
   );
+}
+
+export type MessageNavigationState = {
+  sessionId: string | undefined;
+  handledSequence: number;
+  index: number;
+};
+
+export function createMessageNavigationState(handledSequence = 0): MessageNavigationState {
+  return { sessionId: undefined, handledSequence, index: -1 };
+}
+
+export function resolveMessageNavigationTarget(
+  state: MessageNavigationState,
+  sessionId: string | undefined,
+  request: { sequence: number; direction: "next" | "prev" },
+  userIds: readonly string[]
+): string | undefined {
+  if (state.sessionId !== sessionId) {
+    state.sessionId = sessionId;
+    state.index = -1;
+  }
+  if (request.sequence === 0 || request.sequence === state.handledSequence) return undefined;
+  state.handledSequence = request.sequence;
+  if (userIds.length === 0) {
+    state.index = -1;
+    return undefined;
+  }
+  const currentIndex = state.index >= 0 && state.index < userIds.length ? state.index : -1;
+  state.index = nextNavigationIndex(request.direction, currentIndex, userIds.length);
+  return userIds[state.index];
 }
 
 function nextNavigationIndex(direction: "next" | "prev", currentIndex: number, itemCount: number): number {

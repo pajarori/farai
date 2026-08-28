@@ -19,7 +19,12 @@ export function AppShell(): JSX.Element {
 
   const disposeCommands = registerCommands(defineDefaultCommands({
     palette: () => tui.actions.overlayOpen("palette"),
-    sessions: () => { void tui.refreshSessions().then(() => tui.actions.overlayOpen("sessions")); },
+    sessions: () => {
+      tui.actions.overlayOpen("sessions");
+      void tui.refreshSessions().catch((error) => {
+        tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+      });
+    },
     evidence: () => tui.actions.overlayOpen("evidence"),
     findings: () => tui.actions.overlayOpen("findings"),
     memory: () => tui.actions.overlayOpen("memory"),

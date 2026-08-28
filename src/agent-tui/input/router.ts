@@ -48,6 +48,7 @@ export type RouterAction =
   | { kind: "proxy.openSelected" }
   | { kind: "proxy.detailPaneSet"; pane: 0 | 1 }
   | { kind: "proxy.detailPaneMove"; delta: number }
+  | { kind: "proxy.websocketSectionSet"; section: 0 | 1 }
   | { kind: "proxy.websocketMessageMove"; delta: number }
   | { kind: "queued.editLast" }
   | { kind: "turn.cancel" }
@@ -93,6 +94,7 @@ export type RouterContext = {
   composerCursor?: number;
 
   slashSuppressed: boolean;
+  slashOptionCount?: number;
   historySearchActive?: boolean;
   queuedCount?: number;
   activeMainTab?: "chat" | "proxy";
@@ -149,6 +151,7 @@ function consumed(...actions: RouterAction[]): RouteResult {
 
 export function slashActive(ctx: RouterContext): boolean {
   if (ctx.overlayKind || ctx.centerSurfaceKind || ctx.slashSuppressed) return false;
+  if (ctx.slashOptionCount !== undefined && ctx.slashOptionCount <= 0) return false;
   const text = ctx.composerText;
   return text.startsWith("/") && !text.includes(" ") && !text.includes("\n");
 }
@@ -198,8 +201,8 @@ function routeCenterSurface(key: KeyToken, kind: CenterSurfaceKind): RouteResult
     if (key.name === "left" || key.name === "[") return consumed({ kind: "proxy.detailPaneMove", delta: -1 });
     if (key.name === "right" || key.name === "]") return consumed({ kind: "proxy.detailPaneMove", delta: 1 });
     if (key.name === "tab") return consumed({ kind: "proxy.detailPaneMove", delta: 1 });
-    if (key.name === "h") return consumed({ kind: "proxy.detailPaneSet", pane: 0 });
-    if (key.name === "m") return consumed({ kind: "proxy.detailPaneSet", pane: 1 });
+    if (key.name === "h") return consumed({ kind: "proxy.websocketSectionSet", section: 0 });
+    if (key.name === "m") return consumed({ kind: "proxy.websocketSectionSet", section: 1 });
     if (key.name === "p") return consumed({ kind: "proxy.websocketMessageMove", delta: -1 });
     if (key.name === "n") return consumed({ kind: "proxy.websocketMessageMove", delta: 1 });
   }
@@ -234,11 +237,12 @@ function routeCenterSurface(key: KeyToken, kind: CenterSurfaceKind): RouteResult
 function routeSlash(key: KeyToken): RouteResult | undefined {
   if (key.ctrl && key.name === "p") return consumed({ kind: "slash.move", delta: -1 });
   if (key.ctrl && key.name === "n") return consumed({ kind: "slash.move", delta: 1 });
+  if (key.name === "/" || key.name === "slash" || key.char === "/") return consumed({ kind: "slash.complete" });
   switch (key.name) {
     case "up": return consumed({ kind: "slash.move", delta: -1 });
     case "down": return consumed({ kind: "slash.move", delta: 1 });
     case "return": return consumed({ kind: "slash.dispatch" });
-    case "tab": case "/": return consumed({ kind: "slash.complete" });
+    case "tab": return consumed({ kind: "slash.complete" });
     case "escape": return consumed({ kind: "slash.dismiss" });
     default: return undefined;
   }
@@ -250,6 +254,7 @@ function routeBase(key: KeyToken, ctx: RouterContext): RouteResult {
       case "1": return consumed({ kind: "mainTab.set", tab: "chat" });
       case "2": return consumed({ kind: "mainTab.set", tab: "proxy" });
       case "c": return consumed({ kind: "composer.clearOrExit" });
+      case "p": return consumed({ kind: "overlay.open", overlay: "palette" });
       case "r": return consumed({ kind: "composer.historySearchStart" });
       case "g": return consumed({ kind: "composer.externalEditor" });
       case "t": return consumed({ kind: "transcript.open" });
@@ -322,11 +327,11 @@ function shouldHistoryNavigate(ctx: RouterContext, direction: "older" | "newer")
 function routeHistorySearch(key: KeyToken): RouteResult {
   if (key.ctrl && key.name === "c") return consumed({ kind: "history.searchCancel" });
   if (key.ctrl && key.name === "r") return consumed({ kind: "history.searchMove", delta: 1 });
-  if (key.ctrl && key.name === "s") return consumed({ kind: "history.searchMove", delta: 1 });
+  if (key.ctrl && key.name === "s") return consumed({ kind: "history.searchMove", delta: -1 });
   if (key.name === "escape") return consumed({ kind: "history.searchCancel" });
   if (key.name === "return") return consumed({ kind: "history.searchAccept" });
-  if (key.name === "up") return consumed({ kind: "history.searchMove", delta: -1 });
-  if (key.name === "down") return consumed({ kind: "history.searchMove", delta: 1 });
+  if (key.name === "up") return consumed({ kind: "history.searchMove", delta: 1 });
+  if (key.name === "down") return consumed({ kind: "history.searchMove", delta: -1 });
   if (key.name === "backspace") return consumed({ kind: "history.searchBackspace" });
   if (key.char !== undefined) return consumed({ kind: "history.searchAppend", char: key.char });
   return consumed();

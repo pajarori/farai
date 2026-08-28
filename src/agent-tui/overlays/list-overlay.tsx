@@ -17,6 +17,7 @@ type ListOverlayProps = {
 };
 
 export function ListOverlay(props: ListOverlayProps): JSX.Element {
+  const tui = useTuiStore();
   const dims = useTerminalDimensions();
   const matches = createMemo(() => filterOptions(props.options, props.frame.query));
   const groups = createMemo(() => groupByCategory(matches(), props.frame.query.trim() !== ""));
@@ -36,6 +37,11 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
   const top = () => Math.max(0, dims().height - height() - 1);
   const descCol = () => descriptionColumn(visibleRows(), width());
   const subtitle = () => overlaySubtitle(props.frame.kind);
+  const selectOption = (id: string): void => {
+    const enabled = matches().filter((match) => !match.option.disabled);
+    const index = enabled.findIndex((match) => match.option.id === id);
+    if (index >= 0) tui.actions.overlaySetIndex(index, enabled.length);
+  };
 
   if (props.frame.kind === "mcp") {
     return (
@@ -46,6 +52,8 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
         left={left()}
         top={top()}
         rows={visibleRows()}
+        summaryRows={rows()}
+        onSelect={selectOption}
       />
     );
   }
@@ -92,6 +100,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
                 row={row as OptionOverlayRow}
                 descCol={descCol()}
                 width={width()}
+                onSelect={selectOption}
               />
             }>
               <CategoryRow row={row as CategoryOverlayRow} />
@@ -108,7 +117,7 @@ type CategoryOverlayRow = { kind: "category"; category: string };
 type OptionOverlayRow = ReturnType<typeof displayRows<unknown>>[number] & { kind: "option"; number: number };
 type OverlayRow = CategoryOverlayRow | OptionOverlayRow;
 type CategoryRowProps = { row: CategoryOverlayRow };
-type OptionRowProps = { row: OptionOverlayRow; descCol: number; width: number };
+type OptionRowProps = { row: OptionOverlayRow; descCol: number; width: number; onSelect: (id: string) => void };
 
 type McpOverlayProps = {
   docked: boolean | undefined;
@@ -117,6 +126,8 @@ type McpOverlayProps = {
   left: number;
   top: number;
   rows: OverlayRow[];
+  summaryRows: OverlayRow[];
+  onSelect: (id: string) => void;
 };
 
 type AgentsOverlayProps = {
@@ -157,7 +168,13 @@ function OptionRow(props: OptionRowProps): JSX.Element {
   const description = () => option().description ?? "";
   const descWidth = () => Math.max(8, props.width - props.descCol - 1);
   return (
-    <box style={{ flexDirection: "row" }}>
+    <box
+      style={{ flexDirection: "row" }}
+      onMouseUp={(event) => {
+        if (event.button !== 0 || event.isDragging || props.row.disabled) return;
+        props.onSelect(props.row.option.id);
+      }}
+    >
       <text fg={active() ? COLOR.accent : COLOR.dim}>{prefix()}</text>
       <text fg={props.row.disabled ? COLOR.dim : COLOR.text}>{truncateLine(title(), Math.max(4, props.descCol - prefix().length - 2))}</text>
       <Show when={description()}>
@@ -169,11 +186,12 @@ function OptionRow(props: OptionRowProps): JSX.Element {
 
 function McpOverlay(props: McpOverlayProps): JSX.Element {
   const optionRows = () => props.rows.filter((row): row is OptionOverlayRow => row.kind === "option");
-  const readyCount = () => optionRows().filter((row) => row.option.category === "running").length;
-  const failedCount = () => optionRows().filter((row) => row.option.category === "stopped").length;
-  const startingCount = () => optionRows().filter((row) => row.option.category === "starting").length;
+  const summaryOptionRows = () => props.summaryRows.filter((row): row is OptionOverlayRow => row.kind === "option");
+  const readyCount = () => summaryOptionRows().filter((row) => row.option.category === "running").length;
+  const failedCount = () => summaryOptionRows().filter((row) => row.option.category === "stopped").length;
+  const startingCount = () => summaryOptionRows().filter((row) => row.option.category === "starting").length;
   const summary = () => {
-    const total = optionRows().length;
+    const total = summaryOptionRows().length;
     if (total === 0) return "no configured mcp servers";
     return `${readyCount()}/${total} ready${startingCount() ? ` · ${startingCount()} starting` : ""}${failedCount() ? ` · ${failedCount()} failed` : ""}`;
   };
@@ -189,7 +207,7 @@ function McpOverlay(props: McpOverlayProps): JSX.Element {
       <text fg={COLOR.dim}>{`  ${summary()}`}</text>
       <box style={{ flexDirection: "column" }}>
         <Show when={optionRows().length > 0} fallback={<text fg={COLOR.dim}>{"  no mcp servers configured."}</text>}>
-          <For each={optionRows()}>{(row) => <McpServerRow row={row} width={props.width} />}</For>
+          <For each={optionRows()}>{(row) => <McpServerRow row={row} width={props.width} onSelect={props.onSelect} />}</For>
         </Show>
       </box>
       <text fg={COLOR.dim}>{"  press esc to go back"}</text>
@@ -197,7 +215,7 @@ function McpOverlay(props: McpOverlayProps): JSX.Element {
   );
 }
 
-function McpServerRow(props: { row: OptionOverlayRow; width: number }): JSX.Element {
+function McpServerRow(props: { row: OptionOverlayRow; width: number; onSelect: (id: string) => void }): JSX.Element {
   const option = () => props.row.option;
   const selected = () => props.row.selected;
   const state = () => String(option().category ?? "stopped");
@@ -219,7 +237,13 @@ function McpServerRow(props: { row: OptionOverlayRow; width: number }): JSX.Elem
   const footer = () => option().footer ? ` · ${option().footer}` : "";
   const detail = () => truncateLine(option().description ?? "", Math.max(8, props.width - 8));
   return (
-    <box style={{ flexDirection: "column" }}>
+    <box
+      style={{ flexDirection: "column" }}
+      onMouseUp={(event) => {
+        if (event.button !== 0 || event.isDragging || props.row.disabled) return;
+        props.onSelect(props.row.option.id);
+      }}
+    >
       <box style={{ flexDirection: "row" }}>
         <text fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
         <text fg={color()}>{statusGlyph(statusText())}</text>
@@ -253,7 +277,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
     return all.slice(start, start + rowLimit());
   });
   const activeCount = () => tui.store.ui.agentThreads.filter((item) => {
-    return ["created", "starting", "running", "cancelling"].includes(item.status);
+    return item.role === "subagent" && ["created", "starting", "running", "cancelling"].includes(item.status);
   }).length;
   const agentCount = () => tui.store.ui.agentThreads.filter((item) => item.role === "subagent").length;
   const doneCount = () => agentCount() - activeCount();
@@ -301,9 +325,14 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
                 item().mode === "detached" ? "background" : "attached",
                 item().model
               ].filter(Boolean).join(" · ");
-            const select = () => {
+            const select = (event: { button: number; isDragging?: boolean }) => {
+              if (event.button !== 0 || event.isDragging) return;
               const enabled = props.matches.filter((match) => !match.option.disabled);
               const index = enabled.findIndex((match) => match.option.id === row.option.id);
+              if (props.frame.expandedId === row.option.id) {
+                tui.actions.agentDetailToggle(row.option.id);
+                return;
+              }
               tui.actions.overlaySetIndex(index, enabled.length);
               tui.actions.agentDetailToggle(row.option.id);
             };

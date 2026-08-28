@@ -37,20 +37,34 @@ export type CommandContext = {
   exit: () => Promise<void> | void;
 };
 
-const commands = new Map<string, Command>();
+type CommandRegistration = { command: Command };
+
+const commands = new Map<string, CommandRegistration[]>();
 
 export function registerCommand(command: Command): () => void {
-  commands.set(command.name, command);
-  return () => { commands.delete(command.name); };
+  const registration: CommandRegistration = { command };
+  const registrations = commands.get(command.name) ?? [];
+  registrations.push(registration);
+  commands.set(command.name, registrations);
+  return () => {
+    const current = commands.get(command.name);
+    if (!current) return;
+    const index = current.indexOf(registration);
+    if (index < 0) return;
+    current.splice(index, 1);
+    if (current.length === 0) commands.delete(command.name);
+  };
 }
 
 export function registerCommands(defs: readonly Command[]): () => void {
-  for (const def of defs) commands.set(def.name, def);
-  return () => { for (const def of defs) commands.delete(def.name); };
+  const dispose = defs.map(registerCommand);
+  return () => {
+    for (let index = dispose.length - 1; index >= 0; index -= 1) dispose[index]!();
+  };
 }
 
 export function listCommands(filter?: { category?: CommandCategory; ctx?: CommandContext }): Command[] {
-  const all = [...commands.values()];
+  const all = [...commands.values()].flatMap((registrations) => registrations.at(-1)?.command ?? []);
   if (!filter) return all;
   return all.filter((cmd) => {
     if (filter.category && cmd.category !== filter.category) return false;
@@ -60,14 +74,16 @@ export function listCommands(filter?: { category?: CommandCategory; ctx?: Comman
 }
 
 export function findCommand(name: string): Command | undefined {
-  return commands.get(name);
+  return commands.get(name)?.at(-1)?.command;
 }
 
 export function findSlashCommand(slash: string): Command | undefined {
   const token = slash.startsWith("/")
     ? slash.slice(1).trimStart().split(/\s+/, 1)[0] ?? ""
     : slash.trimStart().split(/\s+/, 1)[0] ?? "";
-  for (const command of commands.values()) {
+  for (const registrations of commands.values()) {
+    const command = registrations.at(-1)?.command;
+    if (!command) continue;
     if (command.slashName === token) return command;
     if (command.slashAliases?.includes(token)) return command;
   }
