@@ -5,7 +5,7 @@
 Cyber-first local AI agent for terminal-driven security work.
 
 <p>
-  <a href="https://www.npmjs.com/package/farai"><img src="https://img.shields.io/badge/npm-install%20-g%20farai-CB3837?style=flat&logo=npm&logoColor=white" alt="npm install -g farai"></a>
+  <a href="https://www.npmjs.com/package/farai"><img src="https://img.shields.io/npm/v/farai?style=flat&logo=npm&color=CB3837" alt="npm version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
   <a href="https://github.com/pajarori/farai/stargazers"><img src="https://img.shields.io/github/stars/pajarori/farai?style=flat&logo=github" alt="GitHub stars"></a>
   <a href="https://github.com/pajarori/farai/network/members"><img src="https://img.shields.io/github/forks/pajarori/farai?style=flat&logo=github" alt="GitHub forks"></a>
