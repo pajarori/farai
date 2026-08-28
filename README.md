@@ -49,20 +49,6 @@ Open the interactive:
 farai
 ```
 
-## Commands
-
-| Command | Description |
-|---|---|
-| `farai` | Open the interactive terminal UI |
-| `farai setup` | Prepare config, Docker runtime, local data, and optional model provider |
-| `farai run` | Execute a one-shot prompt |
-| `farai resume` | Continue a saved session |
-| `farai init` | Create a named session |
-| `farai model` | List or add model providers |
-| `farai bench` | Run benchmark manifests and suites |
-| `farai doctor` | Verify the local environment |
-| `farai config` | Print config and auth paths |
-
 Config and auth files live under:
 
 ```text
