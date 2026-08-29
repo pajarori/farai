@@ -48,8 +48,8 @@ export function Transcript(): JSX.Element {
   });
   const rawRows = createMemo(() => tui.store.snapshot.messages.flatMap((message) => (
     message.parts.map((part) => {
-      const streamText = tui.store.ui.streamTextByPartId[part.id];
-      const streamReasoning = tui.store.ui.streamReasoningByPartId[part.id];
+      const streamText = tui.transcript.state.text[part.id]?.content;
+      const streamReasoning = tui.transcript.state.reasoning[part.id]?.content;
       const payload = streamText !== undefined
         ? { text: streamText }
         : streamReasoning !== undefined
@@ -72,6 +72,7 @@ export function Transcript(): JSX.Element {
       ref={scrollRef}
       stickyScroll
       stickyStart="bottom"
+      viewportCulling
       scrollbarOptions={{ visible: false }}
       style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}
     >
@@ -93,8 +94,8 @@ export function Transcript(): JSX.Element {
           <For each={indexedRows().ids}>{(id) => (
             <TranscriptRow
               row={indexedRows().byId.get(id)!}
-              streamedText={tui.store.ui.streamTextByPartId[id]}
-              streamedReasoning={tui.store.ui.streamReasoningByPartId[id]}
+              streamedText={tui.transcript.state.text[id]?.content}
+              streamedReasoning={tui.transcript.state.reasoning[id]?.content}
             />
           )}</For>
         }>

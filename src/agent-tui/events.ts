@@ -11,6 +11,10 @@ export type EventContext = {
   refreshSnapshot?: (sessionId: string) => Promise<void>;
   refreshSessions?: () => Promise<void>;
   onSnapshot?: (snapshot: SessionSnapshot) => void;
+  onTurnStarted?: (turnId: string) => void;
+  onTurnFinished?: (turnId: string) => void;
+  onStreamText?: (partId: string, text: string, turnId: string) => void;
+  onStreamReasoning?: (partId: string, rationale: string, turnId: string) => void;
   afterTurnSettled?: () => void | Promise<void>;
 };
 
@@ -152,9 +156,11 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
   }
   switch (evt.type) {
     case "turn.started":
+      ctx.onTurnStarted?.(evt.turnId);
       ctx.actions.turnStarted(evt.turnId, evt.startedAt);
       break;
     case "turn.finished":
+      ctx.onTurnFinished?.(evt.turnId);
       ctx.actions.turnFinished(evt.turnId);
       await refreshSnapshot(evt.sessionId);
       queueMicrotask(() => { void ctx.afterTurnSettled?.(); });
@@ -178,15 +184,15 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
         }
       }
       if (evt.event.type === "stream_text") {
-        const payload = evt.event.payload as { partId?: unknown; text?: unknown } | undefined;
-        if (typeof payload?.partId === "string" && typeof payload.text === "string") {
-          ctx.actions.streamTextUpdated(payload.partId, payload.text);
+        const payload = evt.event.payload as { turnId?: unknown; partId?: unknown; text?: unknown } | undefined;
+        if (typeof payload?.turnId === "string" && typeof payload.partId === "string" && typeof payload.text === "string") {
+          ctx.onStreamText?.(payload.partId, payload.text, payload.turnId);
         }
       }
       if (evt.event.type === "stream_reasoning") {
-        const payload = evt.event.payload as { partId?: unknown; rationale?: unknown } | undefined;
-        if (typeof payload?.partId === "string" && typeof payload.rationale === "string") {
-          ctx.actions.streamReasoningUpdated(payload.partId, payload.rationale);
+        const payload = evt.event.payload as { turnId?: unknown; partId?: unknown; rationale?: unknown } | undefined;
+        if (typeof payload?.turnId === "string" && typeof payload.partId === "string" && typeof payload.rationale === "string") {
+          ctx.onStreamReasoning?.(payload.partId, payload.rationale, payload.turnId);
         }
       }
       const detail = statusDetailFor(evt.event);

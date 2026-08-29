@@ -72,7 +72,6 @@ export { activeBackgroundJobs } from "./loop/background";
 export type { ActiveBackgroundJob } from "./loop/background";
 
 const REASONING_MAX_BYTES = 8 * 1024;
-const STREAM_RENDER_INTERVAL_MS = 40;
 const STREAM_PERSIST_INTERVAL_MS = 2_000;
 const LIVE_OUTPUT_MAX_BYTES = 2 * 1024;
 const LIVE_OUTPUT_FLUSH_INTERVAL_MS = 150;
@@ -137,14 +136,10 @@ type ProviderCatalogPayload = { key: string; tools: ProviderToolDef[] };
 type StreamingPartsState = {
   textPartId?: string;
   textAccum: string;
-  lastTextRender?: number;
   lastTextPersist?: number;
-  textRenderTimer?: ReturnType<typeof setTimeout>;
   reasoningPartId?: string;
   reasoningAccum?: string;
-  lastReasoningRender?: number;
   lastReasoningPersist?: number;
-  reasoningRenderTimer?: ReturnType<typeof setTimeout>;
 };
 type RenderedToolResult = { result: ToolResult; humanResult: string; modelResult: string };
 
@@ -1648,7 +1643,7 @@ export class AgentRuntime {
       } else if (action.kind === "respond") {
         sawResponse = true;
         if (hasToolAction && isInternalMetaReasoning(action.text)) {
-          this.discardStreamingText(turn.id);
+          this.discardStreamingText(session.id, turn.id);
           shouldContinue = true;
           continue;
         }
@@ -1779,7 +1774,7 @@ export class AgentRuntime {
               ? { timedOut: true, shouldContinue }
               : { cancelled: true, shouldContinue };
           }
-          this.prepareStreamingRetry(turn.id);
+          this.prepareStreamingRetry(session.id, turn.id);
           const retry = plannerRetryState(error, attempt, dispatched.length === 0);
           const errorPayload = {
             turnId: turn.id,
@@ -1829,7 +1824,7 @@ export class AgentRuntime {
         if (reasoningText) this.finalizeReasoning(session, turn, assistantMessage, plannerName, reasoningText);
         const rawRespondText = content.trim();
         const respondText = dispatched.length > 0 && isInternalMetaReasoning(rawRespondText) ? "" : rawRespondText;
-        if (!respondText && rawRespondText && dispatched.length > 0) this.discardStreamingText(turn.id);
+        if (!respondText && rawRespondText && dispatched.length > 0) this.discardStreamingText(session.id, turn.id);
         const outcomes = await Promise.all(dispatched);
         const toolCancelled = outcomes.some((outcome) => outcome.cancelled);
         for (const outcome of outcomes) {
@@ -1958,24 +1953,24 @@ export class AgentRuntime {
   private finalizeReasoning(session: Session, turn: Turn, assistantMessage: Message, plannerName: string, text: string): void {
     const rationale = normalizeReasoningSummary(text);
     const state = this.streamingParts.get(turn.id);
-    if (state?.reasoningRenderTimer) clearTimeout(state.reasoningRenderTimer);
-    if (state) delete state.reasoningRenderTimer;
     if (!rationale) {
       if (state?.reasoningPartId) this.store.updatePartPayload(state.reasoningPartId, { planner: plannerName, rationale: "" });
       if (state) {
+        state.reasoningAccum = "";
+        this.publishStreamingReasoning(session.id, turn.id, state);
         delete state.reasoningPartId;
         delete state.reasoningAccum;
-        delete state.lastReasoningRender;
         delete state.lastReasoningPersist;
       }
       return;
     }
     this.event(session.id, "reasoning_summary", { planner: plannerName, rationale });
     if (state?.reasoningPartId) {
+      state.reasoningAccum = rationale;
+      this.publishStreamingReasoning(session.id, turn.id, state);
       this.store.updatePartPayload(state.reasoningPartId, { planner: plannerName, rationale });
       delete state.reasoningPartId;
       delete state.reasoningAccum;
-      delete state.lastReasoningRender;
       delete state.lastReasoningPersist;
     } else {
       this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "reasoning_summary", payload: { planner: plannerName, rationale } });
@@ -1986,8 +1981,8 @@ export class AgentRuntime {
     responses.push(text);
     const streamed = this.streamingParts.get(turn.id);
     if (streamed?.textPartId) {
-      if (streamed.textRenderTimer) clearTimeout(streamed.textRenderTimer);
-      delete streamed.textRenderTimer;
+      streamed.textAccum = text;
+      this.publishStreamingText(session.id, turn.id, streamed);
       this.store.updatePartPayload(streamed.textPartId, { text });
       delete streamed.textPartId;
       streamed.textAccum = "";
@@ -2364,71 +2359,31 @@ export class AgentRuntime {
     }
   }
 
-  private clearStreamingRenderTimers(state: StreamingPartsState): void {
-    if (state.textRenderTimer) clearTimeout(state.textRenderTimer);
-    if (state.reasoningRenderTimer) clearTimeout(state.reasoningRenderTimer);
-    delete state.textRenderTimer;
-    delete state.reasoningRenderTimer;
-  }
-
   private deleteStreamingParts(turnId: string): void {
-    const state = this.streamingParts.get(turnId);
-    if (state) this.clearStreamingRenderTimers(state);
     this.streamingParts.delete(turnId);
   }
 
-  private publishStreamingText(sessionId: string, state: StreamingPartsState): void {
+  private publishStreamingText(sessionId: string, turnId: string, state: StreamingPartsState): void {
     if (!state.textPartId) return;
     this.store.publishTransientEvent({
       id: id(),
       sessionId,
       type: "stream_text",
-      payload: { partId: state.textPartId, text: state.textAccum },
+      payload: { turnId, partId: state.textPartId, text: state.textAccum },
       createdAt: nowIso()
     });
-    state.lastTextRender = Date.now();
   }
 
-  private scheduleStreamingText(sessionId: string, turnId: string, state: StreamingPartsState, now: number): void {
-    if (!state.textPartId || state.textRenderTimer) return;
-    const elapsed = now - (state.lastTextRender ?? 0);
-    if (elapsed >= STREAM_RENDER_INTERVAL_MS) {
-      this.publishStreamingText(sessionId, state);
-      return;
-    }
-    state.textRenderTimer = setTimeout(() => {
-      if (this.streamingParts.get(turnId) !== state) return;
-      delete state.textRenderTimer;
-      this.publishStreamingText(sessionId, state);
-    }, STREAM_RENDER_INTERVAL_MS - elapsed);
-  }
-
-  private publishStreamingReasoning(sessionId: string, state: StreamingPartsState): void {
+  private publishStreamingReasoning(sessionId: string, turnId: string, state: StreamingPartsState): void {
     if (!state.reasoningPartId) return;
     const rationale = normalizeReasoningSummary(state.reasoningAccum ?? "");
-    if (!rationale) return;
     this.store.publishTransientEvent({
       id: id(),
       sessionId,
       type: "stream_reasoning",
-      payload: { partId: state.reasoningPartId, rationale },
+      payload: { turnId, partId: state.reasoningPartId, rationale },
       createdAt: nowIso()
     });
-    state.lastReasoningRender = Date.now();
-  }
-
-  private scheduleStreamingReasoning(sessionId: string, turnId: string, state: StreamingPartsState, now: number): void {
-    if (!state.reasoningPartId || state.reasoningRenderTimer) return;
-    const elapsed = now - (state.lastReasoningRender ?? 0);
-    if (elapsed >= STREAM_RENDER_INTERVAL_MS) {
-      this.publishStreamingReasoning(sessionId, state);
-      return;
-    }
-    state.reasoningRenderTimer = setTimeout(() => {
-      if (this.streamingParts.get(turnId) !== state) return;
-      delete state.reasoningRenderTimer;
-      this.publishStreamingReasoning(sessionId, state);
-    }, STREAM_RENDER_INTERVAL_MS - elapsed);
   }
 
   private applyStreamEvent(session: Session, turn: Turn, assistantMessage: Message, event: PlanStreamEvent): void {
@@ -2444,17 +2399,12 @@ export class AgentRuntime {
       if (!state.reasoningPartId) {
         const part = this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "reasoning_summary", payload: { rationale } });
         state.reasoningPartId = part.id;
-        state.lastReasoningRender = now;
         state.lastReasoningPersist = now;
       } else if (now - (state.lastReasoningPersist ?? 0) >= STREAM_PERSIST_INTERVAL_MS) {
-        if (state.reasoningRenderTimer) clearTimeout(state.reasoningRenderTimer);
-        delete state.reasoningRenderTimer;
         this.store.updatePartPayload(state.reasoningPartId, { rationale });
-        state.lastReasoningRender = now;
         state.lastReasoningPersist = now;
-      } else {
-        this.scheduleStreamingReasoning(session.id, turn.id, state, now);
       }
+      this.publishStreamingReasoning(session.id, turn.id, state);
       this.streamingParts.set(turn.id, state);
       return;
     }
@@ -2475,51 +2425,44 @@ export class AgentRuntime {
             payload: { rationale }
           });
           state.reasoningPartId = reasoningPart.id;
-          state.lastReasoningRender = now;
           state.lastReasoningPersist = now;
+          this.publishStreamingReasoning(session.id, turn.id, state);
         }
       }
       const part = this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "text", payload: { text: state.textAccum } });
       state.textPartId = part.id;
-      state.lastTextRender = now;
       state.lastTextPersist = now;
     } else if (now - (state.lastTextPersist ?? 0) >= STREAM_PERSIST_INTERVAL_MS) {
-      if (state.textRenderTimer) clearTimeout(state.textRenderTimer);
-      delete state.textRenderTimer;
       this.store.updatePartPayload(state.textPartId, { text: state.textAccum });
-      state.lastTextRender = now;
       state.lastTextPersist = now;
-    } else {
-      this.scheduleStreamingText(session.id, turn.id, state, now);
     }
+    this.publishStreamingText(session.id, turn.id, state);
     this.streamingParts.set(turn.id, state);
   }
 
-  private discardStreamingText(turnId: string): void {
+  private discardStreamingText(sessionId: string, turnId: string): void {
     const state = this.streamingParts.get(turnId);
     if (!state) return;
     if (state.textPartId) this.store.updatePartPayload(state.textPartId, { text: "" });
-    if (state.textRenderTimer) clearTimeout(state.textRenderTimer);
     state.textAccum = "";
+    this.publishStreamingText(sessionId, turnId, state);
     delete state.textPartId;
-    delete state.lastTextRender;
     delete state.lastTextPersist;
-    delete state.textRenderTimer;
   }
 
-  private prepareStreamingRetry(turnId: string): void {
+  private prepareStreamingRetry(sessionId: string, turnId: string): void {
     const state = this.streamingParts.get(turnId);
     if (!state) return;
     if (state.textPartId) this.store.updatePartPayload(state.textPartId, { text: "" });
     if (state.reasoningPartId) this.store.updatePartPayload(state.reasoningPartId, { rationale: "" });
-    this.clearStreamingRenderTimers(state);
     state.textAccum = "";
+    state.reasoningAccum = "";
+    this.publishStreamingText(sessionId, turnId, state);
+    this.publishStreamingReasoning(sessionId, turnId, state);
     delete state.reasoningPartId;
     delete state.reasoningAccum;
-    delete state.lastReasoningRender;
     delete state.lastReasoningPersist;
-    state.lastTextRender = Date.now();
-    state.lastTextPersist = state.lastTextRender;
+    state.lastTextPersist = Date.now();
   }
 
   private async planWithRetry(
@@ -2551,7 +2494,7 @@ export class AgentRuntime {
             lastError = "cancelled";
             break;
           }
-          this.prepareStreamingRetry(turn.id);
+          this.prepareStreamingRetry(session.id, turn.id);
           const retry = plannerRetryState(error, attempt, true);
           const errorPayload = {
             turnId: turn.id,

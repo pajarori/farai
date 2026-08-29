@@ -43,7 +43,7 @@
     "dev": "bun run src/cli/index.ts",
     "link:local": "bun run build && bun link",
     "start": "bun run src/cli/index.ts",
-    "tui:test": "bun test ./test/tui-router.test.ts ./test/tui-input-architecture.test.ts ./test/tui-composer.test.ts ./test/tui-proxy-divider.test.ts ./test/tui-proxy-state.test.ts ./test/tui-footer-state.test.ts ./test/tui-renderers.test.ts ./test/tui-transcript-render.test.tsx ./test/tui-store-session-race.test.tsx ./test/tui-store-previews.test.ts ./test/tui-events.test.ts ./test/tui-runtime-port.test.ts ./test/tui-dialog-fuzzy.test.ts ./test/tui-list-scroll.test.ts ./test/tui-command-registry.test.ts ./test/tui-cells.test.ts ./test/tui-clipboard.test.ts ./test/tui-resize.test.ts ./test/tui-steering-wiring.test.ts ./test/tui-websocket-history.test.ts ./test/tui-websocket-render.test.tsx",
+    "tui:test": "bun test ./test/tui-router.test.ts ./test/tui-input-architecture.test.ts ./test/tui-composer.test.ts ./test/tui-proxy-divider.test.ts ./test/tui-proxy-state.test.ts ./test/tui-footer-state.test.ts ./test/tui-renderers.test.ts ./test/tui-transcript-render.test.tsx ./test/tui-transcript-stream-engine.test.ts ./test/tui-store-session-race.test.tsx ./test/tui-store-previews.test.ts ./test/tui-events.test.ts ./test/tui-runtime-port.test.ts ./test/tui-dialog-fuzzy.test.ts ./test/tui-list-scroll.test.ts ./test/tui-command-registry.test.ts ./test/tui-cells.test.ts ./test/tui-clipboard.test.ts ./test/tui-resize.test.ts ./test/tui-steering-wiring.test.ts ./test/tui-websocket-history.test.ts ./test/tui-websocket-render.test.tsx",
     "doctor": "bun run src/cli/index.ts doctor",
     "typecheck": "tsc --noEmit",
     "test": "bun test ./test",

@@ -5,10 +5,12 @@ import { createFaraiStore, isAgentBusy } from "../store";
 import { createTuiEventDispatcher } from "../events";
 import { useTuiRuntime } from "./runtime";
 import type { ProxyFlowQuery, ProxyFlowSummary } from "../../agent-tools/services/mitmproxy/flows";
-import { projectMessagesToRows, type TimelineRow } from "../renderers";
+import type { TimelineRow } from "../renderers";
 import type { AgentThreadSummary } from "../runtime-port";
 import type { UserInputAnswer } from "../../types";
 import type { PreparedUpdateCheck } from "../update-check";
+import { createTranscriptStreamEngine, type TranscriptStreamEngine } from "../transcript/stream-engine";
+import { createTranscriptProjection } from "../transcript/projection";
 
 export function proxyRefreshQuery(): ProxyFlowQuery {
   return { limit: 300 };
@@ -18,6 +20,7 @@ export type TuiStoreValue = {
   store: FaraiTuiStore;
   actions: StoreActions;
   timelineRows: () => TimelineRow[];
+  transcript: TranscriptStreamEngine;
   submitPrompt: (text: string) => boolean;
   submitUserInput: (answer: UserInputAnswer) => Promise<boolean>;
   answerUserInputQuestion: (questionId: string, answer: string) => Promise<boolean>;
@@ -56,6 +59,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   const { port, workspace, capabilities } = useTuiRuntime();
   const dims = useTerminalDimensions();
   const { store, setStore: _set, actions } = createFaraiStore(workspace);
+  const transcript = createTranscriptStreamEngine();
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
   const proxyRefreshes = new Map<string, Promise<void>>();
   const mcpRefreshes = new Map<string, { epoch: number; promise: Promise<void> }>();
@@ -75,13 +79,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
       if (!disposed) actions.updateNoticeSet(notice);
     });
   }
-  const timelineRows = createMemo(() => projectMessagesToRows(
-    store.snapshot.messages,
-    Math.max(1, dims().width - 4),
-    store.snapshot.runningTurnId,
-    store.snapshot.toolCalls,
-    store.snapshot.toolInputPreviews
-  ));
+  const timelineRows = createTranscriptProjection(store, () => Math.max(1, dims().width - 4));
 
   function setStatusDetail(detail: string | undefined, timeoutMs?: number): void {
     if (disposed) return;
@@ -140,6 +138,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
       const snapshot = await port.loadSnapshot(sid);
       if (disposed || store.activeSessionId !== sid || snapshotGenerations.get(sid) !== generation) return;
       actions.snapshotApplied(snapshot);
+      transcript.reconcile(snapshot.messages, snapshot.runningTurnId);
       for (const entry of promptHistoryFromMessages(snapshot.messages)) {
         actions.promptHistoryAdd(entry, "session");
       }
@@ -162,11 +161,14 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   async function selectSessionForIntent(sessionId: string, intent: number): Promise<void> {
     if (disposed || sessionSelectionIntent !== intent) return;
     if (sessionId === store.activeSessionId) return;
+    transcript.reset();
     actions.activeSessionSet(sessionId);
     const pendingSubmission = promptSubmissions.get(sessionId);
     if (pendingSubmission) pendingSubmission.generation = actions.promptSubmissionStarted();
     props.onActiveSessionChange?.(sessionId);
     port.setActiveSession(sessionId);
+    const runningTurnId = port.getRunningTurnId?.(sessionId);
+    if (runningTurnId) transcript.beginTurn(runningTurnId);
     try {
       await requestSnapshotRefresh(sessionId);
     } catch (error) {
@@ -592,13 +594,19 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     setStatusDetail,
     refreshSnapshot: requestSnapshotRefresh,
     refreshSessions,
-    onSnapshot: () => undefined
+    onSnapshot: (snapshot) => transcript.reconcile(snapshot.messages, snapshot.runningTurnId),
+    onTurnStarted: (turnId) => transcript.beginTurn(turnId),
+    onTurnFinished: (turnId) => transcript.finishTurn(turnId),
+    onStreamText: (partId, text, turnId) => transcript.updateText(partId, text, turnId),
+    onStreamReasoning: (partId, rationale, turnId) => transcript.updateReasoning(partId, rationale, turnId)
   }, (error) => {
     if (!disposed) actions.errorSet(error instanceof Error ? error.message : String(error));
   });
   const off = port.event.on((event) => {
     if (disposed) return;
-    if (event.type === "store.changed" || event.type === "store.batch") invalidateSnapshot(event.sessionId);
+    if (event.type === "store.changed" || event.type === "store.batch" || event.type === "turn.started") {
+      invalidateSnapshot(event.sessionId);
+    }
     eventDispatcher.dispatch(event);
   });
   onCleanup(() => {
@@ -609,6 +617,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     mcpOverlayGeneration += 1;
     off();
     eventDispatcher.dispose();
+    transcript.dispose();
     if (statusTimer) clearTimeout(statusTimer);
   });
 
@@ -649,6 +658,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     store,
     actions,
     timelineRows,
+    transcript,
     submitPrompt,
     submitUserInput,
     answerUserInputQuestion,

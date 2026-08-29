@@ -995,7 +995,10 @@ export function KeyboardController(): JSX.Element {
     for (const message of [...tui.store.snapshot.messages].reverse()) {
       if (message.role !== "assistant") continue;
       const parts = message.parts
+        .filter((part) => part.type === "text")
         .map((part) => {
+          const streamed = tui.transcript.state.text[part.id]?.content;
+          if (streamed !== undefined) return streamed;
           if (typeof part.payload === "string") return part.payload;
           if (part.payload && typeof part.payload === "object" && "text" in part.payload) {
             return String((part.payload as { text?: unknown }).text ?? "");

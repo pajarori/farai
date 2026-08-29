@@ -235,6 +235,14 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
   function enqueue(evt: TuiEvent): void {
     if (disposed) return;
     if (evt.type === "snapshot.changed" && pending.some((item) => item.type === "snapshot.changed" && item.sessionId === evt.sessionId)) return;
+    const streamIdentity = transientStreamIdentity(evt);
+    if (streamIdentity) {
+      const existing = pending.length - 1;
+      if (existing >= 0 && transientStreamIdentity(pending[existing]!) === streamIdentity) pending[existing] = evt;
+      else pending.push(evt);
+      if (!flushTimer) flushTimer = setTimeout(flush, BATCH_DEBOUNCE_MS);
+      return;
+    }
     if (evt.type === "activity.changed") {
       const existing = pending.findIndex((item) => item.type === "activity.changed" && item.sessionId === evt.sessionId);
       if (existing >= 0) pending[existing] = evt;
@@ -699,6 +707,14 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       await runtime.shutdown();
     }
   };
+}
+
+function transientStreamIdentity(event: TuiEvent): string | undefined {
+  if (event.type !== "event.appended") return undefined;
+  if (event.event.type !== "stream_text" && event.event.type !== "stream_reasoning") return undefined;
+  const payload = event.event.payload as { turnId?: unknown; partId?: unknown } | undefined;
+  if (typeof payload?.turnId !== "string" || typeof payload.partId !== "string") return undefined;
+  return `${event.sessionId}:${payload.turnId}:${event.event.type}:${payload.partId}`;
 }
 
 function storeChangeIdentity(change: StoreChange): string {
