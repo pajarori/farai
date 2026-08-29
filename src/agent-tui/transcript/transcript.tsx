@@ -47,7 +47,16 @@ export function Transcript(): JSX.Element {
     return { ids, byId };
   });
   const rawRows = createMemo(() => tui.store.snapshot.messages.flatMap((message) => (
-    message.parts.map((part) => `${message.role}.${part.type} ${formatPayload(part.payload, 16_000)}`)
+    message.parts.map((part) => {
+      const streamText = tui.store.ui.streamTextByPartId[part.id];
+      const streamReasoning = tui.store.ui.streamReasoningByPartId[part.id];
+      const payload = streamText !== undefined
+        ? { text: streamText }
+        : streamReasoning !== undefined
+          ? { rationale: streamReasoning }
+          : part.payload;
+      return `${message.role}.${part.type} ${formatPayload(payload, 16_000)}`;
+    })
   )));
 
   createEffect(() => {
@@ -81,7 +90,13 @@ export function Transcript(): JSX.Element {
         }
       >
         <Show when={tui.store.ui.rawOutput} fallback={
-          <For each={indexedRows().ids}>{(id) => <TranscriptRow row={indexedRows().byId.get(id)!} />}</For>
+          <For each={indexedRows().ids}>{(id) => (
+            <TranscriptRow
+              row={indexedRows().byId.get(id)!}
+              streamedText={tui.store.ui.streamTextByPartId[id]}
+              streamedReasoning={tui.store.ui.streamReasoningByPartId[id]}
+            />
+          )}</For>
         }>
           <For each={rawRows()}>{(row) => (
             <box style={{ flexDirection: "column", marginBottom: 1, paddingLeft: 1, paddingRight: 1 }}>
@@ -164,6 +179,8 @@ function valuesEqual(left: unknown, right: unknown, seen: WeakMap<object, WeakSe
 
 type TranscriptRowProps = {
   row: TimelineRow;
+  streamedText?: string | undefined;
+  streamedReasoning?: string | undefined;
 };
 
 function TranscriptRow(props: TranscriptRowProps): JSX.Element {
@@ -173,11 +190,12 @@ function TranscriptRow(props: TranscriptRowProps): JSX.Element {
       id={props.row.id}
       style={{
         flexDirection: "column",
+        flexShrink: 0,
         paddingLeft: isUser ? 0 : 1,
         paddingRight: isUser ? 0 : 1
       }}
     >
-      <FaraiRow row={props.row} />
+      <FaraiRow row={props.row} streamedText={props.streamedText} streamedReasoning={props.streamedReasoning} />
     </box>
   );
 }

@@ -183,6 +183,12 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
           ctx.actions.streamTextUpdated(payload.partId, payload.text);
         }
       }
+      if (evt.event.type === "stream_reasoning") {
+        const payload = evt.event.payload as { partId?: unknown; rationale?: unknown } | undefined;
+        if (typeof payload?.partId === "string" && typeof payload.rationale === "string") {
+          ctx.actions.streamReasoningUpdated(payload.partId, payload.rationale);
+        }
+      }
       const detail = statusDetailFor(evt.event);
       const timeout = statusTimeoutForEvent(evt.event);
       if (detail !== undefined) {

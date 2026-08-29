@@ -79,7 +79,8 @@ export type SessionEventType =
   | "tool_input_end"
   | "loop_supervision"
   | "control"
-  | "stream_text";
+  | "stream_text"
+  | "stream_reasoning";
 
 export type Campaign = {
   id: string;

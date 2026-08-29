@@ -1,4 +1,4 @@
-import { Show, type JSX } from "solid-js";
+import { Show, createMemo, type JSX } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import type { TimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
@@ -8,26 +8,31 @@ import { useTuiStore } from "../../context/store";
 import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
 import { createPrimaryClickGesture } from "../../input/mouse";
+import { parseReasoning } from "../../reasoning";
 
 type ReasoningRowProps = {
   row: Extract<TimelineRow, { kind: "thinking" }>;
+  streamedReasoning?: string | undefined;
 };
 
 export function ReasoningRow(props: ReasoningRowProps): JSX.Element {
   const tui = useTuiStore();
   const dims = useTerminalDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
-  const label = () => truncateLine(props.row.title === "reasoning" ? "thinking" : props.row.title, Math.max(1, dims().width - 4));
+  const content = createMemo(() => props.streamedReasoning === undefined
+    ? { title: props.row.title, body: props.row.body }
+    : parseReasoning(props.streamedReasoning));
+  const label = () => truncateLine(content().title === "reasoning" ? "thinking" : content().title, Math.max(1, dims().width - 4));
   const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }}>
-      <box style={{ flexDirection: "row" }} {...toggleClick}>
+    <box style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1 }}>
+      <box style={{ flexDirection: "row", flexShrink: 0 }} {...toggleClick}>
         <TranscriptMarker color={COLOR.dim} spinning={props.row.streaming} />
         <text fg={COLOR.dim}>{label()}</text>
       </box>
-      <Show when={expanded() && props.row.body.trim()}>
+      <Show when={expanded() && content().body.trim()}>
         <ExpandedPanel>
-          <markdown content={props.row.body} streaming={props.row.streaming} syntaxStyle={syntax()} fg={COLOR.dim} />
+          <markdown content={content().body} streaming={true} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.dim} />
         </ExpandedPanel>
       </Show>
     </box>

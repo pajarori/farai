@@ -115,6 +115,8 @@ export type FaraiTuiStore = {
     centerScroll: { action: "up" | "down" | "pageUp" | "pageDown" | "home" | "end"; sequence: number };
     sessionStats: Record<string, Omit<SessionListItem, "session">>;
     agentThreads: AgentThreadSummary[];
+    streamTextByPartId: Record<string, string>;
+    streamReasoningByPartId: Record<string, string>;
     lastError: string | undefined;
     requestUserInput: RequestUserInputUiState | undefined;
     updateNotice: UpdateNotice | undefined;
@@ -210,6 +212,7 @@ export type StoreActions = {
   turnFinished: (turnId: string) => void;
   errorSet: (message: string | undefined) => void;
   streamTextUpdated: (partId: string, text: string) => void;
+  streamReasoningUpdated: (partId: string, rationale: string) => void;
   toolInputPreviewUpdated: (preview: ToolInputPreview) => void;
   toolInputPreviewRemoved: (previewId: string) => void;
   requestUserInputQuestionSet: (index: number) => void;
@@ -303,6 +306,8 @@ export function initialStore(workspace: string): FaraiTuiStore {
       centerScroll: { action: "down", sequence: 0 },
       sessionStats: {},
       agentThreads: [],
+      streamTextByPartId: {},
+      streamReasoningByPartId: {},
       lastError: undefined,
       requestUserInput: undefined,
       updateNotice: undefined
@@ -364,6 +369,8 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.modelProviderRemoval = undefined;
         s.ui.mcpStatuses = [];
         s.ui.agentThreads = [];
+        s.ui.streamTextByPartId = {};
+        s.ui.streamReasoningByPartId = {};
         s.ui.centerScroll = { action: "down", sequence: 0 };
         s.ui.mcpStatusError = undefined;
         s.ui.lastError = undefined;
@@ -378,6 +385,10 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         : [];
       batch(() => {
         applySnapshotPatch(setStore, { ...next, toolInputPreviews });
+        if (!next.runningTurnId || next.runningTurnId !== previousTurnId) {
+          setStore("ui", "streamTextByPartId", {});
+          setStore("ui", "streamReasoningByPartId", {});
+        }
         setStore("ui", "requestUserInput", syncRequestUserInputUiState(store.ui.requestUserInput, next.pendingUserInput));
         if (next.runningTurnId) setStore("ui", "submitting", false);
         syncTurnLifecycle(store, setStore, previousTurnId, next.runningTurnId, next.runningTurnStartedAt);
@@ -397,6 +408,10 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       if (nextTurnId && store.ui.submitting) promptSubmissionGeneration += 1;
       batch(() => {
         applySnapshotPatch(setStore, patch);
+        if (patchesTurn && (!nextTurnId || nextTurnId !== previousTurnId)) {
+          setStore("ui", "streamTextByPartId", {});
+          setStore("ui", "streamReasoningByPartId", {});
+        }
         if (Object.prototype.hasOwnProperty.call(patch, "pendingUserInput")) {
           setStore("ui", "requestUserInput", syncRequestUserInputUiState(store.ui.requestUserInput, patch.pendingUserInput));
         }
@@ -507,6 +522,8 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.snapshot.events = [];
         s.snapshot.toolCalls = [];
         s.snapshot.toolInputPreviews = [];
+        s.ui.streamTextByPartId = {};
+        s.ui.streamReasoningByPartId = {};
       }));
     },
     rawOutputToggle(): void {
@@ -747,6 +764,8 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.statusDetail = undefined;
         s.ui.contextUsage = undefined;
         s.ui.lastError = undefined;
+        s.ui.streamTextByPartId = {};
+        s.ui.streamReasoningByPartId = {};
         s.snapshot.toolInputPreviews = [];
         s.snapshot.pendingSteers = [];
         s.snapshot.queuedPrompts = [];
@@ -794,6 +813,10 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       promptSubmissionGeneration += 1;
       setStore(produce((s) => {
         const changed = s.snapshot.runningTurnId !== turnId;
+        if (changed) {
+          s.ui.streamTextByPartId = {};
+          s.ui.streamReasoningByPartId = {};
+        }
         s.ui.submitting = false;
         s.snapshot.runningTurnId = turnId;
         s.snapshot.runningTurnStartedAt = startedAt;
@@ -818,14 +841,10 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore("ui", "lastError", message);
     },
     streamTextUpdated(partId: string, text: string): void {
-      setStore(produce((s) => {
-        for (const message of s.snapshot.messages) {
-          const part = message.parts.find((item) => item.id === partId);
-          if (!part) continue;
-          part.payload = { text };
-          return;
-        }
-      }));
+      setStore("ui", "streamTextByPartId", partId, text);
+    },
+    streamReasoningUpdated(partId: string, rationale: string): void {
+      setStore("ui", "streamReasoningByPartId", partId, rationale);
     },
     toolInputPreviewUpdated(preview: ToolInputPreview): void {
       setStore(produce((s) => {

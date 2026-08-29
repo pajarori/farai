@@ -12,13 +12,15 @@ import { PhaseRow, ProgressRow } from "./cells/progress-cell";
 
 type FaraiRowProps = {
   row: TimelineRow;
+  streamedText?: string | undefined;
+  streamedReasoning?: string | undefined;
 };
 
 export function FaraiRow(props: FaraiRowProps): JSX.Element {
   switch (props.row.kind) {
     case "user": return <UserPrompt row={props.row} />;
-    case "assistant": return <AssistantMessage row={props.row} />;
-    case "thinking": return <ReasoningRow row={props.row} />;
+    case "assistant": return <AssistantMessage row={props.row} streamedText={props.streamedText} />;
+    case "thinking": return <ReasoningRow row={props.row} streamedReasoning={props.streamedReasoning} />;
     case "tool": return <ToolRow row={props.row} />;
     case "exploration": return <ExplorationRow row={props.row} />;
     case "plan": return <PlanRow row={props.row} />;
