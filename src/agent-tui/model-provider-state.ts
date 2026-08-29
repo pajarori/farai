@@ -17,6 +17,7 @@ export type ModelProviderWizardState = {
   location: "global" | "project";
   probe: ModelProviderProbe | undefined;
   busy: boolean;
+  busyKind?: "probe" | "save" | undefined;
   error: string | undefined;
 };
 

@@ -1,11 +1,11 @@
 import type { PasteEvent, TextareaRenderable } from "@opentui/core";
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, onCleanup, onMount, type JSX } from "solid-js";
 import { useRenderer, useTerminalDimensions } from "@opentui/solid";
 import { useTuiStore } from "../context/store";
 import { useComposerControl } from "../context/composer";
 import { COLOR } from "../theme";
-import { isVisibleSlashCommand, listCommands, type Command } from "../command-registry";
-import { slashMatches as matchSlashCommands } from "../slash-autocomplete";
+import type { Command } from "../command-registry";
+import { slashCommandOptions, slashMatches as matchSlashCommands, slashPopupRowLimit, slashPopupVisible } from "../slash-autocomplete";
 import { truncateLine } from "../renderers";
 import type { DialogOption } from "../dialog/fuzzy";
 import { isPrimaryClick } from "../input/mouse";
@@ -21,7 +21,6 @@ export function Composer(): JSX.Element {
   const dims = useTerminalDimensions();
   const renderer = useRenderer();
   let textareaRef!: TextareaRenderable;
-  const [composerHeight, setComposerHeight] = createSignal(1);
   let composerHeightRefreshPending = false;
   let disposed = false;
   const decoder = new TextDecoder();
@@ -29,7 +28,7 @@ export function Composer(): JSX.Element {
   const syncComposerHeight = (): void => {
     if (!textareaRef) return;
     const visualLines = textareaRef.editorView.getTotalVirtualLineCount();
-    setComposerHeight(composerHeightFromVisualLines(visualLines));
+    composer.setHeight(composerHeightFromVisualLines(visualLines));
   };
   const refreshComposerHeightAfterLayout = (): void => {
     composerHeightRefreshPending = false;
@@ -44,23 +43,21 @@ export function Composer(): JSX.Element {
     renderer.requestRender();
   };
 
-  const slashOptions = createMemo<DialogOption<Command>[]>(() => listCommands()
-    .filter((command) => command.slashName && isVisibleSlashCommand(command))
-    .map((command) => ({
-      id: command.name,
-      title: `/${command.slashName ?? command.name}`,
-      ...(command.desc ? { description: command.desc } : {}),
-      value: command
-    })));
-  const slashMatches = createMemo(() => matchSlashCommands(slashOptions(), composer.text()));
-  const slashActive = () => composer.text().startsWith("/")
-    && !composer.text().slice(1).includes(" ")
-    && tui.store.ui.slashSuppressedText !== composer.text()
-    && slashMatches().length > 0
-    && tui.store.ui.overlayStack.length === 0;
-  const popupWidth = () => Math.max(24, dims().width);
-  const commandWidth = () => Math.min(28, Math.max(8, ...slashMatches().map((option) => terminalWidth(option.title) + 2)));
-  const descWidth = () => Math.max(12, popupWidth() - commandWidth() - 6);
+  const slashOptions = createMemo<DialogOption<Command>[]>(slashCommandOptions);
+  const slashRowLimit = () => slashPopupRowLimit(dims().height);
+  const slashMatches = createMemo(() => matchSlashCommands(slashOptions(), composer.text(), slashRowLimit()));
+  const slashActive = () => slashPopupVisible(
+    composer.text(),
+    tui.store.ui.slashSuppressedText === composer.text(),
+    slashMatches().length,
+    tui.store.ui.overlayStack.length > 0 || tui.store.ui.centerSurfaceStack.length > 0
+  );
+  const popupWidth = () => Math.max(1, dims().width);
+  const commandWidth = () => Math.min(
+    Math.max(1, popupWidth() - 2),
+    Math.min(28, Math.max(8, ...slashOptions().map((option) => terminalWidth(option.title) + 2)))
+  );
+  const descWidth = () => Math.max(0, popupWidth() - commandWidth() - 2);
   const rule = () => "─".repeat(Math.max(1, dims().width));
 
   createEffect(() => {
@@ -108,7 +105,7 @@ export function Composer(): JSX.Element {
   return (
     <box style={{ flexShrink: 0, flexDirection: "column", paddingTop: 0 }}>
       <text fg={COLOR.border}>{rule()}</text>
-      <box style={{ flexDirection: "row", height: composerHeight(), backgroundColor: COLOR.panel }}>
+      <box style={{ flexDirection: "row", height: composer.height(), backgroundColor: COLOR.panel }}>
         <text fg={COLOR.dim}>{"› "}</text>
         <textarea
           id="composer-input"
@@ -123,10 +120,11 @@ export function Composer(): JSX.Element {
           focusedTextColor={COLOR.text}
           cursorColor={COLOR.accent}
           wrapMode="word"
-          style={{ height: composerHeight(), flexGrow: 1, backgroundColor: COLOR.panel }}
+          style={{ height: composer.height(), flexGrow: 1, backgroundColor: COLOR.panel }}
           onContentChange={() => {
             const value = textareaRef?.plainText ?? "";
             composer.setText(value);
+            if (tui.store.ui.lastError) tui.actions.errorSet(undefined);
             syncComposerHeight();
             scheduleComposerHeightRefresh();
             if (tui.store.ui.footerMode !== "ambient" && value.trim()) tui.actions.footerModeSet("ambient");
@@ -136,11 +134,11 @@ export function Composer(): JSX.Element {
         />
       </box>
       <Show when={slashActive()}>
-        <box style={{ width: popupWidth(), flexDirection: "column" }}>
+        <box style={{ width: popupWidth(), height: slashRowLimit(), flexDirection: "column", overflow: "hidden" }}>
           <For each={slashMatches()}>{(option, index) => {
             const active = () => index() === tui.store.ui.slashIndex;
             const command = () => fitTerminal(option.title, commandWidth());
-            const desc = () => truncateLine(option.description ?? "", descWidth());
+            const desc = () => descWidth() >= 8 ? truncateLine(option.description ?? "", descWidth()) : "";
             return (
               <box
                 style={{ flexDirection: "row" }}

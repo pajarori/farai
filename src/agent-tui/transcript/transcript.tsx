@@ -85,8 +85,8 @@ export function Transcript(): JSX.Element {
                 <text fg={COLOR.dim}>{truncateLine(line, Math.max(1, dims().width - 4))}</text>
               )}</For>
             </box>
-            <text fg={COLOR.dim}>{"› message farai to get started"}</text>
-            <text fg={COLOR.dim}>{"  / opens commands · ? shows shortcuts"}</text>
+            <text fg={COLOR.dim}>{truncateLine("› message farai to get started", Math.max(1, dims().width - 2))}</text>
+            <text fg={COLOR.dim}>{truncateLine("  / opens commands · ? shows shortcuts", Math.max(1, dims().width - 2))}</text>
           </box>
         }
       >

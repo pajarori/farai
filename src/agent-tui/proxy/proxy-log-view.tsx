@@ -10,7 +10,7 @@ import { proxyFlowsForFilter, type ProxyViewFilter } from "../store";
 import { ProxyFlowSplitView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
-import { fitTerminal, truncateTerminal } from "../terminal-text";
+import { fitTerminal, fitTerminalPair, truncateTerminal } from "../terminal-text";
 
 export function proxyListHeightFromDrag(startHeight: number, startY: number, pointerY: number): number {
   return startHeight + pointerY - startY;
@@ -32,7 +32,10 @@ export function ProxyLogView(): JSX.Element {
   const [dividerDragging, setDividerDragging] = createSignal(false);
   let dividerDragStart: { pointerY: number; listHeight: number } | undefined;
   let suppressProxyRowMouseUp = false;
+  let dividerGestureGeneration = 0;
   let detailRequestId = 0;
+  let scrollRequestId = 0;
+  let disposed = false;
   let detailLoadingTimer: ReturnType<typeof setTimeout> | undefined;
   const detailCache = new Map<string, ProxyFlowDetail>();
   const detailRequests = new Map<string, Promise<ProxyFlowDetail>>();
@@ -66,6 +69,7 @@ export function ProxyLogView(): JSX.Element {
   const beginListResize = (event: MouseEvent): void => {
     if (event.button !== 0) return;
     dividerDragStart = { pointerY: event.y, listHeight: listHeight() };
+    dividerGestureGeneration += 1;
     suppressProxyRowMouseUp = true;
     setDividerDragging(true);
     event.preventDefault();
@@ -84,9 +88,12 @@ export function ProxyLogView(): JSX.Element {
   const finishListResize = (event: MouseEvent): void => {
     if (!dividerDragStart) return;
     resizeList(event);
+    const generation = dividerGestureGeneration;
     dividerDragStart = undefined;
     setDividerDragging(false);
-    queueMicrotask(() => { suppressProxyRowMouseUp = false; });
+    queueMicrotask(() => {
+      if (!disposed && generation === dividerGestureGeneration) suppressProxyRowMouseUp = false;
+    });
   };
   const proxyHint = createMemo(() => {
     const service = mitmServices()[0];
@@ -96,13 +103,14 @@ export function ProxyLogView(): JSX.Element {
 
   createEffect(() => {
     const signature = selectedSignature();
+    const compact = compactHeight();
     const requestId = ++detailRequestId;
     const flow = untrack(selectedFlow);
     if (detailLoadingTimer) {
       clearTimeout(detailLoadingTimer);
       detailLoadingTimer = undefined;
     }
-    if (!flow) {
+    if (compact || !flow) {
       setDetail(undefined);
       setDetailError(undefined);
       setDetailLoading(false);
@@ -152,18 +160,30 @@ export function ProxyLogView(): JSX.Element {
   });
 
   onCleanup(() => {
+    disposed = true;
     detailRequestId += 1;
+    scrollRequestId += 1;
+    dividerGestureGeneration += 1;
     if (detailLoadingTimer) clearTimeout(detailLoadingTimer);
   });
 
   createEffect(() => {
     const id = selectedId();
     if (!id) return;
+    const requestId = ++scrollRequestId;
     queueMicrotask(() => {
-      if (!scrollRef) return;
+      if (disposed || requestId !== scrollRequestId || !scrollRef) return;
       try { scrollRef.scrollChildIntoView(id); } catch {}
     });
   });
+
+  const detailStatus = () => fitTerminalPair(
+    selectedFlow() && selectedPresentation() ? `${selectedPresentation()!.kind} · ${selectedPresentation()!.method} ${selectedFlow()!.url}` : "no flow selected",
+    detailLoading() ? "loading detail" : detailError() ?? "",
+    tableWidth(),
+    8,
+    1
+  );
 
   return (
     <box
@@ -225,8 +245,8 @@ export function ProxyLogView(): JSX.Element {
       </box>
       <Show when={!compactHeight()}>
         <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between", marginTop: 1 }}>
-          <text fg={COLOR.dim}>{truncate(selectedFlow() && selectedPresentation() ? `${selectedPresentation()!.kind} · ${selectedPresentation()!.method} ${selectedFlow()!.url}` : "no flow selected", Math.max(8, tableWidth() - 20))}</text>
-          <text fg={detailLoading() ? COLOR.accent : detailError() ? COLOR.error : COLOR.dim}>{truncate(detailLoading() ? "loading detail" : detailError() ?? "", 18)}</text>
+          <text fg={COLOR.dim}>{detailStatus().left}</text>
+          <text fg={detailLoading() ? COLOR.accent : detailError() ? COLOR.error : COLOR.dim}>{detailStatus().right}</text>
         </box>
         <box
           style={{ height: 1, flexShrink: 0, alignItems: "center", justifyContent: "flex-start" }}
@@ -289,6 +309,7 @@ function ProxySubTabs(props: {
 export function proxySubTabLabel(filter: ProxyViewFilter, count: number, width: number): string {
   const key = filter === "all" ? "a" : filter === "http" ? "h" : "w";
   const label = filter === "websocket" ? "ws" : filter;
+  if (width < 18) return key;
   if (width < 38) return `${key}:${label}`;
   if (width < 60) return `${key}:${label} ${count}`;
   return `[${key}] ${filter} (${count})`;

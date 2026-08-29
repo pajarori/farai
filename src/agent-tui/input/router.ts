@@ -1,4 +1,4 @@
-
+import { slashPopupVisible } from "../slash-autocomplete";
 
 export type OverlayKind =
   | "palette"
@@ -107,6 +107,7 @@ export type RouterContext = {
 
   centerSurfaceKind?: CenterSurfaceKind | undefined;
   centerProxyFlowKind?: "http" | "websocket" | "tcp" | "udp" | "dns" | undefined;
+  centerSurfaceBusy?: boolean;
 
   running: boolean;
   cancelable?: boolean;
@@ -129,8 +130,11 @@ export type RouterContext = {
   modelProviderWizard?: {
     field: "id" | "protocol" | "baseUrl" | "apiKey" | "model" | "review";
     busy: boolean;
+    cancellable?: boolean;
   };
-  modelProviderRemoval?: boolean;
+  modelProviderRemoval?: {
+    busy: boolean;
+  };
   modelOverlay?: {
     providerID?: string;
     removable: boolean;
@@ -187,18 +191,21 @@ function consumed(...actions: RouterAction[]): RouteResult {
 }
 
 export function slashActive(ctx: RouterContext): boolean {
-  if (ctx.overlayKind || ctx.centerSurfaceKind || ctx.slashSuppressed) return false;
-  if (ctx.slashOptionCount !== undefined && ctx.slashOptionCount <= 0) return false;
-  const text = ctx.composerText;
-  return text.startsWith("/") && !text.includes(" ") && !text.includes("\n");
+  return slashPopupVisible(
+    ctx.composerText,
+    ctx.slashSuppressed,
+    ctx.slashOptionCount ?? 1,
+    Boolean(ctx.overlayKind || ctx.centerSurfaceKind)
+  );
 }
 
 export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
-  if (ctx.modelProviderRemoval) return routeModelProviderRemoval(key);
+  if (ctx.modelProviderRemoval) return routeModelProviderRemoval(key, ctx.modelProviderRemoval);
   if (ctx.modelProviderWizard) return routeModelProviderWizard(key, ctx.modelProviderWizard);
+  if (ctx.pendingUserInput && key.ctrl && key.name === "q") return consumed({ kind: "requestUserInput.show" });
   if (ctx.requestUserInput) return routeRequestUserInput(key, ctx.requestUserInput);
   if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay);
-  if (ctx.centerSurfaceKind) return routeCenterSurface(key, ctx.centerSurfaceKind, ctx.centerProxyFlowKind);
+  if (ctx.centerSurfaceKind) return routeCenterSurface(key, ctx.centerSurfaceKind, ctx.centerProxyFlowKind, ctx.centerSurfaceBusy);
   if (ctx.historySearchActive) return routeHistorySearch(key);
   if (slashActive(ctx)) {
     const slash = routeSlash(key);
@@ -208,14 +215,15 @@ export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
   return routeBase(key, ctx);
 }
 
-function routeModelProviderRemoval(key: KeyToken): RouteResult {
+function routeModelProviderRemoval(key: KeyToken, state: NonNullable<RouterContext["modelProviderRemoval"]>): RouteResult {
+  if (state.busy) return consumed();
   if (key.name === "return") return consumed({ kind: "modelProviderRemoval.confirm" });
   if (key.name === "escape" || (key.ctrl && key.name === "c")) return consumed({ kind: "modelProviderRemoval.cancel" });
   return consumed();
 }
 
 function routeModelProviderWizard(key: KeyToken, state: NonNullable<RouterContext["modelProviderWizard"]>): RouteResult {
-  if (state.busy) return key.name === "escape" ? consumed({ kind: "modelProvider.back" }) : consumed();
+  if (state.busy) return key.name === "escape" && state.cancellable ? consumed({ kind: "modelProvider.back" }) : consumed();
   if (key.name === "escape") return consumed({ kind: "modelProvider.back" });
   if (state.field === "protocol") {
     if (key.name === "up" || key.name === "left") return consumed({ kind: "modelProvider.protocolMove", delta: -1 });
@@ -305,9 +313,15 @@ function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["m
   return consumed();
 }
 
-function routeCenterSurface(key: KeyToken, kind: CenterSurfaceKind, proxyFlowKind?: RouterContext["centerProxyFlowKind"]): RouteResult {
+function routeCenterSurface(
+  key: KeyToken,
+  kind: CenterSurfaceKind,
+  proxyFlowKind?: RouterContext["centerProxyFlowKind"],
+  busy = false
+): RouteResult {
   if (key.ctrl && key.name === "c") return consumed({ kind: "center.pop" });
   if (key.name === "escape") return consumed({ kind: "center.pop" });
+  if (busy) return consumed();
   if (kind === "proxy_flow") {
     if (key.name === "left" || key.name === "[") return consumed({ kind: "proxy.detailPaneMove", delta: -1 });
     if (key.name === "right" || key.name === "]") return consumed({ kind: "proxy.detailPaneMove", delta: 1 });
@@ -378,7 +392,7 @@ function routeBase(key: KeyToken, ctx: RouterContext): RouteResult {
       case "g": return consumed({ kind: "composer.externalEditor" });
       case "t": return consumed({ kind: "transcript.open" });
       case "o": return consumed({ kind: "composer.copyLast" });
-      case "q": return ctx.pendingUserInput ? consumed({ kind: "requestUserInput.show" }) : PASSTHROUGH;
+      case "q": return PASSTHROUGH;
       case "l": return consumed({ kind: "transcript.clear" });
       default: return PASSTHROUGH;
     }

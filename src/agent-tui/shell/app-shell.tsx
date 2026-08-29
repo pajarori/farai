@@ -23,7 +23,9 @@ export function AppShell(): JSX.Element {
     sessions: () => {
       tui.actions.overlayOpen("sessions");
       void tui.refreshSessions().catch((error) => {
-        tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+        if (tui.store.ui.overlayStack.at(-1)?.kind === "sessions") {
+          tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+        }
       });
     },
     evidence: () => tui.actions.overlayOpen("evidence"),
@@ -82,18 +84,41 @@ export function AppShell(): JSX.Element {
 
 function MainTabs(): JSX.Element {
   const tui = useTuiStore();
+  const dims = useTerminalDimensions();
   const active = () => tui.store.ui.activeMainTab;
   const proxyCount = () => tui.store.ui.proxyFlows.length;
-  const openChat = () => { tui.actions.mainTabSet("chat"); };
+  const labels = () => mainTabLabels(dims().width, proxyCount());
+  const modalActive = () => Boolean(
+    tui.store.ui.modelProviderWizard
+    || tui.store.ui.modelProviderRemoval
+    || (tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed)
+  );
+  const openChat = () => {
+    if (!modalActive()) tui.actions.mainTabSet("chat");
+  };
   const openProxy = () => {
+    if (modalActive()) return;
     tui.actions.mainTabSet("proxy");
     void tui.refreshProxyFlows();
   };
   return (
     <box style={{ height: 1, flexShrink: 0, flexDirection: "row", paddingLeft: 1, paddingRight: 1 }}>
-      <text selectable={false} fg={active() === "chat" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openChat(); }}>{"[1] chat"}</text>
-      <text fg={COLOR.dim}>{"  "}</text>
-      <text selectable={false} fg={active() === "proxy" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openProxy(); }}>{`[2] proxy${proxyCount() ? ` (${proxyCount()})` : ""}`}</text>
+      <text selectable={false} fg={active() === "chat" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openChat(); }}>{labels().chat}</text>
+      <text fg={COLOR.dim}>{labels().gap}</text>
+      <text selectable={false} fg={active() === "proxy" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openProxy(); }}>{labels().proxy}</text>
     </box>
   );
+}
+
+export function mainTabLabels(width: number, proxyCount: number): { chat: string; gap: string; proxy: string } {
+  const proxy = `[2] proxy${proxyCount ? ` (${proxyCount})` : ""}`;
+  if (width >= "[1] chat".length + 2 + proxy.length + 2) {
+    return {
+      chat: "[1] chat",
+      gap: "  ",
+      proxy
+    };
+  }
+  if (width >= 17) return { chat: "1 chat", gap: "  ", proxy: "2 proxy" };
+  return { chat: "1", gap: "  ", proxy: "2" };
 }

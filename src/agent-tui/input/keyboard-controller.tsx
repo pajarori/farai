@@ -1,5 +1,5 @@
 import type { KeyEvent } from "@opentui/core";
-import { useKeyboard, useRenderer, useSelectionHandler } from "@opentui/solid";
+import { useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/solid";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,13 +8,13 @@ import { useExit } from "../context/exit";
 import { useTuiRuntime } from "../context/runtime";
 import { useTuiStore } from "../context/store";
 import { useComposerControl } from "../context/composer";
-import { findSlashCommand, isVisibleSlashCommand, listCommands, type Command } from "../command-registry";
+import { findSlashCommand, type Command } from "../command-registry";
 import type { DialogOption } from "../dialog/fuzzy";
 import { filterOptions } from "../dialog/fuzzy";
 import { overlayOptions, type ModelChoice } from "../overlay-options";
 import type { AgentThreadSummary } from "../runtime-port";
 import { rememberModelSelection } from "../../agent-core/model-catalog";
-import { slashCompletionOption, slashMatches } from "../slash-autocomplete";
+import { slashCommandOptions, slashCompletionOption, slashMatches, slashPopupRowLimit } from "../slash-autocomplete";
 import { routeKey, toKeyToken, type RouterAction } from "./router";
 import { projectMessagesToRows, truncateLine, type TimelineRow } from "../renderers";
 import { writeClipboard } from "../clipboard";
@@ -31,6 +31,7 @@ export function KeyboardController(): JSX.Element {
   const exit = useExit();
   const { port, capabilities } = useTuiRuntime();
   const renderer = useRenderer();
+  const dims = useTerminalDimensions();
   let historyNavIndex = -1;
   let historyNavOriginalDraft = "";
   let quitArmedUntil = 0;
@@ -38,12 +39,18 @@ export function KeyboardController(): JSX.Element {
   let sessionEpoch = 0;
   let proxyFlowLoadGeneration = 0;
   let transcriptLoadGeneration = 0;
+  let modelProviderTestGeneration = 0;
+  let centerActionGeneration = 0;
   let disposed = false;
   let modelProviderProbeController: AbortController | undefined;
 
   createEffect(() => {
     void tui.store.activeSessionId;
     sessionEpoch += 1;
+    modelProviderTestGeneration += 1;
+    centerActionGeneration += 1;
+    modelProviderProbeController?.abort();
+    modelProviderProbeController = undefined;
     historyNavIndex = -1;
     historyNavOriginalDraft = "";
   });
@@ -75,12 +82,13 @@ export function KeyboardController(): JSX.Element {
       overlayKind: top?.kind,
       centerSurfaceKind: centerTop?.kind,
       centerProxyFlowKind: centerTop?.kind === "proxy_flow" ? centerTop.flow.kind : undefined,
+      centerSurfaceBusy: Boolean(tui.store.ui.centerSurfaceBusy),
       running: isAgentBusy(tui.store),
       cancelable: capabilities.cancel && isAgentCancelable(tui.store),
       composerText: text,
       ...(cursor === undefined ? {} : { composerCursor: cursor }),
       slashSuppressed: tui.store.ui.slashSuppressedText === text,
-      slashOptionCount: slashMatches(currentSlashOptions(), text).length,
+      slashOptionCount: slashMatches(currentSlashOptions(), text, slashPopupRowLimit(dims().height)).length,
       historySearchActive: Boolean(tui.store.ui.historySearch),
       queuedCount: tui.store.snapshot.queuedPrompts.length,
       activeMainTab: tui.store.ui.activeMainTab,
@@ -96,10 +104,11 @@ export function KeyboardController(): JSX.Element {
       ...(tui.store.ui.modelProviderWizard ? {
         modelProviderWizard: {
           field: tui.store.ui.modelProviderWizard.field,
-          busy: tui.store.ui.modelProviderWizard.busy
+          busy: tui.store.ui.modelProviderWizard.busy,
+          cancellable: tui.store.ui.modelProviderWizard.busyKind === "probe"
         }
       } : {}),
-      ...(tui.store.ui.modelProviderRemoval ? { modelProviderRemoval: true } : {}),
+      ...(tui.store.ui.modelProviderRemoval ? { modelProviderRemoval: { busy: tui.store.ui.modelProviderRemoval.busy } } : {}),
       ...(modelOverlay ? { modelOverlay } : {})
     });
     if (routed.type === "passthrough") return;
@@ -120,6 +129,8 @@ export function KeyboardController(): JSX.Element {
     sessionEpoch += 1;
     proxyFlowLoadGeneration += 1;
     transcriptLoadGeneration += 1;
+    modelProviderTestGeneration += 1;
+    centerActionGeneration += 1;
     if (quitTimer) clearTimeout(quitTimer);
     modelProviderProbeController?.abort();
   });
@@ -309,7 +320,15 @@ export function KeyboardController(): JSX.Element {
         return;
       case "overlay.open":
         tui.actions.overlayOpen(action.overlay);
-        if (action.overlay === "sessions") await tui.refreshSessions();
+        if (action.overlay === "sessions") {
+          try {
+            await tui.refreshSessions();
+          } catch (error) {
+            if (tui.store.ui.overlayStack.at(-1)?.kind === "sessions") {
+              tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+            }
+          }
+        }
         return;
       case "overlay.pop":
         tui.actions.overlayPop();
@@ -333,6 +352,7 @@ export function KeyboardController(): JSX.Element {
         await selectOverlay();
         return;
       case "center.pop":
+        centerActionGeneration += 1;
         tui.actions.centerSurfacePop();
         return;
       case "center.scroll":
@@ -342,7 +362,7 @@ export function KeyboardController(): JSX.Element {
         await runCenterSurfaceAction(action.action);
         return;
       case "slash.move":
-        tui.actions.slashIndexMove(action.delta, currentSlashOptions().length);
+        tui.actions.slashIndexMove(action.delta, currentSlashMatchCount());
         return;
       case "slash.dismiss":
         tui.actions.slashSuppress(composer.ref()?.plainText ?? composer.text());
@@ -562,7 +582,7 @@ export function KeyboardController(): JSX.Element {
     tui.setStatusDetail(status);
     try {
       const detail = await port.getProxyFlow(flow.id);
-      if (generation !== proxyFlowLoadGeneration || !ownsSession(owner)) return;
+      if (!ownsProxyFlowRequest(generation, owner, flow.id)) return;
       if (detail) {
         tui.actions.centerSurfacePush({ kind: "proxy_flow", flow: detail });
         return;
@@ -572,11 +592,24 @@ export function KeyboardController(): JSX.Element {
         title: `${flow.method} ${flow.status ?? "-"} ${flow.host}`,
         body: `No stored detail for flow ${flow.id}.`
       });
+    } catch (error) {
+      if (ownsProxyFlowRequest(generation, owner, flow.id)) {
+        tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+      }
     } finally {
       if (generation === proxyFlowLoadGeneration && ownsSession(owner) && tui.store.ui.statusDetail === status) {
         tui.setStatusDetail(undefined);
       }
     }
+  }
+
+  function ownsProxyFlowRequest(generation: number, owner: { sessionId: string; epoch: number }, flowId: string): boolean {
+    return generation === proxyFlowLoadGeneration
+      && ownsSession(owner)
+      && tui.store.ui.activeMainTab === "proxy"
+      && proxyFlowsForFilter(tui.store.ui.proxyFlows, tui.store.ui.proxyFilter)[tui.store.ui.proxySelectedIndex]?.id === flowId
+      && tui.store.ui.overlayStack.length === 0
+      && tui.store.ui.centerSurfaceStack.length === 0;
   }
 
   function currentOverlayOptions(): DialogOption<unknown>[] {
@@ -591,10 +624,18 @@ export function KeyboardController(): JSX.Element {
     return currentOverlayOptions().length;
   }
 
+  function selectedOverlayOption(): DialogOption<unknown> | undefined {
+    const frame = tui.store.ui.overlayStack.at(-1);
+    if (!frame || !("index" in frame)) return undefined;
+    const options = currentOverlayOptions();
+    if (options.length === 0) return undefined;
+    return options[Math.max(0, Math.min(frame.index, options.length - 1))];
+  }
+
   function selectedModelProvider() {
     const frame = tui.store.ui.overlayStack.at(-1);
     if (frame?.kind !== "model") return undefined;
-    const option = currentOverlayOptions()[frame.index];
+    const option = selectedOverlayOption();
     const choice = option?.value as ModelChoice | undefined;
     const providerID = frame.providerID ?? (choice?.kind === "model_provider" ? choice.providerID : undefined);
     return providerID ? tui.store.ui.modelProviders.find((provider) => provider.id === providerID) : undefined;
@@ -608,11 +649,26 @@ export function KeyboardController(): JSX.Element {
   async function testSelectedModelProvider(): Promise<void> {
     const provider = selectedModelProvider();
     if (!provider) return;
-    tui.setStatusDetail(`testing ${provider.id}`);
-    const result = await port.probeModelProvider({ providerID: provider.id });
-    tui.setStatusDetail(result.ok
-      ? `${provider.id}: ${result.models.length} models · ${result.latencyMs}ms`
-      : `${provider.id}: ${result.error ?? "probe failed"}`, 4_000);
+    const status = `testing ${provider.id}`;
+    if (tui.store.ui.statusDetail === status) return;
+    const generation = ++modelProviderTestGeneration;
+    tui.actions.errorSet(undefined);
+    tui.setStatusDetail(status);
+    try {
+      const result = await port.probeModelProvider({ providerID: provider.id });
+      if (generation !== modelProviderTestGeneration || !modelOverlayOpen()) return;
+      tui.setStatusDetail(result.ok
+        ? `${provider.id}: ${result.models.length} models · ${result.latencyMs}ms`
+        : `${provider.id}: ${result.error ?? "probe failed"}`, 4_000);
+    } catch (error) {
+      if (generation !== modelProviderTestGeneration || !modelOverlayOpen()) return;
+      tui.setStatusDetail(undefined);
+      tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function modelOverlayOpen(): boolean {
+    return tui.store.ui.overlayStack.at(-1)?.kind === "model";
   }
 
   function confirmSelectedModelProviderRemoval(): void {
@@ -622,13 +678,33 @@ export function KeyboardController(): JSX.Element {
   }
 
   async function removePendingModelProvider(): Promise<void> {
-    const provider = tui.store.ui.modelProviderRemoval;
-    if (!provider) return;
-    const result = await port.removeModelProvider(provider.id);
+    const removalState = tui.store.ui.modelProviderRemoval;
+    if (!removalState || removalState.busy) return;
+    tui.actions.modelProviderRemovalPatch({ busy: true, error: undefined });
+    let result: Awaited<ReturnType<typeof port.removeModelProvider>>;
+    try {
+      result = await port.removeModelProvider(removalState.provider.id);
+    } catch (error) {
+      if (disposed) return;
+      if (tui.store.ui.modelProviderRemoval?.provider.id !== removalState.provider.id) return;
+      tui.actions.modelProviderRemovalPatch({
+        busy: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+    if (disposed || tui.store.ui.modelProviderRemoval?.provider.id !== removalState.provider.id) return;
     tui.actions.modelProviderRemovalClose();
-    await Promise.all([tui.refreshAvailableModels(), tui.refreshSessions(), tui.refreshSnapshot()]);
     tui.actions.overlayClear();
     tui.actions.overlayPush({ kind: "model", query: "", index: 0 });
+    try {
+      await Promise.all([tui.refreshAvailableModels(), tui.refreshSessions(), tui.refreshSnapshot()]);
+    } catch (error) {
+      if (disposed) return;
+      tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (disposed) return;
     const removal = result.providerRemains ? `removed ${result.location} override for ${result.id}` : `removed ${result.id}`;
     tui.setStatusDetail(`${removal} · ${result.updatedSessions} sessions moved to ${result.fallbackModel}`, 4_000);
   }
@@ -636,14 +712,14 @@ export function KeyboardController(): JSX.Element {
   function toggleSelectedAgentPreview(): void {
     const frame = tui.store.ui.overlayStack.at(-1);
     if (frame?.kind !== "agents") return;
-    const option = currentOverlayOptions()[frame.index];
+    const option = selectedOverlayOption();
     if (option) tui.actions.agentDetailToggle(option.id);
   }
 
   async function selectOverlay(): Promise<void> {
     const frame = tui.store.ui.overlayStack.at(-1);
     if (!frame || !("query" in frame)) return;
-    const option = currentOverlayOptions()[frame.index];
+    const option = selectedOverlayOption();
     if (!option) return;
     switch (frame.kind) {
       case "palette":
@@ -737,7 +813,7 @@ export function KeyboardController(): JSX.Element {
 
   async function runCenterSurfaceAction(action: string): Promise<void> {
     const frame = tui.store.ui.centerSurfaceStack.at(-1);
-    if (!frame) return;
+    if (!frame || tui.store.ui.centerSurfaceBusy) return;
     if (frame.kind === "confirm" && action === "confirm") {
       tui.actions.centerSurfacePop();
       return;
@@ -745,19 +821,59 @@ export function KeyboardController(): JSX.Element {
     if (frame.kind === "report" && action === "save") {
       const owner = captureSessionOwner();
       if (!owner) return;
-      const result = await port.exportReport(owner.sessionId, { write: true });
-      if (!ownsSession(owner)) return;
-      tui.actions.centerSurfacePush({ kind: "detail", title: "report saved", body: result.path ?? "saved" });
+      const generation = ++centerActionGeneration;
+      tui.actions.errorSet(undefined);
+      tui.actions.centerSurfaceBusySet("report_save");
+      try {
+        const result = await port.exportReport(owner.sessionId, { write: true });
+        if (generation !== centerActionGeneration || !ownsSession(owner) || tui.store.ui.centerSurfaceStack.at(-1) !== frame) return;
+        tui.actions.centerSurfacePush({ kind: "detail", title: "report saved", body: result.path ?? "saved" });
+      } catch (error) {
+        if (generation === centerActionGeneration && ownsSession(owner) && tui.store.ui.centerSurfaceStack.at(-1) === frame) {
+          tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (generation === centerActionGeneration && tui.store.ui.centerSurfaceBusy === "report_save") {
+          tui.actions.centerSurfaceBusySet(undefined);
+        }
+      }
       return;
     }
     if (frame.kind === "container" && action === "toggle") {
-      await tui.toggleContainer();
-      tui.actions.centerSurfaceReplaceTop({ kind: "container", refreshToken: (frame.refreshToken ?? 0) + 1 });
+      const owner = captureSessionOwner();
+      if (!owner) return;
+      const generation = ++centerActionGeneration;
+      tui.actions.errorSet(undefined);
+      tui.actions.centerSurfaceBusySet("container_toggle");
+      try {
+        await tui.toggleContainer({ reportError: false });
+        if (generation !== centerActionGeneration || !ownsSession(owner) || tui.store.ui.centerSurfaceStack.at(-1) !== frame) return;
+        if (tui.store.ui.lastError) return;
+        tui.actions.centerSurfaceReplaceTop({ kind: "container", refreshToken: (frame.refreshToken ?? 0) + 1 });
+      } catch (error) {
+        if (generation === centerActionGeneration && ownsSession(owner) && tui.store.ui.centerSurfaceStack.at(-1) === frame) {
+          tui.actions.errorSet(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (generation === centerActionGeneration && tui.store.ui.centerSurfaceBusy === "container_toggle") {
+          tui.actions.centerSurfaceBusySet(undefined);
+        }
+      }
       return;
     }
     if (frame.kind === "container" && action === "refresh") {
-      await tui.refreshContainerStatus();
-      tui.actions.centerSurfaceReplaceTop({ kind: "container", refreshToken: (frame.refreshToken ?? 0) + 1 });
+      const generation = ++centerActionGeneration;
+      tui.actions.errorSet(undefined);
+      tui.actions.centerSurfaceBusySet("container_refresh");
+      try {
+        await tui.refreshContainerStatus();
+        if (generation !== centerActionGeneration || tui.store.ui.centerSurfaceStack.at(-1) !== frame) return;
+        tui.actions.centerSurfaceReplaceTop({ kind: "container", refreshToken: (frame.refreshToken ?? 0) + 1 });
+      } finally {
+        if (generation === centerActionGeneration && tui.store.ui.centerSurfaceBusy === "container_refresh") {
+          tui.actions.centerSurfaceBusySet(undefined);
+        }
+      }
     }
   }
 
@@ -803,18 +919,30 @@ export function KeyboardController(): JSX.Element {
       modelProviderProbeController?.abort();
       const controller = new AbortController();
       modelProviderProbeController = controller;
-      tui.actions.modelProviderWizardPatch({ busy: true, error: undefined, probe: undefined });
-      const probe = await port.probeModelProvider({
-        baseUrl: wizard.baseUrl,
-        protocol: wizard.protocol,
-        ...(wizard.apiKey ? { apiKey: wizard.apiKey } : {}),
-        timeoutMs: 8_000
-      }, controller.signal);
+      tui.actions.modelProviderWizardPatch({ busy: true, busyKind: "probe", error: undefined, probe: undefined });
+      let probe: Awaited<ReturnType<typeof port.probeModelProvider>>;
+      try {
+        probe = await port.probeModelProvider({
+          baseUrl: wizard.baseUrl,
+          protocol: wizard.protocol,
+          ...(wizard.apiKey ? { apiKey: wizard.apiKey } : {}),
+          timeoutMs: 8_000
+        }, controller.signal);
+      } catch (error) {
+        if (modelProviderProbeController !== controller || controller.signal.aborted || !tui.store.ui.modelProviderWizard) return;
+        modelProviderProbeController = undefined;
+        tui.actions.modelProviderWizardPatch({
+          busy: false,
+          busyKind: undefined,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return;
+      }
       if (modelProviderProbeController !== controller || !tui.store.ui.modelProviderWizard) return;
       modelProviderProbeController = undefined;
-      tui.actions.modelProviderWizardPatch({ busy: false, probe });
+      tui.actions.modelProviderWizardPatch({ probe });
       if (!probe.ok) {
-        tui.actions.modelProviderWizardPatch({ error: `${probe.error ?? "provider probe failed"} · ctrl+s saves without testing` });
+        tui.actions.modelProviderWizardPatch({ busy: false, busyKind: undefined, error: `${probe.error ?? "provider probe failed"} · ctrl+s saves without testing` });
         return;
       }
       if (!wizard.model.trim() && probe.models.length === 1) tui.actions.modelProviderWizardPatch({ model: probe.models[0]! });
@@ -822,26 +950,38 @@ export function KeyboardController(): JSX.Element {
 
     const current = tui.store.ui.modelProviderWizard;
     if (!current) return;
-    const catalog = await port.saveModelProvider({
-      id: current.id,
-      baseUrl: current.baseUrl,
-      protocol: current.protocol,
-      ...(current.model.trim() ? { model: current.model.trim() } : {}),
-      ...(current.apiKey ? { apiKey: current.apiKey, credentialAction: "replace" as const } : current.removeCredential ? { credentialAction: "remove" as const } : { credentialAction: "keep" as const }),
-      location: current.location
-    });
-    tui.actions.modelCatalogSet(catalog.providers, catalog.models);
-    tui.actions.modelProviderWizardClose();
-    tui.setStatusDetail(`provider ${current.id.trim().toLowerCase()} saved`, 3_000);
+    tui.actions.modelProviderWizardPatch({ busy: true, busyKind: "save", error: undefined });
+    try {
+      const catalog = await port.saveModelProvider({
+        id: current.id,
+        baseUrl: current.baseUrl,
+        protocol: current.protocol,
+        ...(current.model.trim() ? { model: current.model.trim() } : {}),
+        ...(current.apiKey ? { apiKey: current.apiKey, credentialAction: "replace" as const } : current.removeCredential ? { credentialAction: "remove" as const } : { credentialAction: "keep" as const }),
+        location: current.location
+      });
+      if (disposed || !tui.store.ui.modelProviderWizard) return;
+      tui.actions.modelCatalogSet(catalog.providers, catalog.models);
+      tui.actions.modelProviderWizardClose();
+      tui.setStatusDetail(`provider ${current.id.trim().toLowerCase()} saved`, 3_000);
+    } catch (error) {
+      if (disposed || !tui.store.ui.modelProviderWizard) return;
+      tui.actions.modelProviderWizardPatch({
+        busy: false,
+        busyKind: undefined,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 
   function backModelProviderWizard(): void {
     const wizard = tui.store.ui.modelProviderWizard;
     if (!wizard) return;
     if (wizard.busy) {
+      if (wizard.busyKind !== "probe") return;
       modelProviderProbeController?.abort();
       modelProviderProbeController = undefined;
-      tui.actions.modelProviderWizardPatch({ busy: false, error: "provider probe cancelled" });
+      tui.actions.modelProviderWizardPatch({ busy: false, busyKind: undefined, error: "provider probe cancelled" });
       return;
     }
     if ((wizard.mode === "add" && wizard.field === "id") || (wizard.mode === "edit" && wizard.field === "protocol")) {
@@ -852,9 +992,12 @@ export function KeyboardController(): JSX.Element {
   }
 
   function currentSlashOptions(): DialogOption<Command>[] {
-    return listCommands()
-      .filter((command) => command.slashName && isVisibleSlashCommand(command))
-      .map((command) => ({ id: command.name, title: `/${command.slashName ?? command.name}`, ...(command.desc ? { description: command.desc } : {}), value: command }));
+    return slashCommandOptions();
+  }
+
+  function currentSlashMatchCount(): number {
+    const text = composer.ref()?.plainText ?? composer.text();
+    return slashMatches(currentSlashOptions(), text, slashPopupRowLimit(dims().height)).length;
   }
 
   function completeSlash(): void {
@@ -961,15 +1104,16 @@ export function KeyboardController(): JSX.Element {
   async function openFullTranscript(): Promise<void> {
     const owner = captureSessionOwner();
     if (!owner) return;
+    const sourceTab = tui.store.ui.activeMainTab;
     const generation = ++transcriptLoadGeneration;
     const status = "loading transcript";
     tui.setStatusDetail(status);
     try {
       const messages = await port.loadFullMessages(owner.sessionId);
-      if (generation !== transcriptLoadGeneration || !ownsSession(owner)) return;
+      if (!ownsTranscriptRequest(generation, owner, sourceTab)) return;
       tui.actions.centerSurfacePush({ kind: "detail", title: "transcript", body: transcriptMarkdown(messages) });
     } catch (error) {
-      if (generation === transcriptLoadGeneration && ownsSession(owner)) {
+      if (ownsTranscriptRequest(generation, owner, sourceTab)) {
         tui.actions.errorSet(error instanceof Error ? error.message : String(error));
       }
     } finally {
@@ -977,6 +1121,17 @@ export function KeyboardController(): JSX.Element {
         tui.setStatusDetail(undefined);
       }
     }
+  }
+
+  function ownsTranscriptRequest(generation: number, owner: { sessionId: string; epoch: number }, sourceTab: "chat" | "proxy"): boolean {
+    return generation === transcriptLoadGeneration
+      && ownsSession(owner)
+      && tui.store.ui.activeMainTab === sourceTab
+      && tui.store.ui.overlayStack.length === 0
+      && tui.store.ui.centerSurfaceStack.length === 0
+      && !tui.store.ui.modelProviderWizard
+      && !tui.store.ui.modelProviderRemoval
+      && !(tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed);
   }
 
   function transcriptMarkdown(messages = tui.store.snapshot.messages): string {

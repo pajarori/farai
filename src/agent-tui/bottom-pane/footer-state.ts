@@ -2,7 +2,6 @@ import type { BackgroundActivitySummary, SubagentActivity } from "../runtime-por
 import type { BrowserContextActivity } from "../../agent-tools/browser/context-manager";
 import type { ContextUsage } from "../store";
 import type { UpdateNotice } from "../update-check";
-import type { TimelineRow } from "../renderers";
 import { terminalWidth, truncateTerminal } from "../terminal-text";
 
 export type FooterMode =
@@ -36,30 +35,6 @@ export type BottomPaneSlot = "list_overlay" | "center_surface" | "proxy_tab" | "
 
 export function activityStatusVisible(activeMainTab: "chat" | "proxy"): boolean {
   return activeMainTab === "chat";
-}
-
-export function transcriptOwnsActivity(rows: readonly TimelineRow[]): boolean {
-  let lastUserIndex = -1;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (rows[index]?.kind !== "user") continue;
-    lastUserIndex = index;
-    break;
-  }
-  return rows.slice(lastUserIndex + 1).some((row) => {
-    if (row.kind === "assistant" || row.kind === "thinking" || row.kind === "plan") return row.streaming;
-    if (row.kind === "tool") return row.status === "running" || row.status === "pending";
-    if (row.kind === "exploration") return row.status === "running";
-    if (row.kind === "progress") return row.status === "running";
-    return false;
-  });
-}
-
-export function isTranscriptActivityDetail(detail: string | undefined): boolean {
-  return detail === "thinking"
-    || detail === "planning"
-    || detail === "reading tool result"
-    || detail === "running tool"
-    || Boolean(detail?.startsWith("running "));
 }
 
 export function bottomPaneSlot(input: {
@@ -105,7 +80,8 @@ export function footerRightItems(
   queueSize: number,
   statusDetail: string | undefined,
   contextUsage?: ContextUsage,
-  updateNotice?: UpdateNotice
+  updateNotice?: UpdateNotice,
+  includeAnyStatus = false
 ): FooterItem[] {
   const items: FooterItem[] = [];
   if (updateNotice) {
@@ -147,7 +123,9 @@ export function footerRightItems(
       count: activity.count
     })));
   if (queueSize > 0) items.push({ id: "queue", kind: "queue", text: `${queueSize} queued`, count: queueSize });
-  if (isFooterStatusDetail(statusDetail)) items.push({ id: "message", kind: "message", text: statusDetail! });
+  if (statusDetail && statusDetail !== "working" && (includeAnyStatus || isFooterStatusDetail(statusDetail))) {
+    items.push({ id: "message", kind: "message", text: statusDetail });
+  }
   return items;
 }
 

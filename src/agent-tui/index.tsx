@@ -1,4 +1,4 @@
-import { createCliRenderer, RGBA, type CliRenderer } from "@opentui/core";
+import { createCliRenderer, type CliRenderer } from "@opentui/core";
 import { render } from "@opentui/solid";
 import { AgentRuntime } from "../agent-core/runtime";
 import { App } from "./app";
@@ -137,8 +137,6 @@ async function createManagedRenderer(onDestroy: () => void): Promise<ManagedRend
   const resize = createDeferredResizeHandler(
     (width, height) => {
       renderer.resize(width, height);
-      renderer.currentRenderBuffer.clear(RGBA.fromInts(1, 1, 1, 255));
-      renderer.requestRender();
     },
     () => validTerminalSize(process.stdout.columns, process.stdout.rows)
   );

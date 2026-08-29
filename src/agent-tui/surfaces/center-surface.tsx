@@ -1,5 +1,5 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { For, Show, createEffect, createMemo, createSignal, untrack, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack, type JSX } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import type {
   ProxyDnsMessage,
@@ -17,7 +17,7 @@ import { truncateLine } from "../renderers";
 import { syntax } from "../syntax";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
-import { fitTerminal, terminalWidth } from "../terminal-text";
+import { fitTerminal, fitTerminalPair } from "../terminal-text";
 
 type CenterSurfaceViewProps = {
   frame: CenterSurfaceFrame;
@@ -29,6 +29,8 @@ export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
   const loader = createSurfaceLoader(() => props.frame);
   const title = () => surfaceTitle(props.frame);
   const kindLabel = () => props.frame.kind;
+  const compact = () => dims().height < 16;
+  const header = () => fitTerminalPair(title(), kindLabel(), Math.max(1, dims().width - 6), 4, 2);
   let scrollRef!: ScrollBoxRenderable;
   let lastScrollSequence = 0;
 
@@ -46,24 +48,24 @@ export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
         flexGrow: 1,
         minHeight: 0,
         flexDirection: "column",
-        paddingTop: 1,
-        paddingBottom: 1,
+        paddingTop: compact() ? 0 : 1,
+        paddingBottom: compact() ? 0 : 1,
         paddingLeft: 2,
         paddingRight: 2
       }}
     >
-      <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
+      <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }}>
         <box style={{ flexDirection: "row", minWidth: 0 }}>
           <text fg={COLOR.accent}>{"› "}</text>
-          <text fg={COLOR.text}>{truncateLine(title(), Math.max(4, dims().width - terminalWidth(kindLabel()) - 10))}</text>
+          <text fg={COLOR.text}>{header().left}</text>
         </box>
-        <text fg={COLOR.dim}>{kindLabel()}</text>
+        <text fg={COLOR.dim}>{header().right}</text>
       </box>
-      <box style={{ height: 1 }}>
+      <box style={{ height: 1, flexShrink: 0 }}>
         <text fg={COLOR.dim}>{truncateLine(surfaceSubtitle(props.frame), Math.max(1, dims().width - 4))}</text>
       </box>
       <Show when={props.frame.kind === "proxy_flow"} fallback={
-        <scrollbox ref={scrollRef} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1, minHeight: 0, paddingTop: 1, paddingBottom: 1 }}>
+        <scrollbox ref={scrollRef} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1, minHeight: 0, paddingTop: compact() ? 0 : 1, paddingBottom: compact() ? 0 : 1 }}>
           <Show when={loader.filetype() === "markdown"} fallback={
             <code content={loader.body()} filetype={loader.filetype()} syntaxStyle={syntax()} fg={COLOR.text} />
           }>
@@ -71,7 +73,7 @@ export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
           </Show>
         </scrollbox>
       }>
-        <ProxyFlowSplitView flow={(props.frame as Extract<CenterSurfaceFrame, { kind: "proxy_flow" }>).flow} />
+        <ProxyFlowSplitView flow={(props.frame as Extract<CenterSurfaceFrame, { kind: "proxy_flow" }>).flow} compact={compact()} />
       </Show>
     </box>
   );
@@ -101,6 +103,7 @@ function createSurfaceLoader(frame: () => CenterSurfaceFrame): { body: () => str
   const [body, setBody] = createSignal("");
   const [filetype, setFiletype] = createSignal("markdown");
   let loadId = 0;
+  let disposed = false;
 
   createEffect(() => {
     const current = frame();
@@ -120,8 +123,12 @@ function createSurfaceLoader(frame: () => CenterSurfaceFrame): { body: () => str
       }
       setBody("loading report…");
       void port.exportReport(sessionId)
-        .then((result) => { if (id === loadId) setBody(result.markdown); })
-        .catch((error) => { if (id === loadId) setBody(error instanceof Error ? error.message : String(error)); });
+        .then((result) => {
+          if (!disposed && id === loadId && tui.store.activeSessionId === sessionId) setBody(result.markdown);
+        })
+        .catch((error) => {
+          if (!disposed && id === loadId && tui.store.activeSessionId === sessionId) setBody(error instanceof Error ? error.message : String(error));
+        });
       return;
     }
 
@@ -129,12 +136,17 @@ function createSurfaceLoader(frame: () => CenterSurfaceFrame): { body: () => str
       void current.refreshToken;
       setBody("loading container status…");
       void port.containerStatus()
-        .then((status) => { if (id === loadId) setBody(JSON.stringify(status, null, 2)); })
-        .catch((error) => { if (id === loadId) setBody(error instanceof Error ? error.message : String(error)); });
+        .then((status) => { if (!disposed && id === loadId) setBody(JSON.stringify(status, null, 2)); })
+        .catch((error) => { if (!disposed && id === loadId) setBody(error instanceof Error ? error.message : String(error)); });
       return;
     }
 
     setBody("body" in current ? current.body : "");
+  });
+
+  onCleanup(() => {
+    disposed = true;
+    loadId += 1;
   });
 
   return { body, filetype };
@@ -188,8 +200,8 @@ function ProxyPanelPair(props: { flow: ProxyFlowDetail; compact?: boolean }): JS
   const dims = useTerminalDimensions();
   const horizontal = () => dims().width >= 112;
   const panels = () => proxyFlowPanels(props.flow);
-  let requestScroll!: ScrollBoxRenderable;
-  let responseScroll!: ScrollBoxRenderable;
+  let requestScroll: ScrollBoxRenderable | undefined;
+  let responseScroll: ScrollBoxRenderable | undefined;
   let lastScrollSequence = 0;
 
   createEffect(() => {
@@ -229,12 +241,14 @@ function ProxyPanelPair(props: { flow: ProxyFlowDetail; compact?: boolean }): JS
 function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: boolean }): JSX.Element {
   const tui = useTuiStore();
   const dims = useTerminalDimensions();
-  let requestScroll!: ScrollBoxRenderable;
-  let responseScroll!: ScrollBoxRenderable;
+  let requestScroll: ScrollBoxRenderable | undefined;
+  let responseScroll: ScrollBoxRenderable | undefined;
   let messageScroll!: ScrollBoxRenderable;
   let payloadScroll!: ScrollBoxRenderable;
   let activeFlowId = "";
   let lastScrollSequence = 0;
+  let scrollGeneration = 0;
+  let disposed = false;
   const selectedIndex = createMemo(() => Math.min(
     Math.max(0, tui.store.ui.proxyWebSocketMessageIndex),
     Math.max(0, props.flow.messages.length - 1)
@@ -242,6 +256,15 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
   const selectedMessage = createMemo(() => props.flow.messages[selectedIndex()]);
   const contentWidth = () => Math.max(1, dims().width - (props.compact ? 4 : 8));
   const inspectorGap = () => dims().height >= 22 ? 1 : 0;
+  const dense = () => dims().height < 18;
+  const navigation = () => webSocketNavigationLabels(contentWidth(), props.flow.messages.length, tui.store.ui.proxyWebSocketSection);
+  const messageHeader = () => fitTerminalPair(
+    webSocketMessageTitle(selectedMessage(), selectedIndex()),
+    webSocketMessageFiletype(selectedMessage()),
+    contentWidth(),
+    4,
+    1
+  );
 
   createEffect(() => {
     const flowId = props.flow.id;
@@ -267,12 +290,23 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
   });
 
   createEffect(() => {
+    const section = tui.store.ui.proxyWebSocketSection;
+    if (section !== 1) {
+      scrollGeneration += 1;
+      return;
+    }
     const index = selectedIndex();
     const flowId = props.flow.id;
+    const generation = ++scrollGeneration;
     queueMicrotask(() => {
-      if (!messageScroll) return;
+      if (disposed || generation !== scrollGeneration || tui.store.ui.proxyWebSocketSection !== 1 || !messageScroll) return;
       try { messageScroll.scrollChildIntoView(`ws-frame-${flowId}-${index}`); } catch {}
     });
+  });
+
+  onCleanup(() => {
+    disposed = true;
+    scrollGeneration += 1;
   });
 
   return (
@@ -282,13 +316,13 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
           fg={tui.store.ui.proxyWebSocketSection === 0 ? COLOR.accent : COLOR.dim}
           onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyWebSocketSectionSet(0); }}
           selectable={false}
-        >{tui.store.ui.proxyWebSocketSection === 0 ? "› [h] handshake" : "  [h] handshake"}</text>
-        <text fg={COLOR.dim}>{"   "}</text>
+        >{navigation().handshake}</text>
+        <text fg={COLOR.dim}>{navigation().gap}</text>
         <text
           fg={tui.store.ui.proxyWebSocketSection === 1 ? COLOR.accent : COLOR.dim}
           onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyWebSocketSectionSet(1); }}
           selectable={false}
-        >{`${tui.store.ui.proxyWebSocketSection === 1 ? "›" : " "} [m] messages (${props.flow.messages.length})`}</text>
+        >{navigation().messages}</text>
       </box>
       <Show when={tui.store.ui.proxyWebSocketSection === 0} fallback={
         <box style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column", paddingTop: 1 }}>
@@ -298,7 +332,7 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
           <scrollbox
             ref={messageScroll}
             scrollbarOptions={{ visible: false }}
-            style={{ flexGrow: 2, flexShrink: 1, flexBasis: 0, minHeight: 3, flexDirection: "column" }}
+            style={{ flexGrow: 2, flexShrink: 1, flexBasis: 0, minHeight: dense() ? 1 : 3, flexDirection: "column" }}
           >
             <Show when={props.flow.messages.length > 0} fallback={<text fg={COLOR.dim}>No WebSocket messages captured.</text>}>
               <For each={props.flow.messages}>{(message, index) => (
@@ -324,13 +358,13 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
             <box style={{ height: 1, flexShrink: 0 }} />
           </Show>
           <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }} onMouseUp={(event) => { if (isPrimaryClick(event)) tui.actions.proxyDetailPaneSet(1); }}>
-            <text selectable={false} fg={tui.store.ui.proxyDetailPane === 1 ? COLOR.accent : COLOR.text}>{truncateLine(webSocketMessageTitle(selectedMessage(), selectedIndex()), Math.max(12, contentWidth() - 12))}</text>
-            <text selectable={false} fg={COLOR.dim}>{webSocketMessageFiletype(selectedMessage())}</text>
+            <text selectable={false} fg={tui.store.ui.proxyDetailPane === 1 ? COLOR.accent : COLOR.text}>{messageHeader().left}</text>
+            <text selectable={false} fg={COLOR.dim}>{messageHeader().right}</text>
           </box>
           <scrollbox
             ref={payloadScroll}
             scrollbarOptions={{ visible: false }}
-            style={{ flexGrow: 3, flexShrink: 1, flexBasis: 0, minHeight: 2, paddingTop: 1 }}
+            style={{ flexGrow: 3, flexShrink: 1, flexBasis: 0, minHeight: 1, paddingTop: dense() ? 0 : 1 }}
           >
             <code
               content={webSocketFramePayload(selectedMessage())}
@@ -378,15 +412,30 @@ function FlowMessagePanel(props: {
   bottomPadding: boolean;
   compact?: boolean;
   onActivate: () => void;
-  setScrollRef: (ref: ScrollBoxRenderable) => void;
+  setScrollRef: (ref: ScrollBoxRenderable | undefined) => void;
 }): JSX.Element {
+  let scrollRef: ScrollBoxRenderable | undefined;
+  onCleanup(() => {
+    if (scrollRef) props.setScrollRef(undefined);
+    scrollRef = undefined;
+  });
   return (
     <box style={{ flexGrow: props.flexGrow, flexShrink: 1, flexBasis: 0, minWidth: 0, minHeight: 0, flexDirection: "column", paddingRight: props.rightPadding ? props.compact ? 3 : 4 : 0, paddingBottom: props.bottomPadding ? props.compact ? 1 : 2 : 0 }}>
       <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between" }} onMouseUp={(event) => { if (isPrimaryClick(event)) props.onActivate(); }}>
-        <text selectable={false} fg={props.active ? COLOR.accent : COLOR.text}>{props.active ? `› ${props.panel.title}` : `  ${props.panel.title}`}</text>
+        <box style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, flexDirection: "row" }}>
+          <text selectable={false} fg={props.active ? COLOR.accent : COLOR.dim}>{props.active ? "› " : "  "}</text>
+          <text selectable={false} truncate style={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }} fg={COLOR.text}>{props.panel.title}</text>
+        </box>
         <text selectable={false} fg={COLOR.dim}>{props.panel.filetype}</text>
       </box>
-      <scrollbox ref={props.setScrollRef} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1, minHeight: 0, paddingTop: 1 }}>
+      <scrollbox
+        ref={(node) => {
+          scrollRef = node;
+          props.setScrollRef(node);
+        }}
+        scrollbarOptions={{ visible: false }}
+        style={{ flexGrow: 1, minHeight: 0, paddingTop: 1 }}
+      >
         <code content={props.panel.content} filetype={props.panel.filetype} syntaxStyle={syntax()} fg={COLOR.text} />
       </scrollbox>
     </box>
@@ -396,6 +445,35 @@ function FlowMessagePanel(props: {
 export function proxyPanelWeight(flow: ProxyFlowDetail, pane: 0 | 1): number {
   if (flow.kind !== "websocket") return 1;
   return pane === 0 ? 2 : 3;
+}
+
+function webSocketNavigationLabels(width: number, messageCount: number, section: 0 | 1): { handshake: string; gap: string; messages: string } {
+  if (width >= 44) {
+    return {
+      handshake: section === 0 ? "› [h] handshake" : "  [h] handshake",
+      gap: "   ",
+      messages: `${section === 1 ? "›" : " "} [m] messages (${messageCount})`
+    };
+  }
+  if (width >= 26) {
+    return {
+      handshake: section === 0 ? "› h handshake" : "  h handshake",
+      gap: "  ",
+      messages: `${section === 1 ? "›" : " "} m ${messageCount}`
+    };
+  }
+  if (width < 8) {
+    return {
+      handshake: section === 0 ? "› h" : "  h",
+      gap: "",
+      messages: section === 1 ? "› m" : "  m"
+    };
+  }
+  return {
+    handshake: section === 0 ? "› h" : "  h",
+    gap: "  ",
+    messages: `${section === 1 ? "›" : " "} m ${messageCount}`
+  };
 }
 
 function applyScroll(scroll: ScrollBoxRenderable, action: "up" | "down" | "pageUp" | "pageDown" | "home" | "end"): void {

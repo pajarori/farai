@@ -2,7 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX 
 import { useTerminalDimensions } from "@opentui/solid";
 import type { DialogOption, FuzzyMatch } from "../dialog/fuzzy";
 import { filterOptions, groupByCategory } from "../dialog/fuzzy";
-import { displayRows, scrollWindowStart, selectedOptionId } from "../dialog/list-selection";
+import { displayRows, scrollWindowStart, selectableIndex, selectedOptionId } from "../dialog/list-selection";
 import { overlayTitle } from "../overlay-options";
 import { truncateLine } from "../renderers";
 import { COLOR } from "../theme";
@@ -11,7 +11,7 @@ import type { AgentThreadSummary } from "../runtime-port";
 import { useTuiStore } from "../context/store";
 import { createPrimaryClickGesture, isPrimaryClick } from "../input/mouse";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "./selection-row";
-import { terminalWidth } from "../terminal-text";
+import { fitTerminalPair, terminalWidth } from "../terminal-text";
 
 type ListOverlayProps = {
   frame: OverlayFrame;
@@ -23,10 +23,13 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
   const tui = useTuiStore();
   const dims = useTerminalDimensions();
   const matches = createMemo(() => filterOptions(props.options, props.frame.query));
+  const selectableCount = createMemo(() => matches().filter((match) => !match.option.disabled).length);
+  const selectedIndex = createMemo(() => selectableIndex(matches(), props.frame.index));
   const groups = createMemo(() => groupByCategory(matches(), props.frame.query.trim() !== ""));
   const selectedId = createMemo(() => selectedOptionId(matches(), props.frame.index));
   const rows = createMemo(() => selectionRows(groups(), selectedId()));
-  const width = () => Math.max(30, dims().width);
+  const allRows = createMemo(() => selectionRows(groupByCategory(filterOptions(props.options, ""), false), undefined));
+  const width = () => Math.max(1, dims().width);
   const maxRows = () => overlayMaxRows(props.frame.kind, dims().height);
   const visibleRows = createMemo(() => {
     const all = rows();
@@ -35,26 +38,60 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
     const start = scrollWindowStart(all.length, cap, selectedIndex);
     return all.slice(start, start + cap);
   });
-  const height = () => Math.min(maxRows() + 6, Math.max(8, visibleRows().length + 6));
+  const standardHeight = () => Math.max(1, Math.min(dims().height - 1, maxRows() + 5));
   const left = () => 0;
-  const top = () => Math.max(0, dims().height - height() - 1);
-  const descCol = () => descriptionColumn(visibleRows(), width());
+  const standardTop = () => Math.max(0, dims().height - standardHeight() - 1);
+  const descCol = () => descriptionColumn(allRows(), width());
   const subtitle = () => overlaySubtitle(props.frame.kind);
+  const status = () => props.frame.kind === "model" ? tui.store.ui.statusDetail : undefined;
+  const notice = () => tui.store.ui.lastError;
+  const statusLeft = () => notice()
+    ? `  error · ${notice()}`
+    : props.frame.query
+      ? `  filter: ${props.frame.query}`
+      : status()
+        ? `  ${status()}`
+        : "";
+  const statusRight = () => props.frame.query
+    ? `${matches().length}/${props.options.length}`
+    : selectedIndex() >= 0
+      ? `${selectedIndex() + 1}/${selectableCount()}`
+      : "";
+  const statusLine = () => fitTerminalPair(statusLeft(), statusRight(), width(), 1, 1);
   const selectOption = (id: string): void => {
     const enabled = matches().filter((match) => !match.option.disabled);
     const index = enabled.findIndex((match) => match.option.id === id);
     if (index >= 0) tui.actions.overlaySetIndex(index, enabled.length);
   };
 
+  createEffect(() => {
+    const count = selectableCount();
+    const current = props.frame.index;
+    const next = count > 0 ? Math.max(0, Math.min(current, count - 1)) : 0;
+    if (next !== current && tui.store.ui.overlayStack.at(-1) === props.frame) {
+      tui.actions.overlaySetIndex(next, count);
+    }
+  });
+
   if (props.frame.kind === "mcp") {
+    const optionRows = () => rows().filter((row): row is OptionOverlayRow => row.kind === "option");
+    const optionLimit = () => mcpOverlayMaxItems(dims().height);
+    const optionCapacity = () => Math.max(1, Math.min(
+      optionLimit(),
+      allRows().filter((row): row is OptionOverlayRow => row.kind === "option").length
+    ));
+    const selectedIndex = () => optionRows().findIndex((row) => row.selected);
+    const optionStart = () => scrollWindowStart(optionRows().length, optionCapacity(), selectedIndex());
+    const visibleOptionRows = () => optionRows().slice(optionStart(), optionStart() + optionCapacity());
+    const overlayHeight = () => mcpOverlayHeight(dims().height, optionCapacity());
     return (
       <McpOverlay
         docked={props.docked}
         width={width()}
-        height={height()}
+        height={overlayHeight()}
         left={left()}
-        top={top()}
-        rows={visibleRows()}
+        top={Math.max(0, dims().height - overlayHeight() - 1)}
+        rows={visibleOptionRows()}
         summaryRows={rows()}
         onSelect={selectOption}
       />
@@ -69,6 +106,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
         width={width()}
         left={left()}
         terminalHeight={dims().height}
+        totalCount={filterOptions(props.options, "").length}
         matches={matches()}
         selectedId={selectedId()}
       />
@@ -77,25 +115,22 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
 
   return (
     <box style={{
-      ...(props.docked ? {} : { position: "absolute", zIndex: 3000, left: left(), top: top() }),
+      ...(props.docked ? {} : { position: "absolute", zIndex: 3000, left: left(), top: standardTop() }),
       width: width(),
-      ...(props.docked ? {} : { height: height() }),
+      height: standardHeight(),
       flexDirection: "column",
-      flexShrink: 0
+      flexShrink: 0,
+      overflow: "hidden"
     }}>
-      <text fg={COLOR.text}>{`  ${overlayTitle(props.frame.kind as never)}`}</text>
+      <text fg={COLOR.text}>{`  ${truncateLine(overlayTitle(props.frame.kind as never), Math.max(1, width() - 4))}`}</text>
       <Show when={subtitle()}>
-        <text fg={COLOR.dim}>{`  ${subtitle()}`}</text>
+        <text fg={COLOR.dim}>{`  ${truncateLine(subtitle(), Math.max(1, width() - 4))}`}</text>
       </Show>
       <box style={{ flexDirection: "row", justifyContent: "space-between", height: 1 }}>
-        <text fg={COLOR.dim}>{props.frame.query ? `  filter: ${truncateLine(props.frame.query, Math.max(8, width() - 24))}` : " "}</text>
-        <text fg={COLOR.dim}>{props.frame.query
-          ? `${matches().length}/${props.options.length}`
-          : matches().length > 0
-            ? `${Math.min(props.frame.index + 1, matches().length)}/${matches().length}`
-            : ""}</text>
+        <text fg={notice() ? COLOR.error : COLOR.dim}>{statusLine().left || " "}</text>
+        <text fg={COLOR.dim}>{statusLine().right}</text>
       </box>
-      <box style={{ flexDirection: "column" }}>
+      <box style={{ height: maxRows(), flexDirection: "column", overflow: "hidden" }}>
         <Show when={matches().length > 0} fallback={<text fg={COLOR.dim}>{"  no results"}</text>}>
           <For each={visibleRows()}>{(row) => {
             if (row.kind === "category") return <CategoryRow row={row} />;
@@ -133,6 +168,7 @@ type AgentsOverlayProps = {
   width: number;
   left: number;
   terminalHeight: number;
+  totalCount: number;
   matches: FuzzyMatch<unknown>[];
   selectedId: string | undefined;
 };
@@ -176,6 +212,7 @@ function OptionRow(props: OptionRowProps): JSX.Element {
 }
 
 function McpOverlay(props: McpOverlayProps): JSX.Element {
+  const tui = useTuiStore();
   const optionRows = () => props.rows.filter((row): row is OptionOverlayRow => row.kind === "option");
   const summaryOptionRows = () => props.summaryRows.filter((row): row is OptionOverlayRow => row.kind === "option");
   const readyCount = () => summaryOptionRows().filter((row) => row.option.category === "running").length;
@@ -190,13 +227,14 @@ function McpOverlay(props: McpOverlayProps): JSX.Element {
     <box style={{
       ...(props.docked ? {} : { position: "absolute", zIndex: 3000, left: props.left, top: props.top }),
       width: props.width,
-      ...(props.docked ? {} : { height: props.height }),
+      height: props.height,
       flexDirection: "column",
-      flexShrink: 0
+      flexShrink: 0,
+      overflow: "hidden"
     }}>
       <text fg={COLOR.text}>{"  mcp servers"}</text>
-      <text fg={COLOR.dim}>{`  ${summary()}`}</text>
-      <box style={{ flexDirection: "column" }}>
+      <text fg={tui.store.ui.lastError ? COLOR.error : COLOR.dim}>{`  ${truncateLine(tui.store.ui.lastError ? `error · ${tui.store.ui.lastError}` : summary(), Math.max(1, props.width - 4))}`}</text>
+      <box style={{ height: Math.max(1, props.height - 5), flexShrink: 0, flexDirection: "column", marginTop: 1, overflow: "hidden" }}>
         <Show when={optionRows().length > 0} fallback={<text fg={COLOR.dim}>{"  no mcp servers configured."}</text>}>
           <For each={optionRows()}>{(row) => <McpServerRow row={row} width={props.width} onSelect={props.onSelect} />}</For>
         </Show>
@@ -224,12 +262,13 @@ function McpServerRow(props: { row: OptionOverlayRow; width: number; onSelect: (
     if (state() === "disabled") return "disabled";
     return "stopped";
   };
-  const title = () => truncateLine(option().title, Math.max(8, props.width - 24));
   const footer = () => option().footer ? ` · ${option().footer}` : "";
-  const detail = () => truncateLine(option().description ?? "", Math.max(8, props.width - 8));
+  const status = () => `${statusText()}${footer()}`;
+  const headline = () => fitTerminalPair(option().title, status(), Math.max(1, props.width - 4), 3, 1);
+  const detail = () => truncateLine(option().description ?? "", Math.max(1, props.width - 4));
   return (
     <box
-      style={{ flexDirection: "column" }}
+      style={{ height: 2, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}
       onMouseUp={(event) => {
         if (!isPrimaryClick(event) || props.row.disabled) return;
         props.onSelect(props.row.option.id);
@@ -238,8 +277,8 @@ function McpServerRow(props: { row: OptionOverlayRow; width: number; onSelect: (
       <box style={{ flexDirection: "row" }}>
         <text selectable={false} fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
         <text selectable={false} fg={color()}>{statusGlyph(statusText())}</text>
-        <text selectable={false} fg={COLOR.text}>{` ${title()}`}</text>
-        <text selectable={false} fg={COLOR.dim}>{` ${statusText()}${footer()}`}</text>
+        <text selectable={false} fg={COLOR.text}>{` ${headline().left}`}</text>
+        <Show when={headline().right}><text selectable={false} fg={COLOR.dim}>{` ${headline().right}`}</text></Show>
       </box>
       <Show when={detail()}>
         <text selectable={false} fg={option().id === "mcp-error" || detail().startsWith("error:") ? COLOR.error : COLOR.dim}>{`    ${detail()}`}</text>
@@ -256,28 +295,29 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
     if (!props.frame.expandedId) return undefined;
     return rows().find((row) => row.option.id === props.frame.expandedId)?.option.value as AgentThreadSummary | undefined;
   });
+  const expandedDetailLines = createMemo(() => expandedItem()
+    ? visibleAgentDetailLines(expandedItem()!, props.terminalHeight)
+    : []);
   const rowLimit = createMemo(() => agentOverlayMaxItems(
     props.terminalHeight,
-    Boolean(props.frame.query),
-    expandedItem() ? agentDetailLines(expandedItem()!).length : 0
+    expandedDetailLines().length > 0 ? expandedDetailLines().length + 2 : 0
   ));
+  const reservedRows = createMemo(() => Math.max(1, Math.min(rowLimit(), props.totalCount)));
   const visibleRows = createMemo(() => {
     const all = rows();
     const selected = all.findIndex((row) => row.selected);
     const start = scrollWindowStart(all.length, rowLimit(), selected);
-    return all.slice(start, start + rowLimit());
+    return all.slice(start, start + reservedRows());
   });
   const activeCount = () => tui.store.ui.agentThreads.filter((item) => {
     return item.role === "subagent" && ["created", "starting", "running", "cancelling"].includes(item.status);
   }).length;
   const agentCount = () => tui.store.ui.agentThreads.filter((item) => item.role === "subagent").length;
   const doneCount = () => agentCount() - activeCount();
-  const expandedRows = () => expandedItem() ? agentDetailLines(expandedItem()!).length + 2 : 0;
-  const renderedHeight = () => Math.max(
-    6,
-    4 + (props.frame.query ? 1 : 0) + visibleRows().length * 2 + expandedRows()
-  );
-  const height = () => Math.min(Math.max(6, props.terminalHeight - 1), renderedHeight());
+  const expandedRows = () => expandedDetailLines().length > 0 ? expandedDetailLines().length + 2 : 0;
+  const rowViewportHeight = () => visibleRows().length > 0 ? reservedRows() * 2 + expandedRows() : 1;
+  const renderedHeight = () => 5 + rowViewportHeight();
+  const height = () => Math.max(1, Math.min(Math.max(1, props.terminalHeight - 1), renderedHeight()));
   const top = () => Math.max(0, props.terminalHeight - height() - 1);
 
   createEffect(() => {
@@ -292,23 +332,23 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
     <box style={{
       ...(props.docked ? {} : { position: "absolute", zIndex: 3000, left: props.left, top: top() }),
       width: props.width,
-      ...(props.docked ? {} : { height: height() }),
+      height: height(),
       flexDirection: "column",
-      flexShrink: 0
+      flexShrink: 0,
+      overflow: "hidden"
     }}>
       <text fg={COLOR.text}>{"  agents"}</text>
-      <text fg={COLOR.dim}>{`  ${activeCount()} active · ${doneCount()} done`}</text>
-      <Show when={props.frame.query}>
-        <text fg={COLOR.dim}>{`  filter: ${truncateLine(props.frame.query, Math.max(8, props.width - 16))}`}</text>
-      </Show>
-      <box style={{ flexDirection: "column", marginTop: 1 }}>
+      <text fg={tui.store.ui.lastError ? COLOR.error : COLOR.dim}>{`  ${truncateLine(tui.store.ui.lastError ? `error · ${tui.store.ui.lastError}` : `${activeCount()} active · ${doneCount()} done`, Math.max(1, props.width - 4))}`}</text>
+      <text fg={COLOR.dim}>{props.frame.query ? `  filter: ${truncateLine(props.frame.query, Math.max(1, props.width - 12))}` : " "}</text>
+      <box style={{ height: rowViewportHeight(), flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
         <Show when={visibleRows().length > 0} fallback={<text fg={COLOR.dim}>{"  no agents yet"}</text>}>
           <For each={visibleRows()}>{(row) => {
             const item = () => row.option.value as AgentThreadSummary;
             const expanded = () => props.frame.expandedId === row.option.id;
+            const detailLines = () => visibleAgentDetailLines(item(), props.terminalHeight);
             const current = () => item().sessionId === tui.store.activeSessionId;
             const status = () => agentStatusLine(item(), current(), now());
-            const titleWidth = () => Math.max(8, props.width - terminalWidth(status()) - 10);
+            const headline = () => fitTerminalPair(item().title, status(), Math.max(1, props.width - 6), 4, 2);
             const metadata = () => item().role === "main"
               ? ["main thread", item().model].filter(Boolean).join(" · ")
               : [
@@ -341,14 +381,14 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
                 <box style={{ width: "100%", flexDirection: "row" }}>
                   <text selectable={false} fg={row.selected ? COLOR.accent : COLOR.dim}>{row.selected ? "› " : "  "}</text>
                   <text selectable={false} fg={agentColor(item())}>{`${agentGlyph(item())} `}</text>
-                  <text selectable={false} fg={COLOR.text}>{truncateLine(item().title, titleWidth())}</text>
-                  <text selectable={false} fg={COLOR.dim}>{`  ${status()}`}</text>
+                  <text selectable={false} fg={COLOR.text}>{headline().left}</text>
+                  <Show when={headline().right}><text selectable={false} fg={COLOR.dim}>{`  ${headline().right}`}</text></Show>
                 </box>
-                <text selectable={false} fg={COLOR.dim}>{`    ${truncateLine(metadata(), Math.max(8, props.width - 6))}`}</text>
-                <Show when={expanded()}>
+                <text selectable={false} fg={COLOR.dim}>{`    ${truncateLine(metadata(), Math.max(1, props.width - 6))}`}</text>
+                <Show when={expanded() && detailLines().length > 0}>
                   <box style={{ flexDirection: "column", paddingLeft: 3, paddingTop: 1, paddingBottom: 1 }}>
-                    <For each={agentDetailLines(item())}>
-                      {(line, index) => <text fg={item().error ? COLOR.error : index() === 0 ? COLOR.text : COLOR.dim}>{truncateLine(`${index() === 0 ? "└ " : "  "}${line}`, Math.max(8, props.width - 8))}</text>}
+                    <For each={detailLines()}>
+                      {(line, index) => <text fg={item().error ? COLOR.error : index() === 0 ? COLOR.text : COLOR.dim}>{truncateLine(`${index() === 0 ? "└ " : "  "}${line}`, Math.max(1, props.width - 8))}</text>}
                     </For>
                   </box>
                 </Show>
@@ -362,9 +402,16 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
   );
 }
 
-function agentOverlayMaxItems(terminalHeight: number, hasQuery: boolean, detailLines: number): number {
-  const fixedRows = 4 + (hasQuery ? 1 : 0) + (detailLines > 0 ? detailLines + 2 : 0);
-  return Math.min(8, Math.max(1, Math.floor((terminalHeight - fixedRows) / 2)));
+function agentOverlayMaxItems(terminalHeight: number, expandedRows: number): number {
+  return Math.min(8, Math.max(1, Math.floor((terminalHeight - 6 - expandedRows) / 2)));
+}
+
+function mcpOverlayMaxItems(terminalHeight: number): number {
+  return Math.min(8, Math.max(1, Math.floor((terminalHeight - 6) / 2)));
+}
+
+function mcpOverlayHeight(terminalHeight: number, itemLimit: number): number {
+  return Math.min(Math.max(1, terminalHeight - 1), 5 + itemLimit * 2);
 }
 
 function agentDetailLines(item: AgentThreadSummary): string[] {
@@ -374,6 +421,10 @@ function agentDetailLines(item: AgentThreadSummary): string[] {
   const lines = detail.split("\n").map((line) => line.trim()).filter(Boolean);
   if (lines.length <= 3) return lines;
   return [...lines.slice(0, 2), `... +${lines.length - 2} lines`];
+}
+
+function visibleAgentDetailLines(item: AgentThreadSummary, terminalHeight: number): string[] {
+  return agentDetailLines(item).slice(0, Math.max(0, terminalHeight - 10));
 }
 
 function agentStatus(item: AgentThreadSummary): string {
@@ -434,7 +485,7 @@ function overlayMaxRows(kind: string, terminalHeight: number): number {
       cap = 8;
       break;
   }
-  return Math.min(cap, Math.max(5, terminalHeight - 8));
+  return Math.min(cap, Math.max(1, terminalHeight - 6));
 }
 
 function descriptionColumn(rows: OverlayRow[], width: number): number {
@@ -466,7 +517,8 @@ function overlayHint(
 ): string {
   if (frame.kind !== "model") return "press enter to confirm or esc to go back";
   const enabled = matches.filter((match) => !match.option.disabled);
-  const selected = enabled[frame.index]?.option.value as { kind?: string; providerID?: string } | undefined;
+  const index = selectableIndex(matches, frame.index);
+  const selected = index >= 0 ? enabled[index]?.option.value as { kind?: string; providerID?: string } | undefined : undefined;
   if (selected?.kind === "model_action") return "enter add provider · ctrl+a add · esc back";
   const providerID = frame.providerID ?? (selected?.kind === "model_provider" ? selected.providerID : undefined);
   if (!providerID) return "ctrl+a add provider · esc back";

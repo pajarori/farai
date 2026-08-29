@@ -62,6 +62,31 @@ export function fitTerminal(value: string, width: number): string {
   return padTerminalEnd(truncateTerminal(value, available), available);
 }
 
+export function fitTerminalPair(
+  left: string,
+  right: string,
+  width: number,
+  minimumLeftWidth = 1,
+  gap = 1
+): { left: string; right: string } {
+  const available = Math.max(0, Math.floor(width));
+  if (available === 0) return { left: "", right: "" };
+  if (!right) return { left: truncateTerminal(left, available), right: "" };
+
+  const reservedLeft = Math.min(available, Math.max(0, Math.floor(minimumLeftWidth)));
+  const preferredGap = Math.max(0, Math.floor(gap));
+  const rightLimit = Math.max(0, available - reservedLeft - preferredGap);
+  const fittedRight = truncateTerminal(right, rightLimit);
+  if (!fittedRight) return { left: truncateTerminal(left, available), right: "" };
+
+  const actualGap = Math.min(preferredGap, Math.max(0, available - terminalWidth(fittedRight)));
+  const leftLimit = Math.max(0, available - terminalWidth(fittedRight) - actualGap);
+  return {
+    left: truncateTerminal(left, leftLimit),
+    right: fittedRight
+  };
+}
+
 function graphemes(value: string): string[] {
   if (!GRAPHEME_SEGMENTER) return Array.from(value);
   return Array.from(GRAPHEME_SEGMENTER.segment(value), (part) => part.segment);

@@ -1,4 +1,4 @@
-import { createMemo, type JSX } from "solid-js";
+import { Show, createMemo, type JSX } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import { useTuiStore } from "../context/store";
 import { useComposerControl } from "../context/composer";
@@ -73,15 +73,21 @@ export function Footer(props: FooterProps): JSX.Element {
       ?? DEFAULT_CONTEXT_WINDOW;
     return { tokens: current?.tokens ?? 0, budget };
   };
-  const rightItems = createMemo(() => footerRightItems(
-    tui.store.snapshot.backgroundActivities,
-    tui.store.snapshot.subagents,
-    tui.store.snapshot.browserContexts,
-    tui.store.snapshot.queuedPrompts.length,
-    tui.store.ui.statusDetail,
-    contextUsage(),
-    tui.store.ui.updateNotice
-  ));
+  const rightItems = createMemo(() => {
+    if (tui.store.ui.lastError) {
+      return [{ id: "error", kind: "message" as const, text: `error · ${tui.store.ui.lastError}` }];
+    }
+    return footerRightItems(
+      tui.store.snapshot.backgroundActivities,
+      tui.store.snapshot.subagents,
+      tui.store.snapshot.browserContexts,
+      tui.store.snapshot.queuedPrompts.length,
+      tui.store.ui.statusDetail,
+      contextUsage(),
+      tui.store.ui.updateNotice,
+      !isAgentBusy(tui.store)
+    );
+  });
   const firstLine = () => fitFooterLine(left(), rightItems(), Math.max(0, dims().width - 4));
   const updateText = () => tui.store.ui.updateNotice ? `update ${tui.store.ui.updateNotice.latestVersion}` : undefined;
   const rightLine = createMemo(() => splitUpdateWarning(firstLine().right, updateText()));
@@ -90,10 +96,14 @@ export function Footer(props: FooterProps): JSX.Element {
     <box style={{ flexShrink: 0, flexDirection: "column" }}>
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
         <text fg={historySearch() ? COLOR.accent : COLOR.dim}>{firstLine().left}</text>
-        <text>
-          <span style={{ fg: COLOR.warning }}>{rightLine().warning}</span>
-          <span style={{ fg: COLOR.dim }}>{rightLine().rest}</span>
-        </text>
+        <Show when={tui.store.ui.lastError} fallback={
+          <text>
+            <span style={{ fg: COLOR.warning }}>{rightLine().warning}</span>
+            <span style={{ fg: COLOR.dim }}>{rightLine().rest}</span>
+          </text>
+        }>
+          <text fg={COLOR.error}>{firstLine().right}</text>
+        </Show>
       </box>
       <ShowShortcutLines lines={lines().slice(1).map((line) => line.toLowerCase())} />
     </box>

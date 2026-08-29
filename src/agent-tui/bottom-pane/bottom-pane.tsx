@@ -10,13 +10,14 @@ import { StatusIndicator } from "./status-indicator";
 import { ListOverlay } from "../overlays/list-overlay";
 import { overlayOptions } from "../overlay-options";
 import { centerSurfaceFooter } from "../surfaces/center-surface";
-import { isAgentBusy, type CenterSurfaceFrame } from "../store";
+import { isAgentBusy, type CenterSurfaceBusy, type CenterSurfaceFrame } from "../store";
 import { COLOR } from "../theme";
-import { truncateLine } from "../renderers";
-import { activityStatusVisible, bottomPaneSlot, fitFooterLine, isFooterStatusDetail, isTranscriptActivityDetail, transcriptOwnsActivity } from "./footer-state";
+import { activityStatusVisible, bottomPaneSlot, fitFooterLine } from "./footer-state";
 import { RequestUserInput } from "./request-user-input";
 import { ModelProviderWizard } from "./model-provider-wizard";
 import { ModelProviderRemoval } from "./model-provider-removal";
+import { slashCommandOptions, slashMatches, slashPopupRowLimit, slashPopupVisible } from "../slash-autocomplete";
+import { truncateLine } from "../renderers";
 
 export function BottomPane(): JSX.Element {
   const tui = useTuiStore();
@@ -42,12 +43,12 @@ export function BottomPane(): JSX.Element {
   const ctx = () => ({ tui, dialog, exit });
   const slashPanelActive = () => {
     const text = composer.text();
-    return text.startsWith("/")
-      && !text.slice(1).includes(" ")
-      && !text.includes("\n")
-      && tui.store.ui.slashSuppressedText !== text
-      && tui.store.ui.overlayStack.length === 0
-      && tui.store.ui.centerSurfaceStack.length === 0;
+    return slashPopupVisible(
+      text,
+      tui.store.ui.slashSuppressedText === text,
+      slashMatches(slashCommandOptions(), text, slashPopupRowLimit(dims().height)).length,
+      tui.store.ui.overlayStack.length > 0 || tui.store.ui.centerSurfaceStack.length > 0
+    );
   };
   const slot = () => bottomPaneSlot({
     hasListFrame: Boolean(listFrame()),
@@ -59,18 +60,32 @@ export function BottomPane(): JSX.Element {
   const providerRemovalActive = () => Boolean(tui.store.ui.modelProviderRemoval);
   const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed);
   const inputRequestPending = () => Boolean(tui.store.snapshot.pendingUserInput);
+  const composerChromeVisible = () => slot() === "composer" && !slashPanelActive() && !inputRequestActive() && !providerWizardActive() && !providerRemovalActive();
   const footerHidden = () => Boolean(frame()) || Boolean(centerFrame()) || slashPanelActive() || proxyTabActive() || inputRequestActive() || providerWizardActive() || providerRemovalActive();
-  const inlineStatusDetail = () => {
-    const detail = tui.store.ui.statusDetail;
-    if (!detail || isFooterStatusDetail(detail)) return undefined;
-    if (transcriptOwnsActivity(tui.timelineRows()) && isTranscriptActivityDetail(detail)) return undefined;
-    return detail;
-  };
   const statusActivity = () => {
     if (tui.store.ui.compacting) return "compacting context" as const;
-    if (isAgentBusy(tui.store) && !transcriptOwnsActivity(tui.timelineRows())) return "working" as const;
+    if (isAgentBusy(tui.store)) return "working" as const;
     return undefined;
   };
+  const statusVisible = () => Boolean(composerChromeVisible() && activityStatusVisible(tui.store.ui.activeMainTab) && statusActivity());
+  const pendingPreviewVisible = () => composerChromeVisible()
+    && (tui.store.snapshot.pendingSteers.length > 0 || tui.store.snapshot.queuedPrompts.length > 0);
+  const questionNoticeVisible = () => composerChromeVisible() && inputRequestPending();
+  const questionNotice = () => truncateLine(
+    dims().width >= 64
+      ? "• question pending · ctrl+q answer · chat input remains available"
+      : "• question pending · ctrl+q answer",
+    Math.max(1, dims().width)
+  );
+  const previewMaxRows = () => {
+    const fixedRows = 5 + composer.height()
+      + (statusVisible() ? 1 : 0)
+      + (questionNoticeVisible() ? 1 : 0)
+      + (statusVisible() && (pendingPreviewVisible() || questionNoticeVisible()) ? 1 : 0)
+      + (pendingPreviewVisible() && questionNoticeVisible() ? 1 : 0);
+    return Math.min(10, Math.max(0, dims().height - fixedRows));
+  };
+  const previewRendered = () => pendingPreviewVisible() && previewMaxRows() > 0;
 
   createEffect(() => {
     const started = tui.store.ui.runningSince;
@@ -87,19 +102,20 @@ export function BottomPane(): JSX.Element {
 
   return (
     <box style={{ flexShrink: 0, flexDirection: "column" }}>
-      <Show when={!inputRequestActive() && !providerWizardActive() && !providerRemovalActive() && activityStatusVisible(tui.store.ui.activeMainTab) && (statusActivity() || inlineStatusDetail())}>
+      <Show when={statusVisible()}>
         <StatusIndicator elapsed={elapsed()} activity={statusActivity()} />
       </Show>
-      <Show when={tui.store.ui.lastError}>
-        {(error) => <text fg={COLOR.error}>{`• error · ${truncateLine(error(), Math.max(1, dims().width - 10))}`}</text>}
+      <Show when={statusVisible() && (previewRendered() || questionNoticeVisible())}>
+        <box style={{ height: 1, flexShrink: 0 }} />
       </Show>
-      <Show when={!inputRequestActive() && !providerWizardActive() && !providerRemovalActive()}>
-        <PendingInputPreview />
+      <Show when={previewRendered()}>
+        <PendingInputPreview maxRows={previewMaxRows()} />
       </Show>
-      <Show when={!inputRequestActive() && inputRequestPending() && !providerWizardActive() && !providerRemovalActive()}>
-        <text fg={COLOR.warning}>{dims().width >= 64
-          ? "  question pending · ctrl+q answer · chat input remains available"
-          : "  question pending · ctrl+q answer"}</text>
+      <Show when={previewRendered() && questionNoticeVisible()}>
+        <box style={{ height: 1, flexShrink: 0 }} />
+      </Show>
+      <Show when={questionNoticeVisible()}>
+        <text fg={COLOR.warning}>{questionNotice()}</text>
       </Show>
       <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={inputRequestActive() ? tui.store.snapshot.pendingUserInput : undefined} fallback={
         <Show when={listFrame()} fallback={
@@ -130,27 +146,30 @@ export function BottomPane(): JSX.Element {
 function ProxyTabFooter(): JSX.Element {
   const tui = useTuiStore();
   const dims = useTerminalDimensions();
-  const layout = () => proxyTabFooterLayout(dims().width, tui.store.ui.proxyFilter);
+  const error = () => tui.store.ui.lastError;
+  const layout = () => proxyTabFooterLayout(dims().width, tui.store.ui.proxyFilter, error() ?? tui.store.ui.statusDetail);
   return (
     <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
       <text fg={COLOR.dim}>{layout().left}</text>
-      <text fg={COLOR.dim}>{layout().right}</text>
+      <text fg={error() ? COLOR.error : COLOR.dim}>{layout().right}</text>
     </box>
   );
 }
 
 function CenterSurfaceFooter(props: { frame: CenterSurfaceFrame }): JSX.Element {
+  const tui = useTuiStore();
   const dims = useTerminalDimensions();
-  const layout = () => centerSurfaceFooterLayout(props.frame, dims().width);
+  const error = () => tui.store.ui.lastError;
+  const layout = () => centerSurfaceFooterLayout(props.frame, dims().width, error(), tui.store.ui.centerSurfaceBusy);
   return (
     <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
       <text fg={COLOR.dim}>{layout().left}</text>
-      <text fg={COLOR.dim}>{layout().right}</text>
+      <text fg={error() ? COLOR.error : COLOR.dim}>{layout().right}</text>
     </box>
   );
 }
 
-export function proxyTabFooterLayout(width: number, filter: string): { left: string; right: string } {
+export function proxyTabFooterLayout(width: number, filter: string, status?: string): { left: string; right: string } {
   const hint = width >= 88
     ? "↑↓ flow · tab detail · p/n ws msg · ←→ filter · a/h/w tabs · alt+1 chat"
     : width >= 56
@@ -158,12 +177,35 @@ export function proxyTabFooterLayout(width: number, filter: string): { left: str
       : width >= 32
         ? "alt+1 chat · ↑↓ flow"
         : "alt+1 chat";
-  return fitFooterLine(hint, [{ id: "proxy", kind: "message", text: `proxy · ${filter}` }], Math.max(0, width - 2));
+  return fitFooterLine(hint, [
+    ...(status ? [{ id: "status", kind: "message" as const, text: status }] : []),
+    { id: "proxy", kind: "message", text: `proxy · ${filter}` }
+  ], Math.max(0, width - 2));
 }
 
-export function centerSurfaceFooterLayout(frame: CenterSurfaceFrame, width: number): { left: string; right: string } {
-  const hint = width >= 64 ? centerSurfaceFooter(frame).toLowerCase() : compactCenterSurfaceFooter(frame);
-  return fitFooterLine(hint, [{ id: "surface", kind: "message", text: frame.kind.toLowerCase() }], Math.max(0, width - 2));
+export function centerSurfaceFooterLayout(
+  frame: CenterSurfaceFrame,
+  width: number,
+  error?: string,
+  busy?: CenterSurfaceBusy
+): { left: string; right: string } {
+  const hint = busy
+    ? "esc back"
+    : width >= 64
+      ? centerSurfaceFooter(frame).toLowerCase()
+      : compactCenterSurfaceFooter(frame);
+  const status = error ? `error · ${error}` : centerSurfaceStatus(frame, busy);
+  return fitFooterLine(hint, [{ id: "surface", kind: "message", text: status }], Math.max(0, width - 2));
+}
+
+function centerSurfaceStatus(
+  frame: CenterSurfaceFrame,
+  busy: CenterSurfaceBusy | undefined
+): string {
+  if (busy === "report_save") return "saving report";
+  if (busy === "container_toggle") return "toggling container";
+  if (busy === "container_refresh") return "refreshing container";
+  return frame.kind.toLowerCase();
 }
 
 function compactCenterSurfaceFooter(frame: CenterSurfaceFrame): string {

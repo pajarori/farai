@@ -18,6 +18,7 @@ import { titleFromPrompt } from "../../../session-title";
 import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
 import { createPrimaryClickGesture } from "../../input/mouse";
+import { fitTerminalPair } from "../../terminal-text";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 5;
 
@@ -32,6 +33,7 @@ type ExplorationRowProps = {
 type ExplorationItemRowProps = {
   item: ExplorationItem;
   expanded: boolean;
+  last: boolean;
 };
 
 type ToolInputProps = {
@@ -66,7 +68,10 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
     return fullResult();
   };
   const hasInput = () => Object.keys(input()).length > 0;
-  const headerLabel = () => isMcp() ? `${active() ? "calling" : "called"} ${mcpInvocation()}` : title();
+  const headerLabel = () => truncateLine(
+    isMcp() ? `${active() ? "calling" : "called"} ${mcpInvocation()}` : title(),
+    Math.max(1, dims().width - 4)
+  );
   const headerColor = () => active() ? COLOR.accent : toolColor(props.row.status);
   const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   const previewClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
@@ -145,7 +150,8 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
   const prompt = () => String(input().prompt ?? "").trim();
   const result = () => activity()?.summary ?? activity()?.error ?? props.row.fullResult ?? props.row.toolResult?.output ?? "";
   const duration = () => agentDuration(activity()?.startedAt ?? activity()?.createdAt, activity()?.completedAt);
-  const width = () => Math.max(24, dims().width - 4);
+  const width = () => Math.max(1, dims().width - 4);
+  const headline = () => fitTerminalPair(title(), status(), width(), 6, 2);
   const toggle = () => tui.actions.cellExpandedToggle(props.row.id);
   const toggleClick = createPrimaryClickGesture(toggle);
   return (
@@ -157,11 +163,11 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
     >
       <box style={{ flexDirection: "row" }} {...toggleClick}>
         <TranscriptMarker color={delegationColor(status())} glyph={delegationGlyph(status())} spinning={active()} />
-        <text fg={delegationColor(status())}>{truncateLine(title(), Math.max(12, width() - 18))}</text>
-        <text fg={delegationColor(status())}>{`  ${status()}`}</text>
+        <text fg={delegationColor(status())}>{headline().left}</text>
+        <Show when={headline().right}><text fg={delegationColor(status())}>{`  ${headline().right}`}</text></Show>
       </box>
       <box style={{ paddingLeft: 2 }}>
-        <text fg={COLOR.dim}>{[lane(), mode(), duration()].filter(Boolean).join(" · ")}</text>
+        <text fg={COLOR.dim}>{truncateLine([lane(), mode(), duration()].filter(Boolean).join(" · "), width())}</text>
       </box>
       <Show when={expanded()}>
         <ExpandedPanel>
@@ -242,7 +248,7 @@ export function ExplorationRow(props: ExplorationRowProps): JSX.Element {
         <text fg={active() ? COLOR.accent : COLOR.text}>{active() ? "exploring" : "explored"}</text>
       </box>
       <box style={{ flexDirection: "column", paddingLeft: 2 }}>
-        <For each={props.row.items}>{(item) => <ExplorationItemRow item={item} expanded={expanded()} width={dims().width} />}</For>
+        <For each={props.row.items}>{(item, index) => <ExplorationItemRow item={item} expanded={expanded()} last={index() === props.row.items.length - 1} width={dims().width} />}</For>
       </box>
     </box>
   );
@@ -251,9 +257,9 @@ export function ExplorationRow(props: ExplorationRowProps): JSX.Element {
 function ExplorationItemRow(props: ExplorationItemRowProps & { width: number }): JSX.Element {
   return (
     <box style={{ flexDirection: "column" }}>
-      <text fg={COLOR.dim}>{`└ ${props.item.verb} ${props.item.target}`}</text>
+      <text fg={COLOR.dim}>{truncateLine(`└ ${props.item.verb} ${props.item.target}`, Math.max(1, props.width - 4))}</text>
       <Show when={props.expanded}>
-        <ExpandedPanel marginBottom={1}>
+        <ExpandedPanel marginBottom={props.last ? 0 : 1}>
           <text fg={COLOR.dim}>{"result"}</text>
           <Show when={props.item.fullResult ?? props.item.result} fallback={<text fg={COLOR.dim}>{isActiveToolStatus(props.item.status) ? "waiting for output" : "no output"}</text>}>
             {(result) => <code content={result()} filetype="text" syntaxStyle={syntax()} fg={COLOR.text} />}

@@ -31,6 +31,13 @@ export type UiFrame = OverlayFrame | CenterSurfaceFrame;
 
 export type MainTab = "chat" | "proxy";
 export type ProxyViewFilter = "all" | "http" | "websocket";
+export type CenterSurfaceBusy = "report_save" | "container_toggle" | "container_refresh";
+
+export type ModelProviderRemovalState = {
+  provider: ModelProviderInfo;
+  busy: boolean;
+  error: string | undefined;
+};
 
 const PROXY_VIEW_FILTERS: readonly ProxyViewFilter[] = ["all", "http", "websocket"];
 
@@ -93,6 +100,7 @@ export type FaraiTuiStore = {
     submitting: boolean;
     compacting: boolean;
     statusDetail: string | undefined;
+    centerSurfaceBusy: CenterSurfaceBusy | undefined;
     contextUsage: ContextUsage | undefined;
     rawOutput: boolean;
     activeMainTab: MainTab;
@@ -108,7 +116,7 @@ export type FaraiTuiStore = {
     availableModels: ModelChoiceInfo[];
     modelProviders: ModelProviderInfo[];
     modelProviderWizard: ModelProviderWizardState | undefined;
-    modelProviderRemoval: ModelProviderInfo | undefined;
+    modelProviderRemoval: ModelProviderRemovalState | undefined;
     mcpStatuses: McpServerRuntimeStatus[];
     mcpStatusError: string | undefined;
     messageNavigation: { direction: "next" | "prev"; sequence: number };
@@ -186,6 +194,7 @@ export type StoreActions = {
   historySearchMove: (delta: number, optionCount: number) => void;
   footerModeSet: (mode: FaraiTuiStore["ui"]["footerMode"]) => void;
   statusDetailSet: (detail: string | undefined) => void;
+  centerSurfaceBusySet: (busy: FaraiTuiStore["ui"]["centerSurfaceBusy"]) => void;
   contextUsageUpdated: (usage: ContextUsage | undefined) => void;
   containerStatusSet: (status: FaraiTuiStore["ui"]["containerStatus"]) => void;
   servicesSet: (services: ServiceStatus[]) => void;
@@ -195,6 +204,7 @@ export type StoreActions = {
   modelProviderWizardPatch: (patch: Partial<ModelProviderWizardState>) => void;
   modelProviderWizardClose: () => void;
   modelProviderRemovalOpen: (provider: ModelProviderInfo) => void;
+  modelProviderRemovalPatch: (patch: Partial<Omit<ModelProviderRemovalState, "provider">>) => void;
   modelProviderRemovalClose: () => void;
   mcpStatusesSet: (statuses: McpServerRuntimeStatus[]) => void;
   mcpStatusErrorSet: (message: string | undefined) => void;
@@ -280,6 +290,7 @@ export function initialStore(workspace: string): FaraiTuiStore {
       submitting: false,
       compacting: false,
       statusDetail: undefined,
+      centerSurfaceBusy: undefined,
       contextUsage: undefined,
       rawOutput: false,
       activeMainTab: "chat",
@@ -347,6 +358,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.submitting = false;
         s.ui.compacting = false;
         s.ui.statusDetail = undefined;
+        s.ui.centerSurfaceBusy = undefined;
         s.ui.contextUsage = undefined;
         s.ui.rawOutput = false;
         s.ui.activeMainTab = "chat";
@@ -412,10 +424,14 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     overlayPush(frame: UiFrame): void {
       if (isSelectorFrame(frame)) {
-        setStore(produce((s) => { s.ui.overlayStack.push(frame); }));
+        setStore(produce((s) => {
+          s.ui.lastError = undefined;
+          s.ui.overlayStack.push(frame);
+        }));
         return;
       }
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.overlayStack = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
         s.ui.centerSurfaceStack.push(frame);
@@ -423,33 +439,51 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     overlayOpen(kind: OverlayKind): void {
       if (isSelectorOverlayKind(kind)) {
-        setStore(produce((s) => { s.ui.overlayStack.push(defaultOverlayFrame(kind)); }));
+        setStore(produce((s) => {
+          s.ui.lastError = undefined;
+          s.ui.overlayStack.push(defaultOverlayFrame(kind));
+        }));
         return;
       }
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.overlayStack = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
         s.ui.centerSurfaceStack.push(defaultCenterSurfaceFrame(kind));
       }));
     },
     overlayPop(): void {
-      setStore(produce((s) => { s.ui.overlayStack.pop(); }));
+      setStore(produce((s) => {
+        s.ui.overlayStack.pop();
+        s.ui.lastError = undefined;
+        if (isSelectorLoadingStatus(s.ui.statusDetail)) s.ui.statusDetail = undefined;
+      }));
     },
     overlayClear(): void {
-      setStore("ui", "overlayStack", []);
+      setStore(produce((s) => {
+        s.ui.overlayStack = [];
+        s.ui.lastError = undefined;
+        if (isSelectorLoadingStatus(s.ui.statusDetail)) s.ui.statusDetail = undefined;
+      }));
     },
     centerSurfacePush(frame: CenterSurfaceFrame): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.overlayStack = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
         s.ui.centerSurfaceStack.push(frame);
       }));
     },
     centerSurfacePop(): void {
-      setStore(produce((s) => { s.ui.centerSurfaceStack.pop(); }));
+      setStore(produce((s) => {
+        s.ui.centerSurfaceStack.pop();
+        s.ui.lastError = undefined;
+        s.ui.centerSurfaceBusy = undefined;
+      }));
     },
     centerSurfaceReplaceTop(frame: CenterSurfaceFrame): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.overlayStack = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
         if (s.ui.centerSurfaceStack.length === 0) s.ui.centerSurfaceStack.push(frame);
@@ -460,6 +494,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         const top = s.ui.overlayStack[s.ui.overlayStack.length - 1];
         if (!top || !("index" in top)) return;
+        s.ui.lastError = undefined;
         top.index = clampIndex(top.index + delta, optionCount);
         if (top.kind === "agents") delete top.expandedId;
       }));
@@ -468,6 +503,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         const top = s.ui.overlayStack[s.ui.overlayStack.length - 1];
         if (!top || !("index" in top)) return;
+        s.ui.lastError = undefined;
         top.index = clampIndex(index, optionCount);
         if (top.kind === "agents") delete top.expandedId;
       }));
@@ -476,6 +512,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         const top = s.ui.overlayStack[s.ui.overlayStack.length - 1];
         if (!top || !("query" in top)) return;
+        s.ui.lastError = undefined;
         top.query += char;
         top.index = 0;
         if (top.kind === "agents") delete top.expandedId;
@@ -485,6 +522,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         const top = s.ui.overlayStack[s.ui.overlayStack.length - 1];
         if (!top || !("query" in top)) return;
+        s.ui.lastError = undefined;
         top.query = top.query.slice(0, -1);
         top.index = 0;
         if (top.kind === "agents") delete top.expandedId;
@@ -515,14 +553,17 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     mainTabSet(tab: FaraiTuiStore["ui"]["activeMainTab"]): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.activeMainTab = tab;
         s.ui.overlayStack = [];
         s.ui.centerSurfaceStack = [];
+        s.ui.centerSurfaceBusy = undefined;
         s.ui.centerScroll = { action: "down", sequence: 0 };
       }));
     },
     proxyFilterSet(filter: ProxyViewFilter): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         const selectedId = proxyFlowsForFilter(s.ui.proxyFlows, s.ui.proxyFilter)[s.ui.proxySelectedIndex]?.id;
         s.ui.proxyFilter = filter;
         const rows = proxyFlowsForFilter(s.ui.proxyFlows, filter);
@@ -535,6 +576,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     proxyFilterCycle(delta: number): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         const currentIndex = PROXY_VIEW_FILTERS.indexOf(s.ui.proxyFilter);
         const nextIndex = (currentIndex + delta + PROXY_VIEW_FILTERS.length) % PROXY_VIEW_FILTERS.length;
         const selectedId = proxyFlowsForFilter(s.ui.proxyFlows, s.ui.proxyFilter)[s.ui.proxySelectedIndex]?.id;
@@ -570,6 +612,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     proxySelectedMove(delta: number): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         const rows = proxyFlowsForFilter(s.ui.proxyFlows, s.ui.proxyFilter);
         s.ui.proxySelectedIndex = clampIndex(s.ui.proxySelectedIndex + delta, rows.length);
         s.ui.proxyDetailPane = preferredProxyDetailPane(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
@@ -579,6 +622,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     proxySelectedSet(index: number): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         const rows = proxyFlowsForFilter(s.ui.proxyFlows, s.ui.proxyFilter);
         s.ui.proxySelectedIndex = clampIndex(index, rows.length);
         s.ui.proxyDetailPane = preferredProxyDetailPane(rows[s.ui.proxySelectedIndex], s.ui.proxyFilter);
@@ -587,21 +631,32 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       }));
     },
     proxyDetailPaneSet(pane: 0 | 1): void {
-      setStore("ui", "proxyDetailPane", pane);
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.proxyDetailPane = pane;
+      }));
     },
     proxyDetailPaneMove(delta: number): void {
-      setStore("ui", "proxyDetailPane", (pane) => (pane + delta + 2) % 2 as 0 | 1);
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.proxyDetailPane = (s.ui.proxyDetailPane + delta + 2) % 2 as 0 | 1;
+      }));
     },
     proxyWebSocketSectionSet(section: 0 | 1): void {
-      setStore("ui", "proxyWebSocketSection", section);
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.proxyWebSocketSection = section;
+      }));
     },
     proxyWebSocketMessageSet(index: number): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.proxyWebSocketMessageIndex = Math.min(proxyWebSocketMessageLimit(s.ui), Math.max(0, Math.floor(index)));
       }));
     },
     proxyWebSocketMessageMove(delta: number): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.proxyWebSocketMessageIndex = Math.min(proxyWebSocketMessageLimit(s.ui), Math.max(0, s.ui.proxyWebSocketMessageIndex + delta));
       }));
     },
@@ -614,6 +669,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         const top = s.ui.overlayStack.at(-1);
         if (top?.kind !== "agents") return;
+        s.ui.lastError = undefined;
         if (top.expandedId === id) delete top.expandedId;
         else top.expandedId = id;
       }));
@@ -660,6 +716,9 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     statusDetailSet(detail: string | undefined): void {
       setStore("ui", "statusDetail", detail);
     },
+    centerSurfaceBusySet(busy: FaraiTuiStore["ui"]["centerSurfaceBusy"]): void {
+      setStore("ui", "centerSurfaceBusy", busy);
+    },
     updateNoticeSet(notice: UpdateNotice | undefined): void {
       setStore("ui", "updateNotice", notice);
     },
@@ -695,7 +754,10 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       }));
     },
     modelProviderWizardOpen(provider?: ModelProviderInfo): void {
-      setStore("ui", "modelProviderWizard", createModelProviderWizard(provider));
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.modelProviderWizard = createModelProviderWizard(provider);
+      }));
     },
     modelProviderWizardPatch(patch: Partial<ModelProviderWizardState>): void {
       setStore(produce((s) => {
@@ -704,13 +766,28 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       }));
     },
     modelProviderWizardClose(): void {
-      setStore("ui", "modelProviderWizard", undefined);
+      setStore(produce((s) => {
+        s.ui.modelProviderWizard = undefined;
+        s.ui.lastError = undefined;
+      }));
     },
     modelProviderRemovalOpen(provider: ModelProviderInfo): void {
-      setStore("ui", "modelProviderRemoval", provider);
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.modelProviderRemoval = { provider, busy: false, error: undefined };
+      }));
+    },
+    modelProviderRemovalPatch(patch: Partial<Omit<ModelProviderRemovalState, "provider">>): void {
+      setStore(produce((s) => {
+        if (!s.ui.modelProviderRemoval) return;
+        Object.assign(s.ui.modelProviderRemoval, patch);
+      }));
     },
     modelProviderRemovalClose(): void {
-      setStore("ui", "modelProviderRemoval", undefined);
+      setStore(produce((s) => {
+        s.ui.modelProviderRemoval = undefined;
+        s.ui.lastError = undefined;
+      }));
     },
     mcpStatusesSet(statuses: McpServerRuntimeStatus[]): void {
       setStore("ui", "mcpStatuses", statuses);
@@ -729,6 +806,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     centerScrollRequested(action: FaraiTuiStore["ui"]["centerScroll"]["action"]): void {
       setStore(produce((s) => {
+        s.ui.lastError = undefined;
         s.ui.centerScroll.action = action;
         s.ui.centerScroll.sequence += 1;
       }));
@@ -833,6 +911,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         const request = s.snapshot.pendingUserInput;
         const state = s.ui.requestUserInput;
         if (!request || !state) return;
+        s.ui.lastError = undefined;
         state.questionIndex = clampRequestIndex(index, request.questions.length);
         const question = request.questions[state.questionIndex];
         state.textModeQuestionId = question && !question.choices?.length ? question.id : undefined;
@@ -843,6 +922,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         const request = s.snapshot.pendingUserInput;
         const state = s.ui.requestUserInput;
         if (!request || !state) return;
+        s.ui.lastError = undefined;
         state.questionIndex = wrapRequestIndex(state.questionIndex + delta, request.questions.length);
         const question = request.questions[state.questionIndex];
         state.textModeQuestionId = question && !question.choices?.length ? question.id : undefined;
@@ -852,6 +932,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         const state = s.ui.requestUserInput;
         if (!state) return;
+        s.ui.lastError = undefined;
         state.optionIndices[questionId] = clampRequestIndex(index, optionCount);
       }));
     },
@@ -859,6 +940,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         const state = s.ui.requestUserInput;
         if (!state) return;
+        s.ui.lastError = undefined;
         const current = state.optionIndices[questionId] ?? 0;
         state.optionIndices[questionId] = wrapRequestIndex(current + delta, optionCount);
       }));
@@ -866,12 +948,14 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     requestUserInputTextModeSet(questionId: string | undefined): void {
       setStore(produce((s) => {
         if (!s.ui.requestUserInput) return;
+        s.ui.lastError = undefined;
         s.ui.requestUserInput.textModeQuestionId = questionId;
       }));
     },
     requestUserInputDraftSet(questionId: string, draft: string): void {
       setStore(produce((s) => {
         if (!s.ui.requestUserInput) return;
+        s.ui.lastError = undefined;
         s.ui.requestUserInput.drafts[questionId] = draft;
       }));
     },
@@ -890,6 +974,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     requestUserInputDismissedSet(dismissed: boolean): void {
       setStore(produce((s) => {
         if (!s.ui.requestUserInput) return;
+        s.ui.lastError = undefined;
         s.ui.requestUserInput.dismissed = dismissed;
         if (dismissed) s.ui.requestUserInput.textModeQuestionId = undefined;
         else {
@@ -1000,6 +1085,10 @@ function isTurnStatusDetail(detail: string | undefined): boolean {
     || detail === "running tool"
     || Boolean(detail?.startsWith("loop supervision"))
     || Boolean(detail?.startsWith("running "));
+}
+
+function isSelectorLoadingStatus(detail: string | undefined): boolean {
+  return detail === "loading models" || detail === "refreshing mcp" || Boolean(detail?.startsWith("testing "));
 }
 
 function upsertById<T extends { id: string }>(items: T[], item: T): void {

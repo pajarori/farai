@@ -12,6 +12,8 @@ export type ComposerControl = {
   setRef(ref: TextareaRenderable | undefined): void;
   text: Accessor<string>;
   setText(text: string): void;
+  height: Accessor<number>;
+  setHeight(height: number): void;
   setDraft(text: string): void;
   pendingPastes: Accessor<readonly PendingPaste[]>;
   insertText(text: string): void;
@@ -33,6 +35,7 @@ type ComposerProviderProps = {
 export function ComposerProvider(props: ComposerProviderProps): JSX.Element {
   const [ref, setRefSignal] = createSignal<TextareaRenderable>();
   const [text, setText] = createSignal("");
+  const [height, setHeight] = createSignal(1);
   const [pendingPastes, setPendingPastes] = createSignal<PendingPaste[]>([]);
 
   const control: ComposerControl = {
@@ -40,6 +43,8 @@ export function ComposerProvider(props: ComposerProviderProps): JSX.Element {
     setRef(next) { setRefSignal(() => next); },
     text,
     setText,
+    height,
+    setHeight,
     setDraft(next: string) {
       try { ref()?.setText(next); } catch {  }
       setText(next);

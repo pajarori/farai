@@ -3,7 +3,7 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { isPrimaryClick } from "../input/mouse";
 import { truncateLine } from "../renderers";
 import { COLOR } from "../theme";
-import { terminalWidth } from "../terminal-text";
+import { clipTerminal, terminalWidth } from "../terminal-text";
 
 export type SelectionRowLayoutItem = {
   number?: number;
@@ -22,11 +22,11 @@ export type SelectionRowProps = SelectionRowLayoutItem & {
   onSelect?: (() => void) | undefined;
 };
 
-export function SelectionMenuHint(props: { text: string }): JSX.Element {
+export function SelectionMenuHint(props: { text: string; color?: string | undefined }): JSX.Element {
   const dims = useTerminalDimensions();
   return (
     <box style={{ marginTop: 1 }}>
-      <text fg={COLOR.dim}>{`  ${truncateLine(props.text, Math.max(1, dims().width - 2))}`}</text>
+      <text fg={props.color ?? COLOR.dim}>{`  ${truncateLine(props.text, Math.max(1, dims().width - 2))}`}</text>
     </box>
   );
 }
@@ -36,10 +36,15 @@ export function SelectionRow(props: SelectionRowProps): JSX.Element {
   const prefix = () => props.number === undefined
     ? `${props.selected ? "›" : " "}   `
     : `${props.selected ? "›" : " "} ${props.number}. `;
-  const left = () => `${prefix()}${title()}`;
-  const leftWidth = () => Math.min(props.descriptionColumn - 2, terminalWidth(left()));
-  const gap = () => Math.max(2, props.descriptionColumn - leftWidth());
-  const descriptionWidth = () => Math.max(8, props.width - props.descriptionColumn - 1);
+  const descriptionVisible = () => Boolean(props.description && props.width - props.descriptionColumn - 1 >= 8);
+  const leftLimit = () => Math.max(0, Math.min(props.width, descriptionVisible() ? props.descriptionColumn : props.width));
+  const prefixText = () => clipTerminal(prefix(), leftLimit());
+  const prefixWidth = () => terminalWidth(prefixText());
+  const titleWidth = () => Math.max(0, leftLimit() - prefixWidth());
+  const visibleTitle = () => truncateLine(title(), titleWidth());
+  const leftWidth = () => prefixWidth() + terminalWidth(visibleTitle());
+  const gap = () => Math.max(1, props.descriptionColumn - leftWidth());
+  const descriptionWidth = () => Math.max(0, props.width - leftWidth() - gap());
 
   return (
     <box
@@ -49,11 +54,11 @@ export function SelectionRow(props: SelectionRowProps): JSX.Element {
         props.onSelect?.();
       }}
     >
-      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{prefix()}</text>
-      <text selectable={false} fg={props.disabled ? COLOR.dim : props.titleColor ?? COLOR.text}>
-        {truncateLine(title(), Math.max(4, props.descriptionColumn - terminalWidth(prefix()) - 2))}
-      </text>
-      <Show when={props.description}>
+      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{prefixText()}</text>
+      <Show when={titleWidth() > 0}>
+        <text selectable={false} fg={props.disabled ? COLOR.dim : props.titleColor ?? COLOR.text}>{visibleTitle()}</text>
+      </Show>
+      <Show when={descriptionVisible() ? props.description : undefined}>
         {(description) => (
           <text selectable={false} fg={COLOR.dim}>
             {`${" ".repeat(gap())}${truncateLine(description(), descriptionWidth())}`}
@@ -69,6 +74,6 @@ export function selectionDescriptionColumn(rows: SelectionRowLayoutItem[], width
     max,
     terminalWidth(`${row.number === undefined ? "" : `${row.number}. `}${row.title}${row.current ? " (current)" : row.badge ? ` (${row.badge})` : ""}`) + 2
   ), 0);
-  const maxLeft = Math.max(18, Math.floor(width * 0.46));
+  const maxLeft = Math.max(1, Math.min(width, Math.max(18, Math.floor(width * 0.46))));
   return Math.min(Math.max(24, longest + 2), maxLeft);
 }

@@ -8,7 +8,7 @@ import { truncateLine } from "../renderers";
 import { requestOptionCount, requestOptionIndex, requestQuestion } from "../request-user-input-state";
 import { COLOR } from "../theme";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "../overlays/selection-row";
-import { terminalWidth } from "../terminal-text";
+import { fitFooterLine } from "./footer-state";
 
 type RequestOptionRow = {
   index: number;
@@ -22,6 +22,8 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
   const dims = useTerminalDimensions();
   const [now, setNow] = createSignal(Date.now());
   let inputRef: InputRenderable | undefined;
+  let focusGeneration = 0;
+  let disposed = false;
   const state = () => tui.store.ui.requestUserInput;
   const question = createMemo(() => {
     const current = state();
@@ -43,8 +45,18 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
   const progressDetail = createMemo(() => requestProgressDetail(answeredCount(), props.request.questions.length, optionRows().length, visibleOptions().length));
   const progressLabel = createMemo(() => requestProgressLabel(props.request, state()?.questionIndex ?? 0));
   const countdown = createMemo(() => requestAutoResolutionCountdown(props.request, now()));
-  const statusDetail = createMemo(() => requestStatusDetail(dims().width, progressDetail(), countdown()));
-  const descriptionColumn = createMemo(() => selectionDescriptionColumn(optionRows().map((row) => ({
+  const statusDetail = createMemo(() => tui.store.ui.lastError
+    ? `error · ${tui.store.ui.lastError}`
+    : requestStatusDetail(dims().width, progressDetail(), countdown()));
+  const header = createMemo(() => fitFooterLine(
+    progressLabel(),
+    [{ id: "request-status", kind: "message", text: statusDetail() }],
+    Math.max(1, dims().width - 4)
+  ));
+  const questionHeight = () => dims().height < 14 ? 1 : dims().height < 20 ? 2 : 3;
+  const answerAreaHeight = createMemo(() => requestAnswerAreaHeight(props.request, dims().height));
+  const allOptionRows = createMemo(() => props.request.questions.flatMap((item) => requestOptionRows(item)));
+  const descriptionColumn = createMemo(() => selectionDescriptionColumn(allOptionRows().map((row) => ({
     number: row.index + 1,
     title: row.label,
     ...(row.recommended ? { badge: "recommended" } : {})
@@ -53,18 +65,45 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
 
   createEffect(() => {
     const active = textMode();
+    const generation = ++focusGeneration;
     queueMicrotask(() => {
-      if (active) inputRef?.focus();
-      else inputRef?.blur();
+      if (disposed || generation !== focusGeneration) return;
+      try {
+        if (active) inputRef?.focus();
+        else inputRef?.blur();
+      } catch {
+      }
     });
   });
 
-  const countdownTimer = setInterval(() => setNow(Date.now()), 250);
-  onCleanup(() => clearInterval(countdownTimer));
+  createEffect(() => {
+    const expiresAt = props.request.expiresAt ? Date.parse(props.request.expiresAt) : Number.NaN;
+    if (!Number.isFinite(expiresAt)) return;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const tick = () => {
+      const next = Date.now();
+      setNow(next);
+      if (next < expiresAt || !timer) return;
+      clearInterval(timer);
+      timer = undefined;
+    };
+    timer = setInterval(tick, 250);
+    tick();
+    onCleanup(() => {
+      if (timer) clearInterval(timer);
+    });
+  });
+
+  onCleanup(() => {
+    disposed = true;
+    focusGeneration += 1;
+    inputRef?.blur();
+  });
 
   const choose = async (item: UserInputQuestion, index: number): Promise<void> => {
     const current = state();
     if (!current || current.submitting) return;
+    tui.actions.errorSet(undefined);
     tui.actions.requestUserInputOptionSet(item.id, index, requestOptionCount(item));
     const choice = item.choices?.[index];
     if (!choice) {
@@ -76,25 +115,27 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
 
   return (
     <box id="request-user-input" style={{ flexShrink: 0, flexDirection: "column" }}>
-      <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
-        <text fg={COLOR.text}>
-          {`  ${truncateLine(progressLabel(), Math.max(8, dims().width - terminalWidth(statusDetail()) - 5))}`}
+      <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 2, paddingRight: 2 }}>
+        <text fg={COLOR.text}>{header().left}</text>
+        <text fg={tui.store.ui.lastError ? COLOR.error : countdown() ? COLOR.warning : COLOR.dim}>
+          {header().right}
         </text>
-        <text fg={countdown() ? COLOR.warning : COLOR.dim}>{statusDetail()}</text>
       </box>
       <Show when={question()}>{(item) => (
         <>
-          <text
-            fg={state()?.answers[item().id]?.trim() ? COLOR.text : COLOR.accent}
-            wrapMode="word"
-            truncate
-            style={{ width: "100%", maxHeight: dims().height < 14 ? 1 : dims().height < 20 ? 2 : 3 }}
-          >
-            {`  ${item().question}`}
-          </text>
+          <box style={{ height: questionHeight(), flexShrink: 0, overflow: "hidden" }}>
+            <text
+              fg={state()?.answers[item().id]?.trim() ? COLOR.text : COLOR.accent}
+              wrapMode="word"
+              truncate
+              style={{ width: "100%", maxHeight: questionHeight() }}
+            >
+              {`  ${item().question}`}
+            </text>
+          </box>
 
           <Show when={!textMode()}>
-            <box style={{ flexDirection: "column", marginTop: 1 }}>
+            <box style={{ height: answerAreaHeight(), flexShrink: 0, flexDirection: "column", paddingTop: 1, overflow: "hidden" }}>
               <For each={visibleOptions()}>{(row) => {
                 const selected = () => {
                   const current = state();
@@ -119,7 +160,7 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
           </Show>
 
           <Show when={textMode()}>
-            <box style={{ flexDirection: "column", marginTop: 1, paddingLeft: 2, paddingRight: 1 }}>
+            <box style={{ height: answerAreaHeight(), flexShrink: 0, flexDirection: "column", paddingTop: 1, paddingLeft: 2, paddingRight: 1, overflow: "hidden" }}>
               <text fg={COLOR.dim}>{item().choices?.length
                 ? "other answer"
                 : item().recommended
@@ -127,18 +168,13 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
                   : "your answer"}</text>
               <box style={{ height: 1, flexDirection: "row", backgroundColor: COLOR.panelActive }}>
                 <text fg={COLOR.accent}>{"› "}</text>
-                <input
-                  id="request-user-input-text"
-                  ref={(node) => { inputRef = node; }}
-                  focused
+                <RequestTextInput
                   value={state()?.drafts[item().id] ?? state()?.answers[item().id] ?? ""}
-                  placeholder="type your answer"
-                  placeholderColor={COLOR.dim}
-                  textColor={COLOR.text}
-                  focusedTextColor={COLOR.text}
-                  cursorColor={COLOR.accent}
-                  style={{ flexGrow: 1, backgroundColor: COLOR.panelActive }}
-                  onInput={(value) => tui.actions.requestUserInputDraftSet(item().id, value)}
+                  onRef={(node) => { inputRef = node; }}
+                  onInput={(value) => {
+                    tui.actions.errorSet(undefined);
+                    tui.actions.requestUserInputDraftSet(item().id, value);
+                  }}
                 />
               </box>
             </box>
@@ -148,6 +184,37 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
 
       <SelectionMenuHint text={state()?.submitting ? "submitting answers..." : hint()} />
     </box>
+  );
+}
+
+function RequestTextInput(props: {
+  value: string;
+  onRef: (node: InputRenderable | undefined) => void;
+  onInput: (value: string) => void;
+}): JSX.Element {
+  let ref: InputRenderable | undefined;
+  onCleanup(() => {
+    try { ref?.blur(); } catch {
+    }
+    props.onRef(undefined);
+  });
+  return (
+    <input
+      id="request-user-input-text"
+      ref={(node) => {
+        ref = node;
+        props.onRef(node);
+      }}
+      focused
+      value={props.value}
+      placeholder="type your answer"
+      placeholderColor={COLOR.dim}
+      textColor={COLOR.text}
+      focusedTextColor={COLOR.text}
+      cursorColor={COLOR.accent}
+      style={{ flexGrow: 1, backgroundColor: COLOR.panelActive }}
+      onInput={props.onInput}
+    />
   );
 }
 
@@ -165,7 +232,16 @@ export function requestProgressDetail(answered: number, total: number, optionCou
 export function requestVisibleOptionLimit(optionCount: number, terminalHeight: number): number {
   if (terminalHeight <= 12) return Math.min(optionCount, 2);
   if (terminalHeight <= 15) return Math.min(optionCount, 3);
-  return optionCount;
+  if (terminalHeight <= 20) return Math.min(optionCount, 5);
+  return Math.min(optionCount, 7);
+}
+
+export function requestAnswerAreaHeight(request: PendingUserInput, terminalHeight: number): number {
+  const optionCount = request.questions.reduce((largest, item) => Math.max(
+    largest,
+    item.choices?.length ? item.choices.length + 1 : 0
+  ), 0);
+  return Math.max(3, requestVisibleOptionLimit(optionCount, terminalHeight) + 1);
 }
 
 export function requestAutoResolutionCountdown(request: PendingUserInput, now: number): string | undefined {
@@ -180,7 +256,7 @@ export function requestAutoResolutionCountdown(request: PendingUserInput, now: n
 }
 
 export function requestStatusDetail(width: number, progress: string, countdown: string | undefined): string {
-  if (!countdown) return progress;
+  if (!countdown) return width >= 44 ? progress : progress.split(" ")[0] ?? progress;
   if (width >= 72) return `${progress} · ${countdown}`;
   if (width >= 44) return countdown;
   return countdown.replace("default in ", "");

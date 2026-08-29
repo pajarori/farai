@@ -16,7 +16,7 @@ export function StatusIndicator(props: StatusIndicatorProps): JSX.Element {
   const dims = useTerminalDimensions();
   const detail = () => {
     const value = tui.store.ui.statusDetail;
-    return value && value !== "working" && !isFooterStatusDetail(value) ? ` • ${value}` : "";
+    return value && value !== "working" && value !== props.activity && !isFooterStatusDetail(value) ? ` • ${value}` : "";
   };
 
   const text = () => {

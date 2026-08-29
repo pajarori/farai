@@ -42,7 +42,7 @@ export type TuiStoreValue = {
   refreshAgentThreads: () => Promise<void>;
   openAgentsOverlay: () => Promise<void>;
   openMcpOverlay: () => Promise<void>;
-  toggleContainer: () => Promise<void>;
+  toggleContainer: (options?: { reportError?: boolean }) => Promise<void>;
   setStatusDetail: (detail: string | undefined, timeoutMs?: number) => void;
 };
 
@@ -67,7 +67,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   const snapshotGenerations = new Map<string, number>();
   const promptSubmissions = new Map<string, { generation: number }>();
   const agentThreadRefreshes = new Map<string, { epoch: number; promise: Promise<void> }>();
-  const containerToggles = new Map<string, Promise<void>>();
+  const containerToggles = new Map<string, { epoch: number; promise: Promise<void> }>();
   let sessionRefreshGeneration = 0;
   let modelRefreshGeneration = 0;
   let sessionSelectionIntent = 0;
@@ -299,9 +299,10 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
       const catalog = await port.loadModelCatalog();
       if (disposed || modelRefreshGeneration !== generation) return;
       actions.modelCatalogSet(catalog.providers, catalog.models);
-    } catch {
+    } catch (error) {
       if (disposed || modelRefreshGeneration !== generation) return;
       actions.availableModelsSet([]);
+      throw error;
     }
   }
 
@@ -311,6 +312,10 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     setStatusDetail("loading models");
     try {
       await refreshAvailableModels();
+    } catch (error) {
+      if (!disposed && store.ui.overlayStack.at(-1)?.kind === "model") {
+        actions.errorSet(error instanceof Error ? error.message : String(error));
+      }
     } finally {
       if (!disposed && store.ui.statusDetail === "loading models") setStatusDetail(undefined);
     }
@@ -326,7 +331,9 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
         const threads = await port.listAgentThreads(owner.sessionId);
         if (ownsSession(owner)) actions.agentThreadsSet(threads);
       } catch (error) {
-        if (ownsSession(owner)) actions.errorSet(error instanceof Error ? error.message : String(error));
+        if (ownsSession(owner) && store.ui.overlayStack.at(-1)?.kind === "agents") {
+          actions.errorSet(error instanceof Error ? error.message : String(error));
+        }
       }
     })();
     const entry = { epoch: owner.epoch, promise: refresh };
@@ -345,7 +352,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     try {
       await Promise.all([refreshSessions(), refreshAgentThreads()]);
     } catch (error) {
-      if (!ownsSession(owner)) return;
+      if (!ownsSession(owner) || store.ui.overlayStack.at(-1)?.kind !== "agents") return;
       actions.errorSet(error instanceof Error ? error.message : String(error));
     }
   }
@@ -374,36 +381,49 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     }
   }
 
-  function toggleContainer(): Promise<void> {
+  function toggleContainer(options: { reportError?: boolean } = {}): Promise<void> {
     const owner = captureSessionOwner();
     if (!owner) return Promise.resolve();
     const existing = containerToggles.get(owner.sessionId);
-    if (existing) return existing;
+    if (existing?.epoch === owner.epoch) return observeContainerToggle(existing.promise, owner, options);
     const toggle = (async () => {
-      try {
-        const status = await port.containerStatus();
-        if (!ownsSession(owner)) return;
-        const current = containerState(
-          status.imageExists,
-          status.imageContractCurrent,
-          status.persistentRunning,
-          status.persistentImageCurrent
-        );
-        if (current === "running") await port.stopContainer();
-        else await port.startContainer();
-        if (!ownsSession(owner)) return;
-        await refreshContainerStatus();
-      } catch (error) {
-        if (!ownsSession(owner)) return;
-        actions.errorSet(error instanceof Error ? error.message : String(error));
-      }
+      const status = await port.containerStatus();
+      if (!ownsSession(owner)) return;
+      const current = containerState(
+        status.imageExists,
+        status.imageContractCurrent,
+        status.persistentRunning,
+        status.persistentImageCurrent
+      );
+      if (current === "running") await port.stopContainer();
+      else await port.startContainer();
+      if (!ownsSession(owner)) return;
+      await refreshContainerStatus();
     })();
-    containerToggles.set(owner.sessionId, toggle);
+    const entry = { epoch: owner.epoch, promise: toggle };
+    containerToggles.set(owner.sessionId, entry);
     const cleanup = () => {
-      if (containerToggles.get(owner.sessionId) === toggle) containerToggles.delete(owner.sessionId);
+      if (containerToggles.get(owner.sessionId) === entry) containerToggles.delete(owner.sessionId);
     };
     void toggle.then(cleanup, cleanup);
-    return toggle;
+    return observeContainerToggle(toggle, owner, options);
+  }
+
+  async function observeContainerToggle(
+    toggle: Promise<void>,
+    owner: { sessionId: string; epoch: number },
+    options: { reportError?: boolean }
+  ): Promise<void> {
+    try {
+      await toggle;
+    } catch (error) {
+      if (!ownsSession(owner)) return;
+      if (options.reportError !== false) {
+        actions.errorSet(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      throw error;
+    }
   }
 
   function submitPrompt(text: string): boolean {
@@ -632,6 +652,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     const tick = async () => {
       if (disposed) return;
       await refreshServices();
+      if (disposed) return;
       await refreshProxyFlows();
     };
     void tick();
