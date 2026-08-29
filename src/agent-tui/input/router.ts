@@ -364,6 +364,10 @@ function routeSlash(key: KeyToken): RouteResult | undefined {
 }
 
 function routeBase(key: KeyToken, ctx: RouterContext): RouteResult {
+  if (key.meta) {
+    if (key.name === "1") return consumed({ kind: "mainTab.set", tab: "chat" });
+    if (key.name === "2") return consumed({ kind: "mainTab.set", tab: "proxy" });
+  }
   if (key.ctrl) {
     switch (key.name) {
       case "1": return consumed({ kind: "mainTab.set", tab: "chat" });

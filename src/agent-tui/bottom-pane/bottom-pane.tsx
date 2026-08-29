@@ -1,3 +1,4 @@
+import { useTerminalDimensions } from "@opentui/solid";
 import { Show, createEffect, createSignal, onCleanup, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { useExit } from "../context/exit";
@@ -12,7 +13,7 @@ import { centerSurfaceFooter } from "../surfaces/center-surface";
 import { isAgentBusy, type CenterSurfaceFrame } from "../store";
 import { COLOR } from "../theme";
 import { truncateLine } from "../renderers";
-import { activityStatusVisible, bottomPaneSlot, isFooterStatusDetail, isTranscriptActivityDetail, transcriptOwnsActivity } from "./footer-state";
+import { activityStatusVisible, bottomPaneSlot, fitFooterLine, isFooterStatusDetail, isTranscriptActivityDetail, transcriptOwnsActivity } from "./footer-state";
 import { RequestUserInput } from "./request-user-input";
 import { ModelProviderWizard } from "./model-provider-wizard";
 import { ModelProviderRemoval } from "./model-provider-removal";
@@ -21,6 +22,7 @@ export function BottomPane(): JSX.Element {
   const tui = useTuiStore();
   const exit = useExit();
   const composer = useComposerControl();
+  const dims = useTerminalDimensions();
   const [elapsed, setElapsed] = createSignal(0);
   let tick: ReturnType<typeof setInterval> | undefined;
   const frame = () => tui.store.ui.overlayStack.at(-1);
@@ -89,13 +91,15 @@ export function BottomPane(): JSX.Element {
         <StatusIndicator elapsed={elapsed()} activity={statusActivity()} />
       </Show>
       <Show when={tui.store.ui.lastError}>
-        {(error) => <text fg={COLOR.error}>{`• error · ${truncateLine(error(), 160)}`}</text>}
+        {(error) => <text fg={COLOR.error}>{`• error · ${truncateLine(error(), Math.max(1, dims().width - 10))}`}</text>}
       </Show>
       <Show when={!inputRequestActive() && !providerWizardActive() && !providerRemovalActive()}>
         <PendingInputPreview />
       </Show>
       <Show when={!inputRequestActive() && inputRequestPending() && !providerWizardActive() && !providerRemovalActive()}>
-        <text fg={COLOR.warning}>{"  question pending · ctrl+q answer · chat input remains available"}</text>
+        <text fg={COLOR.warning}>{dims().width >= 64
+          ? "  question pending · ctrl+q answer · chat input remains available"
+          : "  question pending · ctrl+q answer"}</text>
       </Show>
       <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={inputRequestActive() ? tui.store.snapshot.pendingUserInput : undefined} fallback={
         <Show when={listFrame()} fallback={
@@ -125,19 +129,51 @@ export function BottomPane(): JSX.Element {
 
 function ProxyTabFooter(): JSX.Element {
   const tui = useTuiStore();
+  const dims = useTerminalDimensions();
+  const layout = () => proxyTabFooterLayout(dims().width, tui.store.ui.proxyFilter);
   return (
     <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
-      <text fg={COLOR.dim}>{"↑↓ flow · tab detail · p/n ws msg · ←→ filter · a/h/w tabs · ctrl+1 chat"}</text>
-      <text fg={COLOR.dim}>{`proxy · ${tui.store.ui.proxyFilter}`}</text>
+      <text fg={COLOR.dim}>{layout().left}</text>
+      <text fg={COLOR.dim}>{layout().right}</text>
     </box>
   );
 }
 
 function CenterSurfaceFooter(props: { frame: CenterSurfaceFrame }): JSX.Element {
+  const dims = useTerminalDimensions();
+  const layout = () => centerSurfaceFooterLayout(props.frame, dims().width);
   return (
     <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
-      <text fg={COLOR.dim}>{centerSurfaceFooter(props.frame).toLowerCase()}</text>
-      <text fg={COLOR.dim}>{props.frame.kind.toLowerCase()}</text>
+      <text fg={COLOR.dim}>{layout().left}</text>
+      <text fg={COLOR.dim}>{layout().right}</text>
     </box>
   );
+}
+
+export function proxyTabFooterLayout(width: number, filter: string): { left: string; right: string } {
+  const hint = width >= 88
+    ? "↑↓ flow · tab detail · p/n ws msg · ←→ filter · a/h/w tabs · alt+1 chat"
+    : width >= 56
+      ? "alt+1 chat · ↑↓ flow · tab detail · ←→ filter"
+      : width >= 32
+        ? "alt+1 chat · ↑↓ flow"
+        : "alt+1 chat";
+  return fitFooterLine(hint, [{ id: "proxy", kind: "message", text: `proxy · ${filter}` }], Math.max(0, width - 2));
+}
+
+export function centerSurfaceFooterLayout(frame: CenterSurfaceFrame, width: number): { left: string; right: string } {
+  const hint = width >= 64 ? centerSurfaceFooter(frame).toLowerCase() : compactCenterSurfaceFooter(frame);
+  return fitFooterLine(hint, [{ id: "surface", kind: "message", text: frame.kind.toLowerCase() }], Math.max(0, width - 2));
+}
+
+function compactCenterSurfaceFooter(frame: CenterSurfaceFrame): string {
+  switch (frame.kind) {
+    case "report": return "esc back · s save";
+    case "container": return "esc back · t toggle · r refresh";
+    case "confirm": return "esc cancel · enter confirm";
+    case "proxy_flow": return "esc back · tab pane";
+    case "alert":
+    case "detail":
+      return "esc back";
+  }
 }

@@ -61,7 +61,8 @@ export function ProxyLogView(): JSX.Element {
   });
   const defaultListHeight = () => Math.max(7, Math.min(14, Math.floor(dims().height * 0.34)));
   const listHeight = () => clampProxyListHeight(listHeightOverride() ?? defaultListHeight(), dims().height);
-  const tableWidth = () => Math.max(30, dims().width - 4);
+  const compactHeight = () => dims().height < 20;
+  const tableWidth = () => Math.max(1, dims().width - 4);
   const beginListResize = (event: MouseEvent): void => {
     if (event.button !== 0) return;
     dividerDragStart = { pointerY: event.y, listHeight: listHeight() };
@@ -166,7 +167,16 @@ export function ProxyLogView(): JSX.Element {
 
   return (
     <box
-      style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column", paddingTop: 1, paddingBottom: 1, paddingLeft: 2, paddingRight: 2 }}
+      style={{
+        flexGrow: 1,
+        flexShrink: 1,
+        minHeight: 0,
+        flexDirection: "column",
+        paddingTop: compactHeight() ? 0 : 1,
+        paddingBottom: compactHeight() ? 0 : 1,
+        paddingLeft: 2,
+        paddingRight: 2
+      }}
       onMouseDrag={resizeList}
       onMouseDragEnd={finishListResize}
       onMouseUp={finishListResize}
@@ -175,7 +185,9 @@ export function ProxyLogView(): JSX.Element {
         <text fg={COLOR.text}>proxy traffic</text>
       </box>
       <ProxySubTabs flows={tui.store.ui.proxyFlows} active={tui.store.ui.proxyFilter} width={tableWidth()} onSelect={tui.actions.proxyFilterSet} />
-      <box style={{ height: listHeight(), flexShrink: 0, flexDirection: "column", marginTop: 1 }}>
+      <box style={compactHeight()
+        ? { flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }
+        : { height: listHeight(), flexShrink: 0, flexDirection: "column", marginTop: 1 }}>
         <box style={{ height: 1, flexDirection: "row" }}>
           <text fg={COLOR.dim}>{proxyHeaderLine(tableWidth())}</text>
         </box>
@@ -188,8 +200,8 @@ export function ProxyLogView(): JSX.Element {
             when={rows().length > 0}
             fallback={
               <box style={{ flexDirection: "column", marginTop: 1 }}>
-                <text fg={COLOR.dim}>{`no ${tui.store.ui.proxyFilter === "all" ? "captured proxy" : tui.store.ui.proxyFilter} flows yet`}</text>
-                <text fg={COLOR.dim}>{proxyHint().toLowerCase()}</text>
+                <text fg={COLOR.dim}>{truncate(`no ${tui.store.ui.proxyFilter === "all" ? "captured proxy" : tui.store.ui.proxyFilter} flows yet`, tableWidth())}</text>
+                <text fg={COLOR.dim}>{truncate(proxyHint().toLowerCase(), tableWidth())}</text>
               </box>
             }
           >
@@ -211,34 +223,36 @@ export function ProxyLogView(): JSX.Element {
           </Show>
         </scrollbox>
       </box>
-      <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between", marginTop: 1 }}>
-        <text fg={COLOR.dim}>{truncate(selectedFlow() && selectedPresentation() ? `${selectedPresentation()!.kind} · ${selectedPresentation()!.method} ${selectedFlow()!.url}` : "no flow selected", Math.max(8, tableWidth() - 20))}</text>
-        <text fg={detailLoading() ? COLOR.accent : detailError() ? COLOR.error : COLOR.dim}>{truncate(detailLoading() ? "loading detail" : detailError() ?? "", 18)}</text>
-      </box>
-      <box
-        style={{ height: 1, flexShrink: 0, alignItems: "center", justifyContent: "flex-start" }}
-        onMouseDown={beginListResize}
-      >
-        <text selectable={false} fg={dividerDragging() ? COLOR.accent : COLOR.border}>{"─".repeat(Math.max(1, dims().width - 4))}</text>
-      </box>
-      <box style={{ flexGrow: 1, minHeight: 0, flexDirection: "column", paddingTop: 1 }}>
-        <Show when={detail()} fallback={
-          <box style={{ flexDirection: "column" }}>
-            <text fg={COLOR.dim}>{"select a flow to inspect protocol-aware details"}</text>
-          </box>
-        }>
-          {(flow) => (
-            <box style={{ flexGrow: 1, minHeight: 0, flexDirection: "column" }}>
-              <Show when={isSummaryOnly(flow())}>
-                <box style={{ height: 1, flexShrink: 0, marginBottom: 1 }}>
-                  <text fg={COLOR.warning}>{"full body unavailable; showing captured metadata"}</text>
-                </box>
-              </Show>
-              <ProxyFlowSplitView flow={flow()} compact />
+      <Show when={!compactHeight()}>
+        <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between", marginTop: 1 }}>
+          <text fg={COLOR.dim}>{truncate(selectedFlow() && selectedPresentation() ? `${selectedPresentation()!.kind} · ${selectedPresentation()!.method} ${selectedFlow()!.url}` : "no flow selected", Math.max(8, tableWidth() - 20))}</text>
+          <text fg={detailLoading() ? COLOR.accent : detailError() ? COLOR.error : COLOR.dim}>{truncate(detailLoading() ? "loading detail" : detailError() ?? "", 18)}</text>
+        </box>
+        <box
+          style={{ height: 1, flexShrink: 0, alignItems: "center", justifyContent: "flex-start" }}
+          onMouseDown={beginListResize}
+        >
+          <text selectable={false} fg={dividerDragging() ? COLOR.accent : COLOR.border}>{"─".repeat(Math.max(1, dims().width - 4))}</text>
+        </box>
+        <box style={{ flexGrow: 1, minHeight: 0, flexDirection: "column", paddingTop: 1 }}>
+          <Show when={detail()} fallback={
+            <box style={{ flexDirection: "column" }}>
+              <text fg={COLOR.dim}>{"select a flow to inspect protocol-aware details"}</text>
             </box>
-          )}
-        </Show>
-      </box>
+          }>
+            {(flow) => (
+              <box style={{ flexGrow: 1, minHeight: 0, flexDirection: "column" }}>
+                <Show when={isSummaryOnly(flow())}>
+                  <box style={{ height: 1, flexShrink: 0, marginBottom: 1 }}>
+                    <text fg={COLOR.warning}>{"full body unavailable; showing captured metadata"}</text>
+                  </box>
+                </Show>
+                <ProxyFlowSplitView flow={flow()} compact />
+              </box>
+            )}
+          </Show>
+        </box>
+      </Show>
     </box>
   );
 }
@@ -345,6 +359,13 @@ function isSummaryOnly(flow: ProxyFlowDetail): boolean {
 }
 
 function proxyHeaderLine(width: number): string {
+  if (width < 38) {
+    return truncate([
+      pad("", 2),
+      pad("method", 8),
+      "host / path"
+    ].join(""), width);
+  }
   if (width < 96) {
     return truncate([
       pad("", 2),
@@ -389,27 +410,36 @@ export function proxyFlowTablePresentation(flow: Pick<ProxyRowFlow, "kind" | "me
 function ProxyRow(props: { flow: ProxyRowFlow; filter: ProxyViewFilter; selected: boolean; width: number }): JSX.Element {
   const pathWidth = () => Math.max(18, props.width - 98);
   const compactTarget = () => truncate(`${props.flow.host}${props.flow.path || "/"}`, Math.max(8, props.width - 22));
+  const narrowTarget = () => truncate(`${props.flow.host}${props.flow.path || "/"}`, Math.max(1, props.width - 10));
   const presentation = () => proxyFlowTablePresentation(props.flow, props.filter);
   return (
-    <Show when={props.width >= 96} fallback={
+    <Show when={props.width >= 38} fallback={
       <>
         <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
+        <text selectable={false} fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
+        <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{narrowTarget()}</text>
+      </>
+    }>
+      <Show when={props.width >= 96} fallback={
+        <>
+          <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
+          <text selectable={false} fg={COLOR.dim}>{pad(presentation().kind, 7)}</text>
+          <text selectable={false} fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
+          <text selectable={false} fg={statusColor(props.flow.status)}>{pad(String(props.flow.status ?? "-"), 5)}</text>
+          <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{compactTarget()}</text>
+        </>
+      }>
+        <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
+        <text selectable={false} fg={COLOR.dim}>{pad(shortTime(props.flow.timestamp), 9)}</text>
         <text selectable={false} fg={COLOR.dim}>{pad(presentation().kind, 7)}</text>
         <text selectable={false} fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
         <text selectable={false} fg={statusColor(props.flow.status)}>{pad(String(props.flow.status ?? "-"), 5)}</text>
-        <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{compactTarget()}</text>
-      </>
-    }>
-      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.dim}>{pad(props.selected ? ">" : "", 2)}</text>
-      <text selectable={false} fg={COLOR.dim}>{pad(shortTime(props.flow.timestamp), 9)}</text>
-      <text selectable={false} fg={COLOR.dim}>{pad(presentation().kind, 7)}</text>
-      <text selectable={false} fg={methodColor(presentation().method)}>{pad(presentation().method, 8)}</text>
-      <text selectable={false} fg={statusColor(props.flow.status)}>{pad(String(props.flow.status ?? "-"), 5)}</text>
-      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.host, 29), 30)}</text>
-      <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.path || "/", pathWidth() - 1), pathWidth())}</text>
-      <text selectable={false} fg={COLOR.dim}>{pad(truncate(normalizeContentType(props.flow.contentType), 15), 16)}</text>
-      <text selectable={false} fg={COLOR.dim}>{pad(formatBytes(props.flow.responseBytes ?? props.flow.requestBytes), 8)}</text>
-      <text selectable={false} fg={COLOR.dim}>{formatDuration(props.flow.durationMs)}</text>
+        <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.host, 29), 30)}</text>
+        <text selectable={false} fg={props.selected ? COLOR.accent : COLOR.text}>{pad(truncate(props.flow.path || "/", pathWidth() - 1), pathWidth())}</text>
+        <text selectable={false} fg={COLOR.dim}>{pad(truncate(normalizeContentType(props.flow.contentType), 15), 16)}</text>
+        <text selectable={false} fg={COLOR.dim}>{pad(formatBytes(props.flow.responseBytes ?? props.flow.requestBytes), 8)}</text>
+        <text selectable={false} fg={COLOR.dim}>{formatDuration(props.flow.durationMs)}</text>
+      </Show>
     </Show>
   );
 }

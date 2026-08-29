@@ -9,7 +9,7 @@ import { COLOR } from "../theme";
 import type { OverlayFrame } from "../store";
 import type { AgentThreadSummary } from "../runtime-port";
 import { useTuiStore } from "../context/store";
-import { isPrimaryClick } from "../input/mouse";
+import { createPrimaryClickGesture, isPrimaryClick } from "../input/mouse";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "./selection-row";
 import { terminalWidth } from "../terminal-text";
 
@@ -316,8 +316,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
                 item().mode === "detached" ? "background" : "attached",
                 item().model
               ].filter(Boolean).join(" · ");
-            const select = (event: { button: number; isDragging?: boolean }) => {
-              if (!isPrimaryClick(event)) return;
+            const select = () => {
               const enabled = props.matches.filter((match) => !match.option.disabled);
               const index = enabled.findIndex((match) => match.option.id === row.option.id);
               if (props.frame.expandedId === row.option.id) {
@@ -327,6 +326,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
               tui.actions.overlaySetIndex(index, enabled.length);
               tui.actions.agentDetailToggle(row.option.id);
             };
+            const selectClick = createPrimaryClickGesture(select);
             return (
               <box
                 style={{
@@ -336,7 +336,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
                   paddingRight: 1,
                   backgroundColor: row.selected ? COLOR.panelActive : COLOR.panel
                 }}
-                onMouseUp={select}
+                {...selectClick}
               >
                 <box style={{ width: "100%", flexDirection: "row" }}>
                   <text selectable={false} fg={row.selected ? COLOR.accent : COLOR.dim}>{row.selected ? "› " : "  "}</text>

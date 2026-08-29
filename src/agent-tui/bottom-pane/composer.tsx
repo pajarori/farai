@@ -151,7 +151,8 @@ export function Composer(): JSX.Element {
                   composer.focus();
                 }}
               >
-                <text selectable={false} fg={active() ? COLOR.accent : COLOR.text}>{`  ${command()}`}</text>
+                <text selectable={false} fg={active() ? COLOR.accent : COLOR.dim}>{active() ? "› " : "  "}</text>
+                <text selectable={false} fg={active() ? COLOR.accent : COLOR.text}>{command()}</text>
                 <text selectable={false} fg={COLOR.dim}>{desc()}</text>
               </box>
             );

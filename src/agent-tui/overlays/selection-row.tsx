@@ -1,4 +1,5 @@
 import { Show, type JSX } from "solid-js";
+import { useTerminalDimensions } from "@opentui/solid";
 import { isPrimaryClick } from "../input/mouse";
 import { truncateLine } from "../renderers";
 import { COLOR } from "../theme";
@@ -22,9 +23,10 @@ export type SelectionRowProps = SelectionRowLayoutItem & {
 };
 
 export function SelectionMenuHint(props: { text: string }): JSX.Element {
+  const dims = useTerminalDimensions();
   return (
     <box style={{ marginTop: 1 }}>
-      <text fg={COLOR.dim}>{`  ${props.text}`}</text>
+      <text fg={COLOR.dim}>{`  ${truncateLine(props.text, Math.max(1, dims().width - 2))}`}</text>
     </box>
   );
 }

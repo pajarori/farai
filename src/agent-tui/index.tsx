@@ -1,4 +1,4 @@
-import { createCliRenderer, type CliRenderer } from "@opentui/core";
+import { createCliRenderer, RGBA, type CliRenderer } from "@opentui/core";
 import { render } from "@opentui/solid";
 import { AgentRuntime } from "../agent-core/runtime";
 import { App } from "./app";
@@ -9,16 +9,45 @@ import { createRuntimePort, type TuiCapabilities, type TuiInput, type TuiRuntime
 import { DEFAULT_SESSION_TITLE } from "../session-title";
 import { resolveSessionLocation } from "../session-catalog";
 import { prepareUpdateCheck } from "./update-check";
+import { COLOR } from "./theme";
 
 export { createRuntimePort };
 export type { TuiInput, TuiRuntimePort, TuiCapabilities };
-
-type SignalListener = () => void;
 
 type ManagedRenderer = {
   renderer: CliRenderer;
   disposeResize: () => void;
 };
+
+type ResizeTimer = ReturnType<typeof setTimeout>;
+
+export function createDeferredResizeHandler(
+  resize: (width: number, height: number) => void,
+  readSize: () => { width: number; height: number } | undefined,
+  schedule: (callback: () => void) => ResizeTimer = (callback) => setTimeout(callback, 0),
+  cancel: (timer: ResizeTimer) => void = clearTimeout
+): { onResize: () => void; dispose: () => void } {
+  let timer: ResizeTimer | undefined;
+  let disposed = false;
+  const onResize = () => {
+    if (disposed) return;
+    if (timer !== undefined) cancel(timer);
+    timer = schedule(() => {
+      timer = undefined;
+      if (disposed) return;
+      const size = readSize();
+      if (size) resize(size.width, size.height);
+    });
+  };
+  return {
+    onResize,
+    dispose: () => {
+      disposed = true;
+      if (timer !== undefined) cancel(timer);
+      timer = undefined;
+    }
+  };
+}
 
 export async function runOpenTui(input: TuiInput): Promise<void> {
   const capabilities: TuiCapabilities = input.capabilities ?? { compact: true, cancel: true };
@@ -99,17 +128,28 @@ async function destroyRenderer(renderer: CliRenderer): Promise<void> {
 }
 
 async function createManagedRenderer(onDestroy: () => void): Promise<ManagedRenderer> {
-  const existingListeners = new Set(process.listeners("SIGWINCH") as SignalListener[]);
-  const renderer = await createCliRenderer({ autoFocus: false, exitOnCtrlC: false, onDestroy });
-  const rendererListeners = (process.listeners("SIGWINCH") as SignalListener[]).filter((listener) => !existingListeners.has(listener));
-  for (const listener of rendererListeners) process.off("SIGWINCH", listener);
-  if (rendererListeners.length === 0) return { renderer, disposeResize: () => {} };
-  const onResize = () => {
-    const size = validTerminalSize(process.stdout.columns, process.stdout.rows);
-    if (size) renderer.resize(size.width, size.height);
+  const renderer = await createCliRenderer({
+    autoFocus: false,
+    backgroundColor: COLOR.bg,
+    exitOnCtrlC: false,
+    onDestroy
+  });
+  const resize = createDeferredResizeHandler(
+    (width, height) => {
+      renderer.resize(width, height);
+      renderer.currentRenderBuffer.clear(RGBA.fromInts(1, 1, 1, 255));
+      renderer.requestRender();
+    },
+    () => validTerminalSize(process.stdout.columns, process.stdout.rows)
+  );
+  process.on("SIGWINCH", resize.onResize);
+  return {
+    renderer,
+    disposeResize: () => {
+      process.off("SIGWINCH", resize.onResize);
+      resize.dispose();
+    }
   };
-  process.on("SIGWINCH", onResize);
-  return { renderer, disposeResize: () => process.off("SIGWINCH", onResize) };
 }
 
 export function validTerminalSize(columns: number | undefined, rows: number | undefined): { width: number; height: number } | undefined {

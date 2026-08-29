@@ -1,5 +1,4 @@
 import { For, createMemo, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import type { TimelineRow } from "../../renderers";
 import { COLOR } from "../../theme";
 import { sanitizeText, stripOuterBlankLines } from "./text-utils";
@@ -9,13 +8,11 @@ type UserPromptProps = {
 };
 
 export function UserPrompt(props: UserPromptProps): JSX.Element {
-  const dims = useTerminalDimensions();
   const lines = createMemo(() => stripOuterBlankLines(sanitizeText(props.row.text)).split("\n"));
-  const width = () => Math.max(1, dims().width);
   return (
-    <box style={{ width: width(), flexDirection: "column", marginTop: 1, marginBottom: 1, backgroundColor: COLOR.userMessageBg, paddingLeft: 1, paddingRight: 1 }}>
+    <box style={{ width: "100%", minWidth: 0, flexDirection: "column", marginTop: 1, marginBottom: 1, backgroundColor: COLOR.userMessageBg, paddingLeft: 1, paddingRight: 1 }}>
       <For each={lines()}>{(line, index) => (
-        <box style={{ width: width(), flexDirection: "row", backgroundColor: COLOR.userMessageBg }}>
+        <box style={{ width: "100%", minWidth: 0, flexDirection: "row", backgroundColor: COLOR.userMessageBg }}>
           <text fg={index() === 0 ? COLOR.accent : COLOR.dim}>{index() === 0 ? "› " : "  "}</text>
           <text fg={COLOR.text}>{line || " "}</text>
         </box>

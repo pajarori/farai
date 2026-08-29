@@ -495,14 +495,25 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
               args: { limit: options.limit ?? 300, ...(options.kind ? { kind: options.kind } : {}) }
             });
           } catch {
-            mcpResult = await callMcpServerTool({
-              workspace: session.workspace,
-              configWorkspace: runtime.workspace,
-              session,
-              server: "mitmproxy-mcp",
-              tool: "get_traffic_summary",
-              args: { limit: options.limit ?? 300 }
-            });
+            try {
+              mcpResult = await callMcpServerTool({
+                workspace: session.workspace,
+                configWorkspace: runtime.workspace,
+                session,
+                server: "mitmproxy-mcp",
+                tool: "get_flow_summary_v2",
+                args: { limit: options.limit ?? 300, ...(options.kind ? { kind: options.kind } : {}) }
+              });
+            } catch {
+              mcpResult = await callMcpServerTool({
+                workspace: session.workspace,
+                configWorkspace: runtime.workspace,
+                session,
+                server: "mitmproxy-mcp",
+                tool: "get_traffic_summary",
+                args: { limit: options.limit ?? 300 }
+              });
+            }
           }
           const flows = proxyFlowsFromMcpTrafficSummary(mcpResult, options);
           if (flows.length > 0 || listMcpServerStatuses(activeSessionId).some((status) => status.name === "mitmproxy-mcp" && status.running)) return flows;
@@ -532,6 +543,19 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
             });
             const detail = proxyFlowDetailFromMcpInspect(mcpResult);
             if (detail) return detail;
+          } catch {
+          }
+          try {
+            const compatibleResult = await callMcpServerTool({
+              workspace: session.workspace,
+              configWorkspace: runtime.workspace,
+              session,
+              server: "mitmproxy-mcp",
+              tool: "inspect_flow_v2",
+              args: { flow_id: id }
+            });
+            const compatibleDetail = proxyFlowDetailFromMcpInspect(compatibleResult);
+            if (compatibleDetail) return compatibleDetail;
           } catch {
           }
           const legacyResult = await callMcpServerTool({

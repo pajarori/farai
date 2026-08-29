@@ -5,6 +5,7 @@ import { useTuiStore } from "../context/store";
 import { modelProviderProtocolLabel, modelProviderWizardStep, modelProviderWizardStepCount } from "../model-provider-state";
 import { COLOR } from "../theme";
 import { truncateLine } from "../renderers";
+import { isPrimaryClick } from "../input/mouse";
 
 export function ModelProviderWizard(): JSX.Element {
   const tui = useTuiStore();
@@ -119,40 +120,46 @@ export function ModelProviderWizard(): JSX.Element {
             return (
               <box
                 style={{ flexDirection: "row" }}
-                onMouseUp={() => tui.actions.modelProviderWizardPatch({ protocol: row[0] })}
+                onMouseUp={(event) => {
+                  if (isPrimaryClick(event)) tui.actions.modelProviderWizardPatch({ protocol: row[0] });
+                }}
               >
                 <text selectable={false} fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
                 <text selectable={false} fg={COLOR.text}>{row[1]}</text>
-                <text selectable={false} fg={COLOR.dim}>{`  ${row[2]}`}</text>
+                <Show when={dims().width >= 56}>
+                  <text selectable={false} fg={COLOR.dim}>{`  ${row[2]}`}</text>
+                </Show>
               </box>
             );
           }}</For>
         </box>
       </Show>
       <Show when={wizard().error}><box style={{ marginTop: 1 }}><text fg={COLOR.error}>{`  ${truncateLine(wizard().error ?? "", Math.max(8, dims().width - 4))}`}</text></box></Show>
-      <box style={{ marginTop: 1 }}><text fg={COLOR.dim}>{`  ${wizardHint(wizard().field, wizard().busy)}`}</text></box>
+      <box style={{ marginTop: 1 }}><text fg={COLOR.dim}>{`  ${truncateLine(wizardHint(wizard().field, wizard().busy), Math.max(1, dims().width - 2))}`}</text></box>
     </box>
   );
 }
 
 function ProviderReview(): JSX.Element {
   const tui = useTuiStore();
+  const dims = useTerminalDimensions();
   const wizard = () => tui.store.ui.modelProviderWizard!;
+  const width = () => Math.max(1, dims().width - 2);
   return (
     <box style={{ flexDirection: "column", marginTop: 1, paddingLeft: 2 }}>
-      <text fg={COLOR.text}>{wizard().id || "unnamed provider"}</text>
-      <text fg={COLOR.dim}>{wizard().baseUrl || "base url missing"}</text>
-      <text fg={COLOR.dim}>{`${modelProviderProtocolLabel(wizard().protocol)} · ${wizard().model || "discover models automatically"}`}</text>
-      <text fg={COLOR.dim}>{wizard().apiKey
+      <text fg={COLOR.text}>{truncateLine(wizard().id || "unnamed provider", width())}</text>
+      <text fg={COLOR.dim}>{truncateLine(wizard().baseUrl || "base url missing", width())}</text>
+      <text fg={COLOR.dim}>{truncateLine(`${modelProviderProtocolLabel(wizard().protocol)} · ${wizard().model || "discover models automatically"}`, width())}</text>
+      <text fg={COLOR.dim}>{truncateLine(wizard().apiKey
         ? "new api key will be stored securely"
         : wizard().removeCredential
           ? "stored api key will be removed"
           : wizard().credentialStored
             ? "stored api key will be retained"
-            : "no api key"}</text>
-      <Show when={wizard().probe}><text fg={wizard().probe?.ok ? COLOR.success : COLOR.error}>{wizard().probe?.ok
+            : "no api key", width())}</text>
+      <Show when={wizard().probe}><text fg={wizard().probe?.ok ? COLOR.success : COLOR.error}>{truncateLine(wizard().probe?.ok
         ? `probe ready · ${wizard().probe?.models.length} models · ${wizard().probe?.latencyMs}ms`
-        : `probe failed · ${wizard().probe?.error ?? "unknown error"}`}</text></Show>
+        : `probe failed · ${wizard().probe?.error ?? "unknown error"}`, width())}</text></Show>
       <Show when={wizard().busy}><text fg={COLOR.accent}>testing provider…</text></Show>
     </box>
   );

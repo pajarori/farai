@@ -56,7 +56,14 @@ export function AppShell(): JSX.Element {
   return (
     <ComposerProvider>
       <KeyboardController />
-      <box style={{ width: dims().width, height: dims().height, minHeight: 0, overflow: "hidden", flexDirection: "column" }}>
+      <box
+        width={dims().width}
+        height={dims().height}
+        minHeight={0}
+        overflow="hidden"
+        flexDirection="column"
+        backgroundColor={COLOR.bg}
+      >
         <MainTabs />
         <box id="main-surface-viewport" style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: "hidden", flexDirection: "column" }}>
           <Show when={tui.store.ui.centerSurfaceStack.at(-1)} fallback={

@@ -17,7 +17,7 @@ import { truncateLine } from "../renderers";
 import { syntax } from "../syntax";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
-import { fitTerminal } from "../terminal-text";
+import { fitTerminal, terminalWidth } from "../terminal-text";
 
 type CenterSurfaceViewProps = {
   frame: CenterSurfaceFrame;
@@ -25,6 +25,7 @@ type CenterSurfaceViewProps = {
 
 export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
   const tui = useTuiStore();
+  const dims = useTerminalDimensions();
   const loader = createSurfaceLoader(() => props.frame);
   const title = () => surfaceTitle(props.frame);
   const kindLabel = () => props.frame.kind;
@@ -54,12 +55,12 @@ export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
         <box style={{ flexDirection: "row", minWidth: 0 }}>
           <text fg={COLOR.accent}>{"› "}</text>
-          <text fg={COLOR.text}>{truncateLine(title(), 96)}</text>
+          <text fg={COLOR.text}>{truncateLine(title(), Math.max(4, dims().width - terminalWidth(kindLabel()) - 10))}</text>
         </box>
         <text fg={COLOR.dim}>{kindLabel()}</text>
       </box>
       <box style={{ height: 1 }}>
-        <text fg={COLOR.dim}>{surfaceSubtitle(props.frame)}</text>
+        <text fg={COLOR.dim}>{truncateLine(surfaceSubtitle(props.frame), Math.max(1, dims().width - 4))}</text>
       </box>
       <Show when={props.frame.kind === "proxy_flow"} fallback={
         <scrollbox ref={scrollRef} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1, minHeight: 0, paddingTop: 1, paddingBottom: 1 }}>
@@ -239,7 +240,7 @@ function WebSocketFlowView(props: { flow: ProxyWebSocketFlowDetail; compact?: bo
     Math.max(0, props.flow.messages.length - 1)
   ));
   const selectedMessage = createMemo(() => props.flow.messages[selectedIndex()]);
-  const contentWidth = () => Math.max(36, dims().width - (props.compact ? 4 : 8));
+  const contentWidth = () => Math.max(1, dims().width - (props.compact ? 4 : 8));
   const inspectorGap = () => dims().height >= 22 ? 1 : 0;
 
   createEffect(() => {
