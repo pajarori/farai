@@ -79,19 +79,33 @@ export function Footer(props: FooterProps): JSX.Element {
     tui.store.snapshot.browserContexts,
     tui.store.snapshot.queuedPrompts.length,
     tui.store.ui.statusDetail,
-    contextUsage()
+    contextUsage(),
+    tui.store.ui.updateNotice
   ));
   const firstLine = () => fitFooterLine(left(), rightItems(), Math.max(0, dims().width - 4));
+  const updateText = () => tui.store.ui.updateNotice ? `update ${tui.store.ui.updateNotice.latestVersion}` : undefined;
+  const rightLine = createMemo(() => splitUpdateWarning(firstLine().right, updateText()));
 
   return (
     <box style={{ flexShrink: 0, flexDirection: "column" }}>
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
         <text fg={historySearch() ? COLOR.accent : COLOR.dim}>{firstLine().left}</text>
-        <text fg={COLOR.dim}>{firstLine().right}</text>
+        <text>
+          <span style={{ fg: COLOR.warning }}>{rightLine().warning}</span>
+          <span style={{ fg: COLOR.dim }}>{rightLine().rest}</span>
+        </text>
       </box>
       <ShowShortcutLines lines={lines().slice(1).map((line) => line.toLowerCase())} />
     </box>
   );
+}
+
+export function splitUpdateWarning(line: string, updateText: string | undefined): { warning: string; rest: string } {
+  if (!line || !updateText) return { warning: "", rest: line };
+  if (line.startsWith(updateText)) return { warning: updateText, rest: line.slice(updateText.length) };
+  const visible = line.endsWith("…") ? line.slice(0, -1) : line;
+  if (visible && updateText.startsWith(visible)) return { warning: line, rest: "" };
+  return { warning: "", rest: line };
 }
 
 function displayModel(sessionModel: string | undefined, workspace: string): string {

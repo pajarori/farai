@@ -8,6 +8,7 @@ import { ExitProvider } from "./context/exit";
 import { createRuntimePort, type TuiCapabilities, type TuiInput, type TuiRuntimePort } from "./runtime-port";
 import { DEFAULT_SESSION_TITLE } from "../session-title";
 import { resolveSessionLocation } from "../session-catalog";
+import { prepareUpdateCheck } from "./update-check";
 
 export { createRuntimePort };
 export type { TuiInput, TuiRuntimePort, TuiCapabilities };
@@ -26,6 +27,7 @@ export async function runOpenTui(input: TuiInput): Promise<void> {
   let handleRendererDestroy: (() => void) | undefined;
   const managedRenderer = await createManagedRenderer(() => handleRendererDestroy?.());
   const renderer = managedRenderer.renderer;
+  const updateCheck = prepareUpdateCheck();
 
   let done!: () => void;
   const finished = new Promise<void>((resolve) => { done = resolve; });
@@ -66,7 +68,7 @@ export async function runOpenTui(input: TuiInput): Promise<void> {
       () => (
         <ExitProvider handler={exitCleanly}>
           <TuiRuntimeProvider value={{ port: input.runtime, workspace: input.workspace, capabilities }}>
-            <TuiStoreProvider initialSessionId={initialSessionId} onActiveSessionChange={(sessionId, title) => {
+            <TuiStoreProvider initialSessionId={initialSessionId} updateCheck={updateCheck} onActiveSessionChange={(sessionId, title) => {
               activeSessionId = sessionId;
               renderer.setTerminalTitle(`farai · ${title?.trim() || DEFAULT_SESSION_TITLE}`);
             }}>

@@ -1,6 +1,6 @@
 {
   "name": "farai",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": false,
   "type": "module",
   "description": "Cyber-first freestyle local AI agent",
@@ -63,6 +63,7 @@
     "ajv": "8.20.0",
     "bun-pty": "0.4.10",
     "entities": "7.0.1",
+    "figlet": "1.11.4",
     "fuzzysort": "3.1.0",
     "solid-js": "1.9.12"
   },

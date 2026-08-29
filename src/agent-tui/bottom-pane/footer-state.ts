@@ -1,6 +1,7 @@
 import type { BackgroundActivitySummary, SubagentActivity } from "../runtime-port";
 import type { BrowserContextActivity } from "../../agent-tools/browser/context-manager";
 import type { ContextUsage } from "../store";
+import type { UpdateNotice } from "../update-check";
 import type { TimelineRow } from "../renderers";
 import { terminalWidth, truncateTerminal } from "../terminal-text";
 
@@ -26,7 +27,7 @@ export type FooterState = {
 
 export type FooterItem = {
   id: string;
-  kind: "context" | "agents" | "browsers" | "background" | "queue" | "message";
+  kind: "update" | "context" | "agents" | "browsers" | "background" | "queue" | "message";
   text: string;
   count?: number;
 };
@@ -103,9 +104,13 @@ export function footerRightItems(
   browserContexts: BrowserContextActivity[],
   queueSize: number,
   statusDetail: string | undefined,
-  contextUsage?: ContextUsage
+  contextUsage?: ContextUsage,
+  updateNotice?: UpdateNotice
 ): FooterItem[] {
   const items: FooterItem[] = [];
+  if (updateNotice) {
+    items.push({ id: "update", kind: "update", text: `update ${updateNotice.latestVersion}` });
+  }
   if (contextUsage && contextUsage.tokens >= 0) {
     items.push({
       id: "context",

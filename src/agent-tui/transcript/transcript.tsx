@@ -6,6 +6,7 @@ import { formatPayload, truncateLine, type TimelineRow } from "../renderers";
 import { formatCompactSummary } from "../../agent-core/loop/compaction";
 import { COLOR } from "../theme";
 import { FaraiRow } from "./cells";
+import { FARAI_BANNER_LINES } from "../../branding";
 
 export function Transcript(): JSX.Element {
   const tui = useTuiStore();
@@ -69,6 +70,11 @@ export function Transcript(): JSX.Element {
         when={indexedRows().ids.length > 0}
         fallback={
           <box style={{ flexDirection: "column", marginTop: 1, paddingLeft: 1, paddingRight: 1 }}>
+            <box style={{ flexDirection: "column", marginBottom: 1 }}>
+              <For each={FARAI_BANNER_LINES}>{(line) => (
+                <text fg={COLOR.dim}>{truncateLine(line, Math.max(1, dims().width - 4))}</text>
+              )}</For>
+            </box>
             <text fg={COLOR.dim}>{"› message farai to get started"}</text>
             <text fg={COLOR.dim}>{"  / opens commands · ? shows shortcuts"}</text>
           </box>

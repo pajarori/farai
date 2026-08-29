@@ -8,6 +8,7 @@ import type { ProxyFlowQuery, ProxyFlowSummary } from "../../agent-tools/service
 import { projectMessagesToRows, type TimelineRow } from "../renderers";
 import type { AgentThreadSummary } from "../runtime-port";
 import type { UserInputAnswer } from "../../types";
+import type { PreparedUpdateCheck } from "../update-check";
 
 export function proxyRefreshQuery(): ProxyFlowQuery {
   return { limit: 300 };
@@ -47,6 +48,7 @@ const StoreContext = createContext<TuiStoreValue>();
 type TuiStoreProviderProps = {
   initialSessionId?: string | undefined;
   onActiveSessionChange?: (sessionId: string, title?: string) => void;
+  updateCheck?: PreparedUpdateCheck | undefined;
   children: JSX.Element;
 };
 
@@ -67,6 +69,12 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   let sessionSelectionIntent = 0;
   let mcpOverlayGeneration = 0;
   let disposed = false;
+  if (props.updateCheck?.cachedNotice) actions.updateNoticeSet(props.updateCheck.cachedNotice);
+  if (props.updateCheck?.refresh) {
+    void props.updateCheck.refresh.then((notice) => {
+      if (!disposed) actions.updateNoticeSet(notice);
+    });
+  }
   const timelineRows = createMemo(() => projectMessagesToRows(
     store.snapshot.messages,
     Math.max(1, dims().width - 4),

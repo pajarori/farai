@@ -8,6 +8,7 @@ import { buildModelCatalog, resolveDefaultCatalogModel } from "../agent-core/mod
 import { addModelProfile, loadModelProfiles, modelProfilePaths, type ModelProfileLocation } from "../agent-core/model-profiles";
 import { ensureDefaultUserConfig, globalConfigPath, loadGlobalConfig } from "../agent-core/global-config";
 import { authPath, loadConfig, updateConfig } from "../agent-core/config";
+import { FARAI_BANNER } from "../branding";
 
 const [, , command, ...args] = process.argv;
 
@@ -99,7 +100,9 @@ async function setup(args: string[]): Promise<void> {
   const apiKeyEnv = flag(args, "--api-key-env");
   const setDefault = args.includes("--set-default") || args.includes("--default") || Boolean(model);
 
-  console.log("[*] setting up Farai");
+  console.log(FARAI_BANNER);
+  console.log();
+  console.log("[*] setting up farai");
   console.log(`[+] config: ${globalConfigPath()}`);
   console.log(`[+] auth: ${authPath("global")}`);
 

@@ -12,6 +12,7 @@ import type { BrowserContextActivity } from "../agent-tools/browser/context-mana
 import { clampIndex as clampRequestIndex, syncRequestUserInputUiState, wrapIndex as wrapRequestIndex, type RequestUserInputUiState } from "./request-user-input-state";
 import type { ModelProviderInfo } from "../agent-core/model-provider-management";
 import { createModelProviderWizard, type ModelProviderWizardState } from "./model-provider-state";
+import type { UpdateNotice } from "./update-check";
 
 export type OverlayFrame =
   | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory" | "mcp"; query: string; index: number }
@@ -116,6 +117,7 @@ export type FaraiTuiStore = {
     agentThreads: AgentThreadSummary[];
     lastError: string | undefined;
     requestUserInput: RequestUserInputUiState | undefined;
+    updateNotice: UpdateNotice | undefined;
   };
 };
 
@@ -218,6 +220,7 @@ export type StoreActions = {
   requestUserInputDraftSet: (questionId: string, draft: string) => void;
   requestUserInputAnswerSet: (questionId: string, answer: string) => void;
   requestUserInputSubmittingSet: (submitting: boolean) => void;
+  updateNoticeSet: (notice: UpdateNotice | undefined) => void;
 };
 
 export type FaraiStore = {
@@ -300,7 +303,8 @@ export function initialStore(workspace: string): FaraiTuiStore {
       sessionStats: {},
       agentThreads: [],
       lastError: undefined,
-      requestUserInput: undefined
+      requestUserInput: undefined,
+      updateNotice: undefined
     }
   };
 }
@@ -655,6 +659,9 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     },
     statusDetailSet(detail: string | undefined): void {
       setStore("ui", "statusDetail", detail);
+    },
+    updateNoticeSet(notice: UpdateNotice | undefined): void {
+      setStore("ui", "updateNotice", notice);
     },
     contextUsageUpdated(usage: ContextUsage | undefined): void {
       if (!usage) {
