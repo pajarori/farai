@@ -27,8 +27,6 @@ function sanitizeText(value: string): string {
   return stripTerminalSequences(value).replace(CONTROL_RE, "");
 }
 
-// Terminal programs emit more than CSI color codes: OSC titles, DCS payloads,
-// charset selection, and partial escape sequences are all valid text output.
 function stripTerminalSequences(value: string): string {
   let output = "";
   for (let index = 0; index < value.length;) {

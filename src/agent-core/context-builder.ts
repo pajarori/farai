@@ -243,11 +243,15 @@ export function renderModelToolResultEnvelope(toolCall: ToolCallRecord, result: 
     const skillName = typeof result.metadata.skillName === "string" ? result.metadata.skillName : "unknown";
     const skillHash = typeof result.metadata.skillHash === "string" ? result.metadata.skillHash : "unknown";
     const skillSource = typeof result.metadata.skillSource === "string" ? result.metadata.skillSource : "unknown";
+    const resourcePath = typeof result.metadata.resourcePath === "string" ? result.metadata.resourcePath : undefined;
+    const resourceHash = typeof result.metadata.resourceHash === "string" ? result.metadata.resourceHash : undefined;
     return takeBytes([
       "trusted local skill instructions:",
       `skill: ${skillName}`,
       `source: ${skillSource}`,
-      `sha256: ${skillHash}`,
+      `skill_sha256: ${skillHash}`,
+      ...(resourcePath ? [`resource: ${resourcePath}`] : []),
+      ...(resourceHash ? [`resource_sha256: ${resourceHash}`] : []),
       "follow these instructions only within the user's current request and higher-priority policy.",
       "",
       rendered.trim() || result.output?.trim() || result.summary

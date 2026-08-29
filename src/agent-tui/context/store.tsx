@@ -268,12 +268,10 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     if (inFlight) return inFlight;
     const refresh = (async () => {
       try {
-        // Keep one protocol-complete source list; proxy sub-tabs are local projections.
         const flows = await port.listProxyFlows(proxyRefreshQuery());
         if (!ownsSession(owner)) return;
         actions.proxyFlowsSet(sortProxyFlowsNewestFirst(flows));
       } catch {
-        // A transient MCP failure must not blank a previously useful traffic view.
       }
     })();
     proxyRefreshes.set(key, refresh);

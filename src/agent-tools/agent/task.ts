@@ -2,7 +2,6 @@ import type { ToolDefinition } from "../../types";
 import { normalizeSessionTitle, titleFromPrompt } from "../../session-title";
 import { assertObject, asString, maybeString } from "../../utils";
 
-// Compatibility definition for persisted transcripts and downstream imports. It is not registered in Farai's active tool catalog.
 export const agentTaskTool: ToolDefinition = {
   name: "agent_task",
   description: "Legacy subagent delegation compatibility tool.",

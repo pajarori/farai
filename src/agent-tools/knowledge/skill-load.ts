@@ -37,8 +37,19 @@ export const skillLoadTool: ToolDefinition = {
       return {
         ok: true,
         summary: `loaded ${skill.name}/${skill.resource.path}`,
-        output: [`# skill resource: ${skill.name}/${skill.resource.path}`, skill.resource.content].join("\n\n"),
-        metadata: { instructionSource: "skill", skillName: skill.name, skillHash: skill.hash, skillSource: skill.source }
+        output: [
+          `# skill resource: ${skill.name}/${skill.resource.path}`,
+          "use this resource only for the current task path selected by the parent skill.",
+          skill.resource.content
+        ].join("\n\n"),
+        metadata: {
+          instructionSource: "skill",
+          skillName: skill.name,
+          skillHash: skill.hash,
+          resourcePath: skill.resource.path,
+          resourceHash: skill.resource.hash,
+          skillSource: skill.source
+        }
       };
     }
     const details = [
@@ -48,6 +59,7 @@ export const skillLoadTool: ToolDefinition = {
       `directory: ${skill.directory}`,
       ...(skill.compatibility ? [`compatibility: ${skill.compatibility}`] : []),
       ...(skill.resources.length ? ["supporting resources:", ...skill.resources.map((path) => `- ${path}`)] : []),
+      ...(skill.resources.length ? ["load only the resource routed by these instructions or required by the current task; do not preload every resource."] : []),
       "## instructions",
       skill.body
     ];

@@ -129,7 +129,7 @@ export class ContextEngine {
       history.entries.push({ role: "user", text: input.userText.trim() });
       history.estimatedTokens = estimateProviderMessagesTokens(toProviderMessages(history.entries));
     }
-    const candidates = this.buildCandidates(input.session, query, activeJobs, deferredToolNames.length, input.extraBlocks ?? []);
+    const candidates = this.buildCandidates(input.session, query, activeJobs, deferredToolNames.length, input.contextWindow, input.extraBlocks ?? []);
     const admittedCandidates: ContextCandidate[] = [];
     const omitted: ContextDecision[] = [];
 
@@ -191,7 +191,7 @@ export class ContextEngine {
     return this.assemble(input).manifest;
   }
 
-  private buildCandidates(session: Session, query: string, activeJobs: ReturnType<typeof activeBackgroundJobs>, deferredCount: number, extraBlocks: PlannerContextBlock[]): ContextCandidate[] {
+  private buildCandidates(session: Session, query: string, activeJobs: ReturnType<typeof activeBackgroundJobs>, deferredCount: number, contextWindow: number, extraBlocks: PlannerContextBlock[]): ContextCandidate[] {
     const candidates: ContextCandidate[] = [];
     const workspace = session.workspace || this.workspace;
     const recentPaths = recentWorkspacePaths(this.store, session.id);
@@ -302,9 +302,8 @@ export class ContextEngine {
       retrievalRef: "knowledge_search, knowledge_read"
     }));
 
-    const skills = this.skillsEnabled && (isSecurityTask(session, query) || /\b(skill|playbook)\b/i.test(query))
-      ? renderSkillCatalog(workspace, 700)
-      : undefined;
+    const canLoadSkills = !session.toolScope?.length || session.toolScope.some((name) => canonicalToolName(name) === "skill_load");
+    const skills = this.skillsEnabled && canLoadSkills ? renderSkillCatalog(workspace, skillCatalogBudget(contextWindow)) : undefined;
     if (skills) candidates.push(candidate({
       id: "skill-catalog",
       class: "capabilities",
@@ -359,6 +358,10 @@ export class ContextEngine {
     }
     return candidates;
   }
+}
+
+export function skillCatalogBudget(contextWindow: number): number {
+  return Math.max(1_500, Math.min(8_000, Math.floor(contextWindow * 0.08)));
 }
 
 export function mergeProviderToolCatalog(

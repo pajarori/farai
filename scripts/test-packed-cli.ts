@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -30,6 +30,10 @@ try {
   const version = (await run([bin, "--version"], scratch)).trim();
   const manifest = await Bun.file(join(root, "package.json")).json() as { version: string };
   if (version !== manifest.version) throw new Error(`packed CLI reported ${version}, expected ${manifest.version}`);
+  for (const skill of ["ctf-solving", "web-assessment", "binary-reversing", "packet-analysis", "source-security-review"]) {
+    const path = join(packageRoot, "src", "agent-skills", "library", skill, "SKILL.md");
+    if (!existsSync(path)) throw new Error(`packed CLI is missing built-in skill: ${skill}`);
+  }
   console.log(`packed CLI smoke passed (${version})`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });

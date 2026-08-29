@@ -37,7 +37,7 @@ export type SkillDiscovery = {
 
 export type LoadedSkill = SkillMeta & {
   body: string;
-  resource?: { path: string; content: string };
+  resource?: { path: string; content: string; hash: string };
 };
 
 type InternalSkill = LoadedSkill & { priority: number };
@@ -98,25 +98,31 @@ export function loadSkill(name: string, options: SkillDiscoveryOptions & { resou
   if (!stats.isFile() || stats.size > MAX_RESOURCE_BYTES) return undefined;
   const content = readFileSync(canonical, "utf8");
   if (content.includes("\0")) return undefined;
-  return { ...loaded, resource: { path: resourcePath, content } };
+  return {
+    ...loaded,
+    resource: {
+      path: resourcePath,
+      content,
+      hash: createHash("sha256").update(content).digest("hex")
+    }
+  };
 }
 
 export function renderSkillCatalog(workspace: string, maxChars = 8_000): string | undefined {
   const skills = listSkills(workspace);
   if (!skills.length || maxChars < 80) return undefined;
-  const header = "available skills use progressive disclosure. call skill_load with one exact name, then load a referenced resource only when needed.";
-  const compact = skills.map((skill) => `- ${skill.name}: ${compactText(skill.description, 240)}`);
-  const full = [header, ...compact].join("\n");
-  if (full.length <= maxChars) return full;
-  const short = skills.map((skill) => `- ${skill.name}: ${compactText(skill.description, 120)}`);
-  const lines = [header];
-  for (const line of short) {
-    if ([...lines, line].join("\n").length > maxChars) break;
-    lines.push(line);
+  const header = "skills use progressive disclosure. load an exact matching skill before substantive action, choose the minimal relevant set, and load supporting resources only when needed.";
+  const prefixes = skills.map((skill) => `- ${skill.name}: `);
+  const fixedChars = header.length + prefixes.reduce((total, prefix) => total + 1 + prefix.length, 0);
+  const descriptionChars = Math.floor((maxChars - fixedChars) / skills.length);
+  if (descriptionChars >= 24) {
+    return [
+      header,
+      ...skills.map((skill, index) => `${prefixes[index]}${compactText(skill.description, Math.min(240, descriptionChars))}`)
+    ].join("\n");
   }
-  const omitted = skills.length - (lines.length - 1);
-  if (omitted > 0) lines.push(`- ${omitted} additional skills omitted from this context budget`);
-  return lines.join("\n");
+  const names = `names: ${skills.map((skill) => skill.name).join(", ")}`;
+  return compactText([header, names].join("\n"), maxChars);
 }
 
 function skillRoots(options: SkillDiscoveryOptions): SkillRoot[] {

@@ -15,7 +15,6 @@ export function terminalWidth(value: string): number {
     try {
       return bun.stringWidth(value);
     } catch {
-      // Fall through for runtimes with an incomplete Bun compatibility layer.
     }
   }
   return fallbackTerminalWidth(value);
@@ -81,7 +80,6 @@ function stripAnsi(value: string): string {
     try {
       return bun.stripANSI(value);
     } catch {
-      // Use the portable expression below.
     }
   }
   return value.replace(ANSI_SEQUENCE, "");

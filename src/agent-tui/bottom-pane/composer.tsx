@@ -28,7 +28,6 @@ export function Composer(): JSX.Element {
 
   const syncComposerHeight = (): void => {
     if (!textareaRef) return;
-    // virtualLineCount is viewport-limited; total includes wrapped rows below it.
     const visualLines = textareaRef.editorView.getTotalVirtualLineCount();
     setComposerHeight(composerHeightFromVisualLines(visualLines));
   };

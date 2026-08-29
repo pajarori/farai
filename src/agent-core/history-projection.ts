@@ -127,8 +127,6 @@ export function fitConversationEntries(entries: ConversationEntry[], maxTokens: 
   let fitted = ensureToolResultsPaired(structuredClone(entries));
   if (estimateTokens(fitted) <= maxTokens) return fitted;
 
-  // Drop complete old user turns first. A single long turn has no later user boundary,
-  // so the second phase removes old assistant/tool groups while retaining the request.
   while (estimateTokens(fitted) > maxTokens) {
     const nextUser = fitted.findIndex((entry, index) => index > 0 && entry.role === "user");
     if (nextUser === -1) break;

@@ -1800,7 +1800,6 @@ export class SqliteStore {
     const version = Number((db.query("pragma user_version").get() as { user_version?: number } | null)?.user_version ?? 0);
     if (version > 9) throw new Error(`Unsupported Farai database version: ${version}`);
     db.transaction(() => {
-      // Older or partially-created databases may be missing tables introduced before their recorded version.
       this.ensureBaselineSchema(db);
       if (version < 2) this.addJobAndMailboxSchema(db);
       if (version < 3) this.addEventSequenceSchema(db);
