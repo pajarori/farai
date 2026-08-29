@@ -73,7 +73,7 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
   const visibleOutputLines = () => active()
     ? tailLines(visibleOutput(), 3)
     : previewOutputLines(visibleOutput(), TOOL_OUTPUT_PREVIEW_LINES);
-  if (props.row.tool === "agent_task") return <AgentTaskRow row={props.row} />;
+  if (["agent_task", "agent_spawn", "agent_followup"].includes(props.row.tool)) return <AgentTaskRow row={props.row} />;
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
       <box style={{ flexDirection: "row" }} {...toggleClick}>

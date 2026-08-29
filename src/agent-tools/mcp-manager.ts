@@ -7,6 +7,7 @@ import { TOOL_NAME_MAX_LENGTH } from "../tool-names";
 
 export type McpRefreshInput = {
   workspace: string;
+  configWorkspace?: string;
   session?: Session;
   signal?: AbortSignal;
   portOffset?: number;
@@ -57,6 +58,9 @@ type ManagedMcpServer = {
   config: ExternalMcpServer;
   client: McpStdioClient;
   toolNames: Set<string>;
+  resources: McpResourceDescriptor[];
+  resourceTemplates: McpResourceTemplateDescriptor[];
+  resourcesLoaded: boolean;
   proxyStarted: boolean;
   proxyStartTask?: Promise<void>;
 };
@@ -235,8 +239,9 @@ export class McpServerManager {
 
   private prepareRefreshPlan(input: McpRefreshInput): McpRefreshPlan {
     const scope = mcpScope(input.session);
-    this.lastConfigPathByScope.set(scope, [configPath("global"), configPath("project", input.workspace)].join(", "));
-    const allConfigs = mcpServersFromConfig(loadConfig(input.workspace).mcpServers ?? {});
+    const configWorkspace = input.configWorkspace ?? input.workspace;
+    this.lastConfigPathByScope.set(scope, [configPath("global"), configPath("project", configWorkspace)].join(", "));
+    const allConfigs = mcpServersFromConfig(loadConfig(configWorkspace).mcpServers ?? {});
     const effectivePort = resolveMcpPort(allConfigs, input.portOffset ?? 0);
     const reserved = new Set(this.options.reservedServers ?? []);
     const resolvedConfigs = allConfigs
@@ -357,7 +362,15 @@ export class McpServerManager {
       if (!managed || !managed.client.isRunning() || !sameProcessConfig(managed.config, prepared)) {
         await managed?.client.stop().catch(() => {});
         if (!this.isRefreshCurrent(scope, epoch)) return { status: "cancelled", server: config.name };
-        managed = { config: prepared, client: new McpStdioClient(prepared), toolNames: new Set(), proxyStarted: false };
+        managed = {
+          config: prepared,
+          client: new McpStdioClient(prepared),
+          toolNames: new Set(),
+          resources: [],
+          resourceTemplates: [],
+          resourcesLoaded: false,
+          proxyStarted: false
+        };
         this.servers.set(key, managed);
       }
       await this.ensureInitialized(managed);
@@ -397,7 +410,7 @@ export class McpServerManager {
       input.onStartupEvent?.({ type: "mcp_startup_update", server: config.name, status: { state: "ready" } });
       this.autostartServerInBackground(input, scope, config.name, managed);
       if (input.includeResources !== false) {
-        await this.refreshServerResources(scope, config.name, managed);
+        await this.refreshServerResources(scope, config.name, managed, input.signal);
       } else {
         void this.refreshServerResources(scope, config.name, managed).catch(() => {});
       }
@@ -425,18 +438,21 @@ export class McpServerManager {
     }
   }
 
-  private async refreshServerResources(scope: string, serverName: string, managed: ManagedMcpServer): Promise<void> {
-    const [resources, resourceTemplates] = await Promise.all([
-      discoverResources(managed.client),
+  private async refreshServerResources(scope: string, serverName: string, managed: ManagedMcpServer, signal?: AbortSignal): Promise<void> {
+    const [resourceDiscovery, resourceTemplates] = await Promise.all([
+      discoverResources(managed.client, signal),
       discoverResourceTemplates(managed.client)
     ]);
+    managed.resources = resourceDiscovery.resources;
+    managed.resourceTemplates = resourceTemplates;
+    managed.resourcesLoaded = resourceDiscovery.loaded;
     if (this.servers.get(scopedServerKey(scope, serverName)) !== managed) return;
     const statuses = this.statusMap(scope);
     const existing = statuses.get(serverName);
     if (!existing || !existing.running) return;
     statuses.set(serverName, {
       ...existing,
-      resources: resources.map(toStatusResource),
+      resources: resourceDiscovery.resources.map(toStatusResource),
       resourceTemplates: resourceTemplates.map(toStatusResourceTemplate)
     });
   }
@@ -505,6 +521,7 @@ export class McpServerManager {
   async callServerTool(input: McpRefreshInput & { server: string; tool: string; args?: Record<string, unknown> }): Promise<unknown> {
     await waitForMcpSignal(this.refresh({
       workspace: input.workspace,
+      ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
       ...(input.session ? { session: input.session } : {}),
       ...(input.portOffset !== undefined ? { portOffset: input.portOffset } : {}),
       includeResources: false
@@ -516,9 +533,34 @@ export class McpServerManager {
     return await managed.client.callTool(input.tool, input.args ?? {}, input.signal);
   }
 
+  async listResources(input: McpRefreshInput): Promise<Array<McpResourceDescriptor & { server: string }>> {
+    await waitForMcpSignal(this.refresh({ ...input, includeResources: true, background: false }), input.signal);
+    const scopePrefix = `${mcpScope(input.session)}:`;
+    const resources: Array<McpResourceDescriptor & { server: string }> = [];
+    for (const [key, managed] of this.servers) {
+      if (!key.startsWith(scopePrefix)) continue;
+      await this.ensureInitialized(managed);
+      if (!managed.resourcesLoaded) {
+        managed.resources = await managed.client.listResources(input.signal);
+        managed.resourcesLoaded = true;
+      }
+      for (const resource of managed.resources) resources.push({ ...resource, server: managed.config.name });
+    }
+    return resources.sort((left, right) => left.server.localeCompare(right.server) || left.uri.localeCompare(right.uri));
+  }
+
+  async readResource(input: McpRefreshInput & { server: string; uri: string }): Promise<unknown> {
+    await waitForMcpSignal(this.refresh({ ...input, includeResources: false, background: false }), input.signal);
+    const managed = this.servers.get(scopedServerKey(input.session, input.server));
+    if (!managed) throw new Error(`MCP server is not running: ${input.server}`);
+    await this.ensureInitialized(managed);
+    return await managed.client.readResource(input.uri, input.signal);
+  }
+
   async callCapabilityTool(input: McpRefreshInput & { preferredServer?: string; tool: string; args?: Record<string, unknown> }): Promise<unknown> {
     await waitForMcpSignal(this.refresh({
       workspace: input.workspace,
+      ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
       ...(input.session ? { session: input.session } : {}),
       ...(input.portOffset !== undefined ? { portOffset: input.portOffset } : {}),
       includeResources: false
@@ -619,7 +661,7 @@ export class McpServerManager {
 
   private async enableTransparentProxy(input: McpRefreshInput, server: ManagedMcpServer, proxyPort: number): Promise<void> {
     if (!server.config.runInContainer || !input.session) return;
-    const proxy = resolveProxyConfig(loadConfig(input.workspace));
+    const proxy = resolveProxyConfig(loadConfig(input.configWorkspace ?? input.workspace));
     if (!proxy.transparent) return;
     const backend = new KaliContainerBackend({ workspace: input.workspace, containerName: containerNameForSession(input.session.id) });
     const result = await backend.enableTransparentProxy({ proxyPort, redirectPorts: proxy.ports });
@@ -684,11 +726,12 @@ export class McpServerManager {
   }
 }
 
-async function discoverResources(client: McpStdioClient): Promise<McpResourceDescriptor[]> {
+async function discoverResources(client: McpStdioClient, signal?: AbortSignal): Promise<{ resources: McpResourceDescriptor[]; loaded: boolean }> {
   try {
-    return await client.listResources();
-  } catch {
-    return [];
+    return { resources: await client.listResources(signal), loaded: true };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return { resources: [], loaded: false };
   }
 }
 
@@ -771,6 +814,8 @@ function mcpSignalError(signal: AbortSignal): Error {
 function refreshSignature(input: McpRefreshInput, configs: ExternalMcpServer[]): string {
   return JSON.stringify({
     sessionId: input.session?.id ?? "host",
+    workspace: input.workspace,
+    configWorkspace: input.configWorkspace ?? input.workspace,
     portOffset: input.portOffset ?? 0,
     configs: configs.map((config) => ({
       name: config.name,
@@ -850,6 +895,14 @@ export function listMcpServerStatuses(session?: Session | string): McpServerRunt
 
 export async function callMcpServerTool(input: McpRefreshInput & { server: string; tool: string; args?: Record<string, unknown> }): Promise<unknown> {
   return await mcpServerManager.callServerTool(input);
+}
+
+export async function listMcpResources(input: McpRefreshInput): Promise<Array<McpResourceDescriptor & { server: string }>> {
+  return await mcpServerManager.listResources(input);
+}
+
+export async function readMcpResource(input: McpRefreshInput & { server: string; uri: string }): Promise<unknown> {
+  return await mcpServerManager.readResource(input);
 }
 
 export async function callMcpCapabilityTool(input: McpRefreshInput & { preferredServer?: string; tool: string; args?: Record<string, unknown> }): Promise<unknown> {

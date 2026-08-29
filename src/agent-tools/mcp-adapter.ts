@@ -228,9 +228,9 @@ export class McpStdioClient {
       .map((tool) => sanitizeMcpTool(this.server.name, tool));
   }
 
-  async listResources(): Promise<McpResourceDescriptor[]> {
+  async listResources(signal?: AbortSignal): Promise<McpResourceDescriptor[]> {
     const state = await this.ensureInitializedState();
-    const result = await this.requestOnState(state, "resources/list", {}, this.server.startupTimeoutMs);
+    const result = await this.requestOnState(state, "resources/list", {}, this.server.startupTimeoutMs, signal);
     const resources = isRecord(result) && Array.isArray(result.resources) ? result.resources : [];
     return resources
       .filter((resource): resource is RawMcpResource => isRecord(resource) && typeof resource.name === "string" && typeof resource.uri === "string")
@@ -259,6 +259,11 @@ export class McpStdioClient {
         ...(template.mimeType || template.mime_type ? { mimeType: template.mimeType ?? template.mime_type } : {}),
         ...(template.description ? { description: template.description } : {})
       }));
+  }
+
+  async readResource(uri: string, signal?: AbortSignal): Promise<unknown> {
+    const state = await this.ensureInitializedState();
+    return await this.requestOnState(state, "resources/read", { uri }, this.server.toolTimeoutMs, signal);
   }
 
   async callTool(name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<unknown> {

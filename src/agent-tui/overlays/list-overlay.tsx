@@ -10,6 +10,8 @@ import type { OverlayFrame } from "../store";
 import type { AgentThreadSummary } from "../runtime-port";
 import { useTuiStore } from "../context/store";
 import { isPrimaryClick } from "../input/mouse";
+import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "./selection-row";
+import { terminalWidth } from "../terminal-text";
 
 type ListOverlayProps = {
   frame: OverlayFrame;
@@ -95,28 +97,22 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
       </box>
       <box style={{ flexDirection: "column" }}>
         <Show when={matches().length > 0} fallback={<text fg={COLOR.dim}>{"  no results"}</text>}>
-          <For each={visibleRows()}>{(row) => (
-            <Show when={row.kind === "category"} fallback={
-              <OptionRow
-                row={row as OptionOverlayRow}
-                descCol={descCol()}
-                width={width()}
-                onSelect={selectOption}
-              />
-            }>
-              <CategoryRow row={row as CategoryOverlayRow} />
-            </Show>
-          )}</For>
+          <For each={visibleRows()}>{(row) => {
+            if (row.kind === "category") return <CategoryRow row={row} />;
+            if (row.kind === "spacer") return <box style={{ height: 1 }} />;
+            return <OptionRow row={row} descCol={descCol()} width={width()} onSelect={selectOption} />;
+          }}</For>
         </Show>
       </box>
-      <text fg={COLOR.dim}>{"  press enter to confirm or esc to go back"}</text>
+      <SelectionMenuHint text={overlayHint(props.frame, matches(), tui.store.ui.modelProviders)} />
     </box>
   );
 }
 
 type CategoryOverlayRow = { kind: "category"; category: string };
-type OptionOverlayRow = ReturnType<typeof displayRows<unknown>>[number] & { kind: "option"; number: number };
-type OverlayRow = CategoryOverlayRow | OptionOverlayRow;
+type SpacerOverlayRow = { kind: "spacer" };
+type OptionOverlayRow = ReturnType<typeof displayRows<unknown>>[number] & { kind: "option"; number?: number };
+type OverlayRow = CategoryOverlayRow | SpacerOverlayRow | OptionOverlayRow;
 type CategoryRowProps = { row: CategoryOverlayRow };
 type OptionRowProps = { row: OptionOverlayRow; descCol: number; width: number; onSelect: (id: string) => void };
 
@@ -146,7 +142,14 @@ function selectionRows(groups: Array<{ category: string | undefined; matches: Fu
   let number = 1;
   for (const group of groups) {
     if (group.category) rows.push({ kind: "category", category: titleCase(group.category) });
-    rows.push(...displayRows(group.matches, selectedId).map((row) => ({ ...row, kind: "option" as const, number: number++ })));
+    for (const row of displayRows(group.matches, selectedId)) {
+      if (row.option.separatorBefore && rows.length > 0) rows.push({ kind: "spacer" });
+      rows.push({
+        ...row,
+        kind: "option",
+        ...(row.option.numbered === false ? {} : { number: number++ })
+      });
+    }
   }
   return rows;
 }
@@ -157,31 +160,18 @@ function CategoryRow(props: CategoryRowProps): JSX.Element {
 
 function OptionRow(props: OptionRowProps): JSX.Element {
   const option = () => props.row.option;
-  const active = () => props.row.selected;
-  const title = () => {
-    const marker = option().footer === "current" ? " (current)" : "";
-    return `${option().title}${marker}`;
-  };
-  const prefix = () => `${active() ? "›" : " "} ${props.row.number}. `;
-  const left = () => `${prefix()}${title()}`;
-  const leftWidth = () => Math.min(props.descCol - 2, left().length);
-  const gap = () => Math.max(2, props.descCol - leftWidth());
-  const description = () => option().description ?? "";
-  const descWidth = () => Math.max(8, props.width - props.descCol - 1);
   return (
-    <box
-      style={{ flexDirection: "row" }}
-      onMouseUp={(event) => {
-        if (!isPrimaryClick(event) || props.row.disabled) return;
-        props.onSelect(props.row.option.id);
-      }}
-    >
-      <text selectable={false} fg={active() ? COLOR.accent : COLOR.dim}>{prefix()}</text>
-      <text selectable={false} fg={props.row.disabled ? COLOR.dim : COLOR.text}>{truncateLine(title(), Math.max(4, props.descCol - prefix().length - 2))}</text>
-      <Show when={description()}>
-        <text selectable={false} fg={COLOR.dim}>{`${" ".repeat(gap())}${truncateLine(description(), descWidth())}`}</text>
-      </Show>
-    </box>
+    <SelectionRow
+      {...(props.row.number === undefined ? {} : { number: props.row.number })}
+      title={option().title}
+      description={option().description}
+      current={option().footer === "current"}
+      selected={props.row.selected}
+      disabled={props.row.disabled}
+      width={props.width}
+      descriptionColumn={props.descCol}
+      onSelect={() => props.onSelect(option().id)}
+    />
   );
 }
 
@@ -211,7 +201,7 @@ function McpOverlay(props: McpOverlayProps): JSX.Element {
           <For each={optionRows()}>{(row) => <McpServerRow row={row} width={props.width} onSelect={props.onSelect} />}</For>
         </Show>
       </box>
-      <text fg={COLOR.dim}>{"  press esc to go back"}</text>
+      <SelectionMenuHint text="press esc to go back" />
     </box>
   );
 }
@@ -318,7 +308,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
             const expanded = () => props.frame.expandedId === row.option.id;
             const current = () => item().sessionId === tui.store.activeSessionId;
             const status = () => agentStatusLine(item(), current(), now());
-            const titleWidth = () => Math.max(8, props.width - status().length - 10);
+            const titleWidth = () => Math.max(8, props.width - terminalWidth(status()) - 10);
             const metadata = () => item().role === "main"
               ? ["main thread", item().model].filter(Boolean).join(" · ")
               : [
@@ -367,7 +357,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
           }}</For>
         </Show>
       </box>
-      <text fg={COLOR.dim}>{"  enter open thread · space/click preview · esc close"}</text>
+      <SelectionMenuHint text="enter open thread · space/click preview · esc close" />
     </box>
   );
 }
@@ -448,11 +438,13 @@ function overlayMaxRows(kind: string, terminalHeight: number): number {
 }
 
 function descriptionColumn(rows: OverlayRow[], width: number): number {
-  const longest = rows
+  return selectionDescriptionColumn(rows
     .filter((row): row is OptionOverlayRow => row.kind === "option")
-    .reduce((max, row) => Math.max(max, `${row.selected ? "›" : " "} ${row.number}. ${row.option.title}${row.option.footer === "current" ? " (current)" : ""}`.length), 0);
-  const maxLeft = Math.max(18, Math.floor(width * 0.46));
-  return Math.min(Math.max(24, longest + 2), maxLeft);
+    .map((row) => ({
+      ...(row.number === undefined ? {} : { number: row.number }),
+      title: row.option.title,
+      current: row.option.footer === "current"
+    })), width);
 }
 
 function overlaySubtitle(kind: string): string {
@@ -465,6 +457,24 @@ function overlaySubtitle(kind: string): string {
   if (kind === "findings") return "review security findings";
   if (kind === "memory") return "inspect durable memory";
   return "";
+}
+
+function overlayHint(
+  frame: OverlayFrame,
+  matches: FuzzyMatch<unknown>[],
+  providers: Array<{ id: string; removable: boolean }>
+): string {
+  if (frame.kind !== "model") return "press enter to confirm or esc to go back";
+  const enabled = matches.filter((match) => !match.option.disabled);
+  const selected = enabled[frame.index]?.option.value as { kind?: string; providerID?: string } | undefined;
+  if (selected?.kind === "model_action") return "enter add provider · ctrl+a add · esc back";
+  const providerID = frame.providerID ?? (selected?.kind === "model_provider" ? selected.providerID : undefined);
+  if (!providerID) return "ctrl+a add provider · esc back";
+  const removable = providers.find((provider) => provider.id === providerID)?.removable ?? false;
+  const primary = frame.providerID ? "enter select" : "enter models";
+  return removable
+    ? `${primary} · ctrl+a add · ctrl+e edit · ctrl+t test · ctrl+d remove · esc back`
+    : `${primary} · ctrl+a add · ctrl+t test · esc back`;
 }
 
 function titleCase(value: string): string {

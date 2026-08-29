@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
 
 export type ConfigLocation = "global" | "project";
 
@@ -22,6 +22,12 @@ export type FaraiConfig = {
   proxy?: FaraiProxyConfig;
   context?: FaraiContextConfig;
   lsp?: FaraiLspConfig;
+  web?: FaraiWebConfig;
+};
+
+export type FaraiWebConfig = {
+  searchBackend?: "auto" | "duckduckgo" | "yahoo" | "bing" | "searxng";
+  searxngUrl?: string;
 };
 
 export type FaraiModelLimitConfig = {
@@ -60,10 +66,19 @@ export type AuthEntry = { apiKey?: string; token?: string };
 export type FaraiAuth = Record<string, AuthEntry>;
 
 function homeDir(): string {
-  return process.env.HOME ?? process.cwd();
+  const configured = process.env.HOME?.trim();
+  if (configured) return configured;
+  const systemHome = homedir().trim();
+  if (!systemHome) throw new Error("unable to resolve the user home directory.");
+  return systemHome;
 }
 
 export function localFaraiDir(): string {
+  const explicit = process.env.FARAI_HOME?.trim();
+  if (explicit) {
+    if (!isAbsolute(explicit)) throw new Error("farai_home must be an absolute path.");
+    return explicit;
+  }
   return join(homeDir(), ".local", "pajarori", "farai");
 }
 
@@ -135,6 +150,7 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
   const proxy = proxyConfig(raw.proxy);
   const context = contextConfig(raw.context);
   const lsp = lspConfig(raw.lsp);
+  const web = webConfig(raw.web);
   return {
     ...(typeof raw.model === "string" ? { model: raw.model } : {}),
     ...(typeof raw.base_url === "string" ? { baseUrl: raw.base_url } : typeof raw.baseUrl === "string" ? { baseUrl: raw.baseUrl } : {}),
@@ -152,8 +168,17 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
     ...(mcp ? { mcpServers: mcp } : {}),
     ...(proxy ? { proxy } : {}),
     ...(context ? { context } : {}),
-    ...(lsp ? { lsp } : {})
+    ...(lsp ? { lsp } : {}),
+    ...(web ? { web } : {})
   };
+}
+
+function webConfig(value: unknown): FaraiWebConfig | undefined {
+  if (!isRecord(value)) return undefined;
+  const backend = value.search_backend ?? value.searchBackend;
+  const searchBackend = backend === "auto" || backend === "duckduckgo" || backend === "yahoo" || backend === "bing" || backend === "searxng" ? backend : undefined;
+  const searxngUrl = typeof (value.searxng_url ?? value.searxngUrl) === "string" ? String(value.searxng_url ?? value.searxngUrl) : undefined;
+  return searchBackend || searxngUrl ? { ...(searchBackend ? { searchBackend } : {}), ...(searxngUrl ? { searxngUrl } : {}) } : undefined;
 }
 
 const LSP_SERVER_IDS: FaraiLspServerId[] = ["typescript", "pyright", "gopls", "rust-analyzer"];
@@ -255,7 +280,8 @@ export function mergeConfig(base: FaraiConfig, over: FaraiConfig): FaraiConfig {
           ]).filter(([, value]) => Object.keys(value as object).length))
         } : {})
       }
-    } : {})
+    } : {}),
+    ...(base.web || over.web ? { web: { ...base.web, ...over.web } } : {})
   };
 }
 
@@ -265,7 +291,7 @@ export function loadAuth(workspace?: string): FaraiAuth {
   return { ...global, ...project };
 }
 
-function readAuth(path: string): FaraiAuth {
+export function readAuth(path: string): FaraiAuth {
   try {
     if (!existsSync(path)) return {};
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
@@ -297,10 +323,18 @@ export function resolveApiKey(name: string, options: { apiKeyEnv?: string; inlin
 
 export function writeAuthEntry(name: string, entry: AuthEntry, location: ConfigLocation = "global", workspace?: string): string {
   const path = authPath(location, workspace);
-  mkdirSync(join(path, ".."), { recursive: true });
   const current = existsSync(path) ? readAuth(path) : {};
   current[name] = { ...current[name], ...entry };
-  writeFileSync(path, `${JSON.stringify(current, null, 2)}\n`);
+  writeAuth(path, current);
+  return path;
+}
+
+export function removeAuthEntry(name: string, location: ConfigLocation = "global", workspace?: string): string {
+  const path = authPath(location, workspace);
+  const current = existsSync(path) ? readAuth(path) : {};
+  if (!(name in current)) return path;
+  delete current[name];
+  writeAuth(path, current);
   return path;
 }
 
@@ -319,6 +353,10 @@ export function serializeConfigToml(config: FaraiConfig): string {
   if (config.apiKeyEnv) lines.push(`env_key = ${tomlString(config.apiKeyEnv)}`);
   if (config.proxy && Object.keys(config.proxy).length) emitTable(lines, ["proxy"], config.proxy as Record<string, unknown>);
   if (config.context?.maxInputTokens) emitTable(lines, ["context"], { max_input_tokens: config.context.maxInputTokens });
+  if (config.web && Object.keys(config.web).length) emitTable(lines, ["web"], {
+    ...(config.web.searchBackend ? { search_backend: config.web.searchBackend } : {}),
+    ...(config.web.searxngUrl ? { searxng_url: config.web.searxngUrl } : {})
+  });
   for (const [selection, limit] of Object.entries(config.modelLimits ?? {})) {
     emitTable(lines, ["model_limits", selection], {
       ...(limit.contextWindow ? { context_window: limit.contextWindow } : {}),
@@ -381,8 +419,7 @@ function tomlKey(key: string): string {
 
 export function writeConfig(config: FaraiConfig, location: ConfigLocation = "global", workspace?: string): string {
   const path = configPath(location, workspace);
-  mkdirSync(join(path, ".."), { recursive: true });
-  writeFileSync(path, serializeConfigToml(config));
+  atomicWriteFile(path, serializeConfigToml(config), 0o600);
   return path;
 }
 
@@ -394,8 +431,34 @@ export function updateConfig(mutator: (config: FaraiConfig) => FaraiConfig, loca
 export function ensureDefaultConfig(): string {
   const path = configPath("global");
   mkdirSync(localFaraiDir(), { recursive: true });
-  if (!existsSync(path)) writeFileSync(path, DEFAULT_CONFIG_TEMPLATE);
+  if (!existsSync(path)) atomicWriteFile(path, DEFAULT_CONFIG_TEMPLATE, 0o600);
   return path;
+}
+
+function writeAuth(path: string, auth: FaraiAuth): void {
+  atomicWriteFile(path, `${JSON.stringify(auth, null, 2)}\n`, 0o600);
+}
+
+function atomicWriteFile(path: string, content: string, mode: number): void {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true });
+  const temporary = join(directory, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(temporary, "wx", mode);
+    writeFileSync(descriptor, content, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, path);
+    chmodSync(path, mode);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { }
+    }
+    try { if (existsSync(temporary)) unlinkSync(temporary); } catch { }
+    throw error;
+  }
 }
 
 export function defaultMcpServers(): Record<string, Record<string, unknown>> {

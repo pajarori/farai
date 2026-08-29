@@ -11,6 +11,7 @@ export type ModelProviderCatalog = {
   id: string;
   name?: string;
   baseUrl: string;
+  protocol?: string;
   apiKeyEnv?: string;
   apiKey?: string;
   configuredModel?: string;
@@ -63,7 +64,9 @@ export async function buildModelCatalog(workspace: string, profiles = loadModelP
 
   const definitions = await providerDefinitions(workspace, profiles);
   const discoveries = await Promise.all(definitions.map((provider) =>
-    provider.source === "models.dev" ? Promise.resolve(undefined) : fetchAvailableModelIds(provider.baseUrl, provider.apiKey)
+    provider.source === "models.dev"
+      ? Promise.resolve(undefined)
+      : fetchAvailableModelIds(provider.baseUrl, provider.apiKey, provider.protocol ? { protocol: provider.protocol } : {})
   ));
   for (const [index, provider] of definitions.entries()) {
     const discovered = discoveries[index];
@@ -74,6 +77,7 @@ export async function buildModelCatalog(workspace: string, profiles = loadModelP
       id: provider.id,
       ...(provider.name ? { name: provider.name } : {}),
       baseUrl: provider.baseUrl,
+      ...(provider.protocol ? { protocol: provider.protocol } : {}),
       ...(provider.apiKeyEnv ? { apiKeyEnv: provider.apiKeyEnv } : {}),
       ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
       ...(provider.configuredModel ? { configuredModel: provider.configuredModel } : {}),
@@ -222,6 +226,7 @@ type ProviderDefinition = {
   id: string;
   name?: string;
   baseUrl: string;
+  protocol?: string;
   apiKeyEnv?: string;
   apiKey?: string;
   configuredModel?: string;
@@ -289,6 +294,7 @@ function profileToProvider(
   return {
     id: profile.name,
     baseUrl,
+    ...(profile.protocol ? { protocol: profile.protocol } : {}),
     ...(profile.apiKeyEnv ? { apiKeyEnv: profile.apiKeyEnv } : {}),
     ...(apiKey ? { apiKey } : {}),
     ...(profile.model ? { configuredModel: profile.model } : {}),

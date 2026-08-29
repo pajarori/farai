@@ -29,7 +29,7 @@ export function PlanRow(props: PlanRowProps): JSX.Element {
       <Show when={props.row.markdown && props.row.items.length === 0}>
         {(markdown) => (
           <box style={{ flexDirection: "column", paddingLeft: 2, marginTop: 1 }}>
-            <markdown content={String(markdown())} streaming={props.row.streaming} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.markdownText} />
+            <markdown content={String(markdown())} streaming={props.row.streaming} syntaxStyle={syntax()} fg={COLOR.markdownText} />
           </box>
         )}
       </Show>

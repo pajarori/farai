@@ -9,6 +9,7 @@ import type { LspInspectInput, LspInspectResult, LspPort, LspServerId } from "./
 
 export type LspSpawnInput = {
   sessionId: string;
+  workspace: string;
   server: LspServerId;
   command: string[];
   env: Record<string, string>;
@@ -19,6 +20,7 @@ export type LspProcessSpawner = (input: LspSpawnInput) => Promise<ChildProcessWi
 
 type ClientEntry = {
   sessionId: string;
+  workspace: string;
   definition: LspServerDefinition;
   projectRoot: string;
   client: LspClient | undefined;
@@ -33,24 +35,24 @@ export class LspManager {
   private readonly spawnProcess: LspProcessSpawner;
 
   constructor(
-    private readonly workspace: string,
+    private readonly defaultWorkspace: string,
     config?: FaraiLspConfig,
     options: { spawnProcess?: LspProcessSpawner } = {}
   ) {
     this.config = resolveLspConfig(config);
     this.spawnProcess = options.spawnProcess ?? (async (input) => {
       const backend = new KaliContainerBackend({
-        workspace: this.workspace,
+        workspace: input.workspace,
         containerName: containerNameForSession(input.sessionId)
       });
       return backend.spawnStdio(input.command, { cwd: input.projectRoot, env: input.env });
     });
   }
 
-  forSession(sessionId: string): LspPort {
+  forSession(sessionId: string, workspace = this.defaultWorkspace): LspPort {
     return {
-      diagnose: (input) => this.diagnose(sessionId, input.path, input.content),
-      inspect: (input) => this.inspect(sessionId, input)
+      diagnose: (input) => this.diagnose(sessionId, workspace, input.path, input.content),
+      inspect: (input) => this.inspect(sessionId, workspace, input)
     };
   }
 
@@ -67,11 +69,11 @@ export class LspManager {
     await Promise.allSettled(clients.map((client) => client.shutdown()));
   }
 
-  private async diagnose(sessionId: string, path: string, content: string) {
+  private async diagnose(sessionId: string, workspace: string, path: string, content: string) {
     if (!this.config.enabled) return undefined;
-    const resolved = resolveLspFile(this.workspace, path);
+    const resolved = resolveLspFile(workspace, path);
     if (!resolved || !this.config.servers[resolved.definition.id].enabled) return undefined;
-    const entry = this.entryFor(sessionId, resolved.definition, resolved.projectRoot);
+    const entry = this.entryFor(sessionId, workspace, resolved.definition, resolved.projectRoot);
     const deadline = Date.now() + this.config.waitTimeoutMs;
     try {
       const diagnostics = await this.runWithClient(entry, deadline, (client, timeoutMs) =>
@@ -90,13 +92,13 @@ export class LspManager {
     }
   }
 
-  private async inspect(sessionId: string, input: LspInspectInput): Promise<LspInspectResult> {
+  private async inspect(sessionId: string, workspace: string, input: LspInspectInput): Promise<LspInspectResult> {
     if (!this.config.enabled) throw new Error("LSP is disabled");
     if (!input.path) throw new Error(`${input.operation} requires path`);
-    const resolved = resolveLspFile(this.workspace, input.path);
+    const resolved = resolveLspFile(workspace, input.path);
     if (!resolved) throw new Error(`No built-in LSP server supports ${input.path}`);
     if (!this.config.servers[resolved.definition.id].enabled) throw new Error(`LSP server ${resolved.definition.id} is disabled`);
-    const entry = this.entryFor(sessionId, resolved.definition, resolved.projectRoot);
+    const entry = this.entryFor(sessionId, workspace, resolved.definition, resolved.projectRoot);
     const deadline = Date.now() + this.config.waitTimeoutMs;
     const raw = await this.runWithClient(entry, deadline, (client, timeoutMs) => client.inspect({
       ...input,
@@ -114,11 +116,11 @@ export class LspManager {
     };
   }
 
-  private entryFor(sessionId: string, definition: LspServerDefinition, projectRoot: string): ClientEntry {
-    const key = `${sessionId}\0${definition.id}\0${projectRoot}`;
+  private entryFor(sessionId: string, workspace: string, definition: LspServerDefinition, projectRoot: string): ClientEntry {
+    const key = `${sessionId}\0${workspace}\0${definition.id}\0${projectRoot}`;
     let entry = this.entries.get(key);
     if (!entry) {
-      entry = { sessionId, definition, projectRoot, client: undefined, initializing: undefined, restarts: 0 };
+      entry = { sessionId, workspace, definition, projectRoot, client: undefined, initializing: undefined, restarts: 0 };
       this.entries.set(key, entry);
     }
     return entry;
@@ -157,6 +159,7 @@ export class LspManager {
     const serverConfig = this.config.servers[entry.definition.id];
     entry.initializing = this.spawnProcess({
       sessionId: entry.sessionId,
+      workspace: entry.workspace,
       server: entry.definition.id,
       command: serverConfig.command,
       env: serverConfig.env,

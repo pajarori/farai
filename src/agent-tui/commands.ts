@@ -120,7 +120,7 @@ export function defineDefaultCommands(openers: CommandOpeners = {}): Command[] {
     messageNavigation("next", undefined),
     messageNavigation("prev", undefined),
     slashPrompt("context", "inspect context", "show stored versus projected context and token budget"),
-    slashLocal("model", "switch model", "choose model and effort", () => openers.model?.()),
+    slashLocal("model", "switch model", "choose a model or add a provider", () => openers.model?.(), "visible", ["models"]),
     slashLocal("mcp", "mcp servers", "show configured mcp server status", () => openers.mcp?.()),
     slashLocal("exit", "exit", "exit farai", ({ exit }) => { void exit(); }),
     slashLocal("quit", "quit", "exit farai", ({ exit }) => { void exit(); }, "hidden")
@@ -176,7 +176,8 @@ function slashLocal(
   title: string,
   desc: string,
   run: (ctx: CommandContext) => void | Promise<void>,
-  visibility: SlashVisibility = "visible"
+  visibility: SlashVisibility = "visible",
+  aliases: string[] = []
 ): Command {
   return {
     name: `slash.${name}`,
@@ -184,6 +185,7 @@ function slashLocal(
     desc,
     category: "slash",
     slashName: name,
+    ...(aliases.length ? { slashAliases: aliases } : {}),
     slashVisibility: visibility,
     slashBehavior: "local" satisfies SlashBehavior,
     run

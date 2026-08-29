@@ -1,4 +1,4 @@
-import { buildModelCatalog } from "./model-catalog";
+import { buildModelCatalog, type ModelCatalog } from "./model-catalog";
 import type { ModelProfile } from "./model-profiles";
 
 export type ModelChoiceInfo = {
@@ -15,7 +15,10 @@ export type ModelChoiceInfo = {
 };
 
 export async function listModelChoices(profiles: ModelProfile[], workspace = process.cwd()): Promise<ModelChoiceInfo[]> {
-  const catalog = await buildModelCatalog(workspace, profiles);
+  return modelChoicesFromCatalog(await buildModelCatalog(workspace, profiles));
+}
+
+export function modelChoicesFromCatalog(catalog: ModelCatalog): ModelChoiceInfo[] {
   return catalog.models.map((choice): ModelChoiceInfo => ({
       id: choice.id,
       model: choice.model,
@@ -27,5 +30,5 @@ export async function listModelChoices(profiles: ModelProfile[], workspace = pro
       ...(choice.free !== undefined ? { free: choice.free } : {}),
       ...(choice.contextWindow !== undefined ? { contextWindow: choice.contextWindow } : {}),
       ...(choice.maxOutputTokens !== undefined ? { maxOutputTokens: choice.maxOutputTokens } : {})
-    }));
+  }));
 }

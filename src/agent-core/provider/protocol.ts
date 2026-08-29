@@ -1,4 +1,4 @@
-import type { ModelPricingSnapshot, ToolSchemaSnapshot } from "../../types";
+import type { ModelPricingSnapshot, ToolAttachment, ToolSchemaSnapshot } from "../../types";
 
 export type ProviderStreamEvent =
   | { type: "text_delta"; delta: string }
@@ -10,10 +10,10 @@ export type ProviderStreamEvent =
   | { type: "error"; message: string; status?: number; retryAfterMs?: number };
 
 export type ProviderMessage =
-  | { role: "user"; text: string }
+  | { role: "user"; text: string; attachments?: ToolAttachment[] }
   | { role: "context"; text: string }
   | { role: "assistant"; text?: string; toolCalls?: Array<{ id: string; name: string; arguments: string }> }
-  | { role: "tool"; toolCallId: string; name: string; text: string };
+  | { role: "tool"; toolCallId: string; name: string; text: string; attachments?: ToolAttachment[] };
 
 export type ProviderToolDef = ToolSchemaSnapshot;
 
@@ -32,13 +32,27 @@ export type ChatRequest = {
 };
 
 export function estimateChatRequestInputTokens(request: ChatRequest): number {
+  let imageTokens = 0;
+  const messages = request.messages.map((entry) => {
+    if ((entry.role !== "user" && entry.role !== "tool") || !entry.attachments?.length) return entry;
+    imageTokens += entry.attachments.reduce((total, attachment) => total + (attachment.detail === "low" ? 85 : attachment.detail === "high" ? 765 : 512), 0);
+    return {
+      ...entry,
+      attachments: entry.attachments.map((attachment) => ({
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        ...(attachment.name ? { name: attachment.name } : {}),
+        ...(attachment.detail ? { detail: attachment.detail } : {})
+      }))
+    };
+  });
   const payload = {
     system: request.system,
-    messages: request.messages,
+    messages,
     tools: request.tools,
     toolChoice: request.toolChoice
   };
-  return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(payload), "utf8") / 3));
+  return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(payload), "utf8") / 3) + imageTokens);
 }
 
 export type ProviderProtocol = "openai-chat" | "anthropic-messages" | "heuristic";

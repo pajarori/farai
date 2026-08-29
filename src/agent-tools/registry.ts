@@ -16,6 +16,12 @@ import { lspTools } from "./lsp";
 import { browserTools } from "./browser";
 import { kaliTools } from "./kali";
 import { agentTools } from "./agent";
+import { webTools } from "./web";
+import { mediaTools } from "./media";
+import { interactionTools } from "./interaction";
+import { mcpResourceTools } from "./mcp-resources";
+import { worktreeTools } from "./worktree";
+import { proxyTools } from "./proxy";
 import { getMcpTool, listMcpTools } from "./mcp-manager";
 
 export const baseTools: ToolDefinition[] = [
@@ -34,6 +40,12 @@ export const baseTools: ToolDefinition[] = [
   ...browserTools,
   ...kaliTools,
   ...agentTools,
+  ...webTools,
+  ...mediaTools,
+  ...interactionTools,
+  ...mcpResourceTools,
+  ...worktreeTools,
+  ...proxyTools,
   ...deferredTools
 ];
 

@@ -78,6 +78,7 @@ export type SessionEventType =
   | "tool_input_delta"
   | "tool_input_end"
   | "loop_supervision"
+  | "control"
   | "stream_text";
 
 export type Campaign = {
@@ -434,6 +435,13 @@ export type QueuedUserInput = {
   createdAt: string;
 };
 
+export type PendingSteerInput = {
+  id: string;
+  sequence: number;
+  text: string;
+  createdAt: string;
+};
+
 export type OutputArtifact = {
   id: string;
   sessionId: string;
@@ -457,8 +465,46 @@ export type ToolResult = {
   status?: ToolStatus;
   outputArtifactId?: string;
   metadata?: Record<string, unknown>;
+  attachments?: ToolAttachment[];
   jobId?: string;
   processId?: string;
+};
+
+export type ToolAttachment = {
+  kind: "image";
+  mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  data: string;
+  name?: string;
+  detail?: "auto" | "low" | "high";
+};
+
+export type AgentLifecycleEntry = {
+  sessionId: string;
+  title?: string;
+  lane?: string;
+  mode?: "attached" | "detached";
+  jobId?: string;
+  status: JobStatus | "idle" | "archived";
+  running: boolean;
+  archived: boolean;
+  response?: string;
+  error?: string;
+  outputArtifactId?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentControl = {
+  list: () => AgentLifecycleEntry[];
+  wait: (sessionIds: string[] | undefined, timeoutMs: number, signal?: AbortSignal) => Promise<AgentLifecycleEntry[]>;
+  message: (sessionId: string, text: string) => "delivered" | "queued";
+  interrupt: (sessionId: string, reason?: string) => Promise<AgentLifecycleEntry>;
+  close: (sessionId: string) => Promise<AgentLifecycleEntry>;
+};
+
+export type WorktreeControl = {
+  enter: (input: { name: string; ref?: string; branch?: string }) => Promise<{ path: string; branch?: string; ref: string; created: boolean }>;
+  exit: (input?: { remove?: boolean }) => Promise<{ path: string; root: string; removed: boolean }>;
 };
 
 export type FileStateEntry = {
@@ -481,6 +527,7 @@ export interface FileStateStore {
 export type ToolContext = {
   session: Session;
   workspace: string;
+  rootWorkspace?: string;
   toolCallId?: string;
   now: () => string;
   signal?: AbortSignal;
@@ -494,6 +541,9 @@ export type ToolContext = {
   availableTools?: () => ToolDefinition[];
   invokeTool?: (name: string, args: unknown) => Promise<ToolResult>;
   delegateSession?: (input: { title: string; prompt: string; lane?: string; tools?: string[]; model?: string; mode?: "attached" | "detached"; sessionId?: string; linkToolCall?: boolean }) => Promise<{ sessionId: string; response?: string; jobId?: string }>;
+  agentControl?: AgentControl;
+  worktreeControl?: WorktreeControl;
+  requestUserInput?: (input: UserInputRequest, signal?: AbortSignal) => Promise<UserInputAnswer>;
   store: {
     saveEvidence: (evidence: Evidence, content?: string) => Evidence;
     listEvidence?: (sessionId: string) => Evidence[];
@@ -507,7 +557,7 @@ export type ToolContext = {
     saveFinding: (finding: Finding) => void;
     updateFinding?: (findingId: string, patch: Partial<Pick<Finding, "status" | "evidenceIds" | "impact" | "reproduction" | "remediation" | "duplicateOf">>) => Finding;
     loadFinding?: (findingId: string) => Finding;
-    updateSession?: (sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase">>) => Session;
+    updateSession?: (sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "workspace">>) => Session;
     upsertMemory: (item: Omit<MemoryItem, "id" | "createdAt" | "updatedAt">) => MemoryItem;
     createTodo: (item: Omit<TodoItem, "id" | "createdAt" | "updatedAt">) => TodoItem;
     updateTodo: (todoId: string, patch: Partial<Pick<TodoItem, "text" | "status" | "priority">>) => TodoItem;
@@ -529,6 +579,12 @@ export type ToolContext = {
     updateTestAttempt?: (attemptId: string, patch: Partial<Pick<TestAttempt, "status" | "observed" | "evidenceLevel" | "evidenceIds">>) => TestAttempt;
   };
 };
+
+export type UserInputChoice = { label: string; description?: string };
+export type UserInputQuestion = { id: string; header?: string; question: string; recommended?: string; choices?: UserInputChoice[] };
+export type UserInputRequest = { questions: UserInputQuestion[]; timeoutSeconds?: number };
+export type UserInputAnswer = { answers: Record<string, string>; resolution?: "user" | "timeout" };
+export type PendingUserInput = UserInputRequest & { id: string; sessionId: string; createdAt: string; expiresAt?: string };
 
 export type ToolDefinition<TArgs = unknown> = {
   name: string;

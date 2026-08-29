@@ -9,7 +9,7 @@ export function campaignIdFor(context: ToolContext, args: Record<string, unknown
 export function loadCampaign(context: ToolContext, campaignId: string): Campaign {
   if (!context.store.loadCampaign) throw new Error("campaign store is unavailable");
   const campaign = context.store.loadCampaign(campaignId);
-  if (campaign.workspace !== context.workspace) throw new Error("campaign belongs to another workspace");
+  if (campaign.workspace !== (context.rootWorkspace ?? context.workspace)) throw new Error("campaign belongs to another workspace");
   return campaign;
 }
 

@@ -19,6 +19,7 @@ type BrowserContextEntry = BrowserContextActivity & {
   tools: Set<string>;
   mutex: AsyncMutex;
   ready: Promise<void>;
+  lifecycle: AbortController;
 };
 
 type BrowserContextListener = (contexts: BrowserContextActivity[]) => void;
@@ -27,10 +28,12 @@ type BrowserMcpClient = Pick<McpStdioClient, "initialize" | "listTools" | "callT
 
 type BrowserContextManagerOptions = {
   resolveServer?: (workspace: string) => ExternalMcpServer | undefined;
-  ensureProxy?: (input: { workspace: string; session: Session; signal?: AbortSignal }, port: number) => Promise<void>;
+  ensureProxy?: (input: { workspace: string; configWorkspace?: string; session: Session; signal?: AbortSignal }, port: number) => Promise<void>;
   prepareServer?: typeof prepareMcpServerProcess;
   createClient?: (config: ExternalMcpServer) => BrowserMcpClient;
 };
+
+const MAX_BROWSER_CONTEXTS_PER_SESSION = 8;
 
 export class BrowserContextManager {
   private readonly contexts = new Map<string, Map<string, BrowserContextEntry>>();
@@ -59,13 +62,13 @@ export class BrowserContextManager {
     };
   }
 
-  async create(input: { workspace: string; session: Session; name: string; signal?: AbortSignal }): Promise<BrowserContextActivity> {
+  async create(input: { workspace: string; configWorkspace?: string; session: Session; name: string; signal?: AbortSignal }): Promise<BrowserContextActivity> {
     return await this.createNamed(input, false);
   }
 
   async close(input: { session: Session; browser: string; signal?: AbortSignal }): Promise<BrowserContextActivity> {
     const entry = this.resolve(input.session.id, input.browser);
-    await entry.ready;
+    await waitForSignal(entry.ready, input.signal);
     await entry.mutex.run(async () => {
       entry.status = "closing";
       this.emit(entry.sessionId);
@@ -82,6 +85,7 @@ export class BrowserContextManager {
 
   async runOperation<T>(input: {
     workspace: string;
+    configWorkspace?: string;
     session: Session;
     browser?: string;
     signal?: AbortSignal;
@@ -89,7 +93,7 @@ export class BrowserContextManager {
     const entry = input.browser
       ? this.resolve(input.session.id, input.browser)
       : await this.createNamed({ ...input, name: "default" }, true).then((activity) => this.resolve(input.session.id, activity.id));
-    await entry.ready;
+    await waitForSignal(entry.ready, input.signal);
     return await entry.mutex.run(async () => {
       entry.status = "busy";
       entry.lastUsedAt = nowIso();
@@ -113,6 +117,7 @@ export class BrowserContextManager {
   async stopSession(session: Session | string): Promise<void> {
     const sessionId = typeof session === "string" ? session : session.id;
     const entries = [...(this.contexts.get(sessionId)?.values() ?? [])];
+    for (const entry of entries) entry.lifecycle.abort(new Error("Browser session stopped"));
     await Promise.allSettled(entries.map(async (entry) => {
       await entry.ready.catch(() => {});
       await entry.mutex.run(async () => {
@@ -125,21 +130,25 @@ export class BrowserContextManager {
     this.emit(sessionId);
   }
 
-  private async createNamed(input: { workspace: string; session: Session; name: string; signal?: AbortSignal }, allowDefault: boolean): Promise<BrowserContextActivity> {
+  private async createNamed(input: { workspace: string; configWorkspace?: string; session: Session; name: string; signal?: AbortSignal }, allowDefault: boolean): Promise<BrowserContextActivity> {
     input.signal?.throwIfAborted();
     const name = normalizeBrowserName(input.name);
     if (!allowDefault && name.toLowerCase() === "default") throw new Error("Browser name 'default' is reserved for the implicit browser context");
     const sessionContexts = this.sessionContexts(input.session.id);
     const existing = [...sessionContexts.values()].find((entry) => entry.name.toLowerCase() === name.toLowerCase());
     if (existing) {
-      await existing.ready;
+      await waitForSignal(existing.ready, input.signal);
       return toActivity(existing);
+    }
+    if (sessionContexts.size >= MAX_BROWSER_CONTEXTS_PER_SESSION) {
+      throw new Error(`A session can have at most ${MAX_BROWSER_CONTEXTS_PER_SESSION} browser contexts; close one before creating another`);
     }
 
     const contextId = id();
+    const configWorkspace = input.configWorkspace ?? input.workspace;
     const base = this.options.resolveServer
-      ? this.options.resolveServer(input.workspace)
-      : configuredMcpServer(input.workspace, "playwright");
+      ? this.options.resolveServer(configWorkspace)
+      : configuredMcpServer(configWorkspace, "playwright");
     if (!base) throw new Error("No enabled Playwright MCP server is configured");
     const config = isolatedBrowserConfig(base, contextId);
     let resolveReady = () => {};
@@ -157,29 +166,35 @@ export class BrowserContextManager {
       sessionId: input.session.id,
       tools: new Set(),
       mutex: new AsyncMutex(),
-      ready
+      ready,
+      lifecycle: new AbortController()
     };
     sessionContexts.set(entry.id, entry);
     this.emit(entry.sessionId);
+    const signal = input.signal
+      ? AbortSignal.any([input.signal, entry.lifecycle.signal])
+      : entry.lifecycle.signal;
 
     try {
       const managedProxyPort = loopbackProxyPort(config);
       if (managedProxyPort !== undefined) {
         await (this.options.ensureProxy ?? ensureMcpProxyReady)({
           workspace: input.workspace,
+          configWorkspace,
           session: input.session,
-          ...(input.signal ? { signal: input.signal } : {})
+          signal
         }, managedProxyPort);
       }
       const prepared = await (this.options.prepareServer ?? prepareMcpServerProcess)({
         workspace: input.workspace,
+        configWorkspace,
         session: input.session,
-        ...(input.signal ? { signal: input.signal } : {})
+        signal
       }, config);
       const client = this.createClient(prepared);
       entry.client = client;
-      await client.initialize();
-      const descriptors = await client.listTools();
+      await waitForSignal(client.initialize(), signal);
+      const descriptors = await waitForSignal(client.listTools(), signal);
       entry.tools = new Set(descriptors.map((descriptor) => descriptor.name));
       for (const required of ["browser_navigate", "browser_snapshot"]) {
         if (!entry.tools.has(required)) throw new Error(`Playwright MCP server does not provide ${required}`);
@@ -334,4 +349,21 @@ class AsyncMutex {
     if (waiter.signal && waiter.abort) waiter.signal.removeEventListener("abort", waiter.abort);
     waiter.resolve();
   }
+}
+
+async function waitForSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return await promise;
+  if (signal.aborted) throw signal.reason ?? new Error("Browser context operation cancelled");
+  return await new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      cleanup();
+      reject(signal.reason ?? new Error("Browser context operation cancelled"));
+    };
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); }
+    );
+  });
 }

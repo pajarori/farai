@@ -10,6 +10,7 @@ type BrowserCapabilityCall = typeof callMcpCapabilityTool;
 export async function executeBrowserOperation(input: {
   operation: string;
   workspace: string;
+  configWorkspace?: string;
   session: Parameters<BrowserCapabilityCall>[0]["session"];
   args: Record<string, unknown>;
   signal?: AbortSignal;
@@ -21,6 +22,7 @@ export async function executeBrowserOperation(input: {
     const capabilityCall = call ?? callMcpCapabilityTool;
     const invoke = async (tool: string, args: Record<string, unknown>): Promise<unknown> => await capabilityCall({
       workspace: input.workspace,
+      ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
       ...(input.session ? { session: input.session } : {}),
       preferredServer: "playwright",
       tool,
@@ -31,6 +33,7 @@ export async function executeBrowserOperation(input: {
   }
   const routed = await browserContextManager.runOperation({
     workspace: input.workspace,
+    ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
     session: input.session,
     ...(browserSelector !== undefined ? { browser: browserSelector } : {}),
     ...(input.signal ? { signal: input.signal } : {})
@@ -125,6 +128,7 @@ function browserTool(input: {
         const result = await executeBrowserOperation({
           operation: input.operation,
           workspace: context.workspace,
+          ...(context.rootWorkspace ? { configWorkspace: context.rootWorkspace } : {}),
           session: context.session,
           args: browserArgs,
           ...(context.signal ? { signal: context.signal } : {})
@@ -202,7 +206,7 @@ const browserContextTool: ToolDefinition = {
         return {
           ok: true,
           summary: `listed ${contexts.length} browser context${contexts.length === 1 ? "" : "s"}`,
-          output: contexts.length > 0 ? JSON.stringify(contexts, null, 2) : "No browser contexts are active.",
+          output: contexts.length > 0 ? contexts.map((item) => formatBrowserContext(item)).join("\n") : "No browser contexts are active.",
           metadata: { browserContextAction: "list", browserContexts: contexts }
         };
       }
@@ -210,6 +214,7 @@ const browserContextTool: ToolDefinition = {
         if (typeof input.name !== "string") throw new Error("browser_context create requires name");
         const created = await browserContextManager.create({
           workspace: context.workspace,
+          ...(context.rootWorkspace ? { configWorkspace: context.rootWorkspace } : {}),
           session: context.session,
           name: input.name,
           ...(context.signal ? { signal: context.signal } : {})
@@ -217,7 +222,7 @@ const browserContextTool: ToolDefinition = {
         return {
           ok: true,
           summary: `browser ${created.name} ready`,
-          output: JSON.stringify(created, null, 2),
+          output: formatBrowserContext(created),
           metadata: { browserContextAction: "create", browserContext: created, browserContextId: created.id, browserContextName: created.name }
         };
       }

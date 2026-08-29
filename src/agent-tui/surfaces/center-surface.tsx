@@ -17,6 +17,7 @@ import { truncateLine } from "../renderers";
 import { syntax } from "../syntax";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
+import { fitTerminal } from "../terminal-text";
 
 type CenterSurfaceViewProps = {
   frame: CenterSurfaceFrame;
@@ -544,7 +545,7 @@ function formatWebSocketBytes(bytes: number): string {
 }
 
 function fitCell(value: string, width: number): string {
-  return truncateLine(value, Math.max(1, width - 1)).padEnd(width);
+  return fitTerminal(value, width);
 }
 
 function renderDirectionalMessages(messages: ProxyStreamMessage[], direction: ProxyStreamMessage["direction"]): string {

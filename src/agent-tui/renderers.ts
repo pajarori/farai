@@ -18,6 +18,7 @@ import {
   summarizeToolInput,
   TOOL_PAYLOAD_KEYS
 } from "./tool-presentation";
+import { terminalWidth, truncateTerminal } from "./terminal-text";
 
 export const MAX_PAYLOAD_BYTES = 200_000;
 const HEAD_BUDGET = 4_096;
@@ -25,9 +26,7 @@ const TAIL_BUDGET = 1_024;
 const TOOL_DETAIL_MAX_BYTES = 32 * 1024;
 
 export function truncateLine(line: string, maxWidth: number): string {
-  const safe = Math.max(maxWidth, 1);
-  if (line.length <= safe) return line;
-  return safe > 1 ? line.slice(0, safe - 1) + "…" : line.slice(0, safe);
+  return truncateTerminal(line, Math.max(maxWidth, 1));
 }
 
 export function truncatePayload(text: string, maxBytes = MAX_PAYLOAD_BYTES): string {
@@ -518,7 +517,7 @@ function errorRow(part: Part, width: number): Extract<TimelineRow, { kind: "erro
     kind: "error",
     title: truncateLine(title, Math.max(1, width - 2)),
     text: truncateLine(singleLine(raw), Math.max(1, width - 4)),
-    ...(raw.trim() !== singleLine(raw) || raw.length > Math.max(1, width - 4) ? { body: raw.trim() } : {}),
+    ...(raw.trim() !== singleLine(raw) || terminalWidth(singleLine(raw)) > Math.max(1, width - 4) ? { body: raw.trim() } : {}),
     id: part.id
   };
 }

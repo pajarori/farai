@@ -2,6 +2,7 @@ import type { BackgroundActivitySummary, SubagentActivity } from "../runtime-por
 import type { BrowserContextActivity } from "../../agent-tools/browser/context-manager";
 import type { ContextUsage } from "../store";
 import type { TimelineRow } from "../renderers";
+import { terminalWidth, truncateTerminal } from "../terminal-text";
 
 export type FooterMode =
   | "history_search"
@@ -156,7 +157,7 @@ export function fitFooterLine(left: string, sourceItems: FooterItem[], width: nu
   let items = sourceItems.filter((item) => item.text.trim());
   let right = joinItems(items);
 
-  if (right.length > width) {
+  if (terminalWidth(right) > width) {
     const backgrounds = items.filter((item) => item.kind === "background");
     if (backgrounds.length > 1) {
       const total = backgrounds.reduce((sum, item) => sum + (item.count ?? 0), 0);
@@ -167,22 +168,22 @@ export function fitFooterLine(left: string, sourceItems: FooterItem[], width: nu
     }
   }
 
-  if (right.length > width) {
+  if (terminalWidth(right) > width) {
     const messageIndex = items.findIndex((item) => item.kind === "message");
     if (messageIndex >= 0) {
       const withoutMessage = items.filter((_, index) => index !== messageIndex);
       const fixed = joinItems(withoutMessage);
-      const available = Math.max(0, width - fixed.length - (fixed ? 3 : 0));
+      const available = Math.max(0, width - terminalWidth(fixed) - (fixed ? 3 : 0));
       if (available > 0) items[messageIndex] = { ...items[messageIndex]!, text: truncateToWidth(items[messageIndex]!.text, available) };
       else items.splice(messageIndex, 1);
       right = joinItems(items);
     }
   }
 
-  if (right.length > width) right = truncateToWidth(right, width);
+  if (terminalWidth(right) > width) right = truncateToWidth(right, width);
   if (!right) return { left: truncateToWidth(left, width), right: "" };
 
-  const availableLeft = Math.max(0, width - right.length - 3);
+  const availableLeft = Math.max(0, width - terminalWidth(right) - 3);
   return {
     left: truncateToWidth(left, availableLeft),
     right
@@ -204,9 +205,7 @@ function joinItems(items: FooterItem[]): string {
 }
 
 function truncateToWidth(value: string, width: number): string {
-  if (width <= 0) return "";
-  if (value.length <= width) return value;
-  return width === 1 ? "…" : `${value.slice(0, width - 1)}…`;
+  return truncateTerminal(value, width);
 }
 
 function shortTokens(value: number): string {

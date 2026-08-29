@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../types";
 import { getTool } from "../agent-tools/registry";
 import { canonicalToolName } from "../tool-names";
+import { truncateTerminal } from "./terminal-text";
 
 export const TOOL_PAYLOAD_KEYS = new Set([
   "body",
@@ -37,7 +38,7 @@ const TOOL_NAMESPACES = [
   "callback", "campaign", "evidence", "exploit", "memory", "session",
   "report", "notes", "shell", "skill", "patch", "code", "todo",
   "tool", "port", "nmap", "http", "dir", "git", "mcp", "fs",
-  "browser"
+  "browser", "proxy", "web", "image", "notebook", "worktree", "agent"
 ] as const;
 
 const PAST_ACTIONS: Record<string, string> = {
@@ -90,6 +91,29 @@ const ACTIVE_ACTIONS: Record<string, string> = {
 
 const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
   agent_task: ["delegated", "delegating"],
+  agent_spawn: ["spawned agent", "spawning agent"],
+  agent_list: ["listed agents", "listing agents"],
+  agent_wait: ["waited for agents", "waiting for agents"],
+  agent_message: ["messaged agent", "messaging agent"],
+  agent_followup: ["continued agent", "continuing agent"],
+  agent_interrupt: ["interrupted agent", "interrupting agent"],
+  agent_close: ["closed agent", "closing agent"],
+  request_user_input: ["asked user", "asking user"],
+  web_search: ["searched the web", "searching the web"],
+  web_fetch: ["fetched page", "fetching page"],
+  image_view: ["viewed image", "viewing image"],
+  notebook_edit: ["edited notebook", "editing notebook"],
+  mcp_resource_list: ["listed MCP resources", "listing MCP resources"],
+  mcp_resource_read: ["read MCP resource", "reading MCP resource"],
+  proxy_scope: ["updated proxy scope", "updating proxy scope"],
+  proxy_flows: ["listed proxy flows", "listing proxy flows"],
+  proxy_flow_get: ["inspected proxy flow", "inspecting proxy flow"],
+  proxy_sitemap: ["built proxy sitemap", "building proxy sitemap"],
+  proxy_replay: ["replayed proxy flow", "replaying proxy flow"],
+  proxy_intercept: ["managed interception", "managing interception"],
+  proxy_clear: ["cleared proxy traffic", "clearing proxy traffic"],
+  worktree_enter: ["entered worktree", "entering worktree"],
+  worktree_exit: ["left worktree", "leaving worktree"],
   session_poll: ["checked background work", "checking background work"],
   session_stop: ["stopped background work", "stopping background work"],
   browser_context: ["managed", "managing"],
@@ -108,6 +132,29 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
 
 const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   agent_task: ["title", "lane", "prompt"],
+  agent_spawn: ["title", "lane", "prompt"],
+  agent_list: [],
+  agent_wait: ["sessionIds", "timeoutSeconds"],
+  agent_message: ["sessionId", "message"],
+  agent_followup: ["sessionId", "prompt"],
+  agent_interrupt: ["sessionId", "reason"],
+  agent_close: ["sessionId"],
+  request_user_input: ["questions"],
+  web_search: ["query"],
+  web_fetch: ["url"],
+  image_view: ["path"],
+  notebook_edit: ["path", "operation", "index"],
+  mcp_resource_list: ["server"],
+  mcp_resource_read: ["uri", "server"],
+  proxy_scope: ["allowedDomains"],
+  proxy_flows: ["kind", "filter", "method"],
+  proxy_flow_get: ["flowId"],
+  proxy_sitemap: ["host"],
+  proxy_replay: ["flowId", "method"],
+  proxy_intercept: ["action", "flowId"],
+  proxy_clear: ["confirm"],
+  worktree_enter: ["name", "ref", "branch"],
+  worktree_exit: ["remove"],
   browser_context: ["action", "name", "browser"],
   browser_click: ["element", "target"],
   browser_type: ["element", "target", "text"],
@@ -158,6 +205,8 @@ export function toolTitle(toolName: unknown, args: unknown, status: string, max 
   const inputObject = toolInputObject(args);
   const browserTitle = inputObject ? browserToolTitle(canonical, inputObject, active) : undefined;
   if (browserTitle) return truncateLine(browserTitle, max);
+  const nativeTitle = inputObject ? nativeToolTitle(canonical, inputObject, active) : undefined;
+  if (nativeTitle) return truncateLine(nativeTitle, max);
   if (canonical === "session_poll" || canonical === "session_stop") return truncateLine(toolActionLabel(canonical, active), max);
   if (status === "running_background") {
     const input = summarizeToolInput(toolName, args, max);
@@ -268,9 +317,7 @@ function formatInputValue(key: string, value: unknown): string {
 }
 
 function truncateLine(line: string, maxWidth: number): string {
-  const safe = Math.max(maxWidth, 1);
-  if (line.length <= safe) return line;
-  return safe > 1 ? line.slice(0, safe - 1) + "…" : line.slice(0, safe);
+  return truncateTerminal(line, Math.max(maxWidth, 1));
 }
 
 function unique(values: string[]): string[] {
@@ -318,6 +365,56 @@ function browserToolTitle(tool: string, input: Record<string, unknown>, active: 
     const part = typeof input.part === "string" && input.part ? `${input.part.replaceAll("-", " ")} for ` : "";
     return `${action} ${part}request ${index}`;
   }
+  return undefined;
+}
+
+function nativeToolTitle(tool: string, input: Record<string, unknown>, active: boolean): string | undefined {
+  if (tool === "notebook_edit") {
+    const operation = typeof input.operation === "string" ? input.operation : "edit";
+    const path = typeof input.path === "string" ? ` in ${input.path}` : "";
+    const index = typeof input.index === "number" ? ` ${input.index}` : "";
+    const verbs: Record<string, readonly [string, string]> = {
+      insert_cell: ["inserted notebook cell", "inserting notebook cell"],
+      replace_cell: ["replaced notebook cell", "replacing notebook cell"],
+      delete_cell: ["deleted notebook cell", "deleting notebook cell"]
+    };
+    const verb = verbs[operation]?.[active ? 1 : 0] ?? (active ? "editing notebook" : "edited notebook");
+    return `${verb}${index}${path}`;
+  }
+  if (tool === "mcp_resource_list") {
+    const server = typeof input.server === "string" && input.server.trim() ? ` from ${input.server.trim()}` : "";
+    return `${active ? "listing" : "listed"} MCP resources${server}`;
+  }
+  if (tool === "mcp_resource_read") {
+    const uri = typeof input.uri === "string" ? input.uri.trim() : "";
+    const server = typeof input.server === "string" && input.server.trim() ? ` from ${input.server.trim()}` : "";
+    return `${active ? "reading" : "read"} MCP resource${uri ? ` ${uri}` : ""}${server}`;
+  }
+  if (tool === "proxy_scope") {
+    return Array.isArray(input.allowedDomains)
+      ? active ? "updating proxy scope" : "updated proxy scope"
+      : active ? "checking proxy scope" : "checked proxy scope";
+  }
+  if (tool === "proxy_intercept") {
+    const action = typeof input.action === "string" ? input.action : "status";
+    const flow = typeof input.flowId === "string" && input.flowId.trim() ? ` ${input.flowId.trim()}` : "";
+    const labels: Record<string, readonly [string, string]> = {
+      status: ["checked interception", "checking interception"],
+      configure: ["configured interception", "configuring interception"],
+      list: ["listed intercepted requests", "listing intercepted requests"],
+      forward: [`forwarded intercepted request${flow}`, `forwarding intercepted request${flow}`],
+      edit: [`edited intercepted request${flow}`, `editing intercepted request${flow}`],
+      drop: [`dropped intercepted request${flow}`, `dropping intercepted request${flow}`]
+    };
+    return labels[action]?.[active ? 1 : 0];
+  }
+  if (tool === "proxy_clear") return active ? "clearing proxy traffic" : "cleared proxy traffic";
+  if (tool === "worktree_enter") {
+    const name = typeof input.name === "string" && input.name.trim() ? ` ${input.name.trim()}` : "";
+    return `${active ? "entering" : "entered"} worktree${name}`;
+  }
+  if (tool === "worktree_exit") return active ? "leaving worktree" : "left worktree";
+  if (tool === "agent_list") return active ? "listing agents" : "listed agents";
   return undefined;
 }
 

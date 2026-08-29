@@ -112,7 +112,9 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
       memory: snapshot.memory,
       runningTurnId: snapshot.runningTurnId,
       runningTurnStartedAt: snapshot.runningTurnStartedAt,
+      pendingSteers: snapshot.pendingSteers,
       queuedPrompts: snapshot.queuedPrompts,
+      pendingUserInput: snapshot.pendingUserInput,
       compactionBoundary: snapshot.compactionBoundary
     });
     ctx.onSnapshot?.(snapshot);
@@ -140,6 +142,7 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
     case "event.appended":
     case "store.changed":
     case "store.batch":
+    case "activity.changed":
     case "snapshot.changed":
     case "turn.started":
     case "turn.finished": {
@@ -193,15 +196,17 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
         ctx.actions.mcpStatusesSet(statuses);
       }
       if (isActivityStateEvent(evt.event)) await refreshActivityState(evt.sessionId);
+      if (isUserInputControlEvent(evt.event)) await refreshSnapshot(evt.sessionId);
       break;
     }
     case "store.changed":
       ctx.actions.storeChangeApplied(evt.change);
-      if (evt.change.kind === "job") await refreshActivityState(evt.sessionId);
       break;
     case "store.batch":
       ctx.actions.storeChangesApplied(evt.changes);
-      if (evt.changes.some((change) => change.kind === "job")) await refreshActivityState(evt.sessionId);
+      break;
+    case "activity.changed":
+      ctx.actions.snapshotPatched(evt.state);
       break;
     case "snapshot.changed":
       await refreshSnapshot(evt.sessionId);
@@ -209,6 +214,12 @@ export async function handleTuiEvent(evt: TuiEvent, ctx: EventContext): Promise<
     default:
       break;
   }
+}
+
+function isUserInputControlEvent(event: SessionEvent): boolean {
+  if (event.type !== "control" || !event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) return false;
+  const kind = (event.payload as { kind?: unknown }).kind;
+  return kind === "user_input_requested" || kind === "user_input_answered" || kind === "user_input_cancelled";
 }
 
 function isActivityStateEvent(event: SessionEvent): boolean {

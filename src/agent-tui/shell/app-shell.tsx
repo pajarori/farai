@@ -30,13 +30,7 @@ export function AppShell(): JSX.Element {
     findings: () => tui.actions.overlayOpen("findings"),
     memory: () => tui.actions.overlayOpen("memory"),
     agents: () => { void tui.openAgentsOverlay(); },
-    model: () => {
-      tui.actions.overlayOpen("model");
-      tui.setStatusDetail("loading models");
-      void tui.refreshAvailableModels().finally(() => {
-        if (tui.store.ui.statusDetail === "loading models") tui.setStatusDetail(undefined);
-      });
-    },
+    model: () => { void tui.openModelsOverlay(); },
     report: () => tui.actions.centerSurfacePush({ kind: "report" }),
     compact: () => { void tui.compact(); },
     todos: () => tui.actions.centerSurfacePush({

@@ -8,6 +8,7 @@ import { syntax } from "../../syntax";
 import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
 import { createPrimaryClickGesture } from "../../input/mouse";
+import { terminalWidth } from "../../terminal-text";
 
 type ArtifactRowProps = {
   row: Extract<TimelineRow, { kind: "artifact" }>;
@@ -43,7 +44,7 @@ export function ArtifactRow(props: ArtifactRowProps): JSX.Element {
           <ExpandedPanel id={`${props.row.id}:expanded`}>
             <Show
               when={props.row.bodyFormat === "text"}
-              fallback={<markdown content={body()} streaming={false} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.text} />}
+              fallback={<markdown content={body()} streaming={false} syntaxStyle={syntax()} fg={COLOR.text} />}
             >
               <code content={body()} filetype="text" syntaxStyle={syntax()} fg={COLOR.text} />
             </Show>
@@ -57,12 +58,13 @@ export function ArtifactRow(props: ArtifactRowProps): JSX.Element {
 export function artifactLineWidths(totalWidth: number, title: string, detail: string): { title: number; detail: number } {
   const available = Math.max(1, Math.floor(totalWidth) - 4);
   if (!detail) return { title: available, detail: 0 };
-  const decoratedDetailLength = detail.length + 3;
-  if (title.length + decoratedDetailLength <= available) {
-    return { title: title.length, detail: decoratedDetailLength };
+  const titleLength = terminalWidth(title);
+  const decoratedDetailLength = terminalWidth(detail) + 3;
+  if (titleLength + decoratedDetailLength <= available) {
+    return { title: titleLength, detail: decoratedDetailLength };
   }
   const reservedDetail = Math.min(decoratedDetailLength, Math.max(0, Math.floor(available * 0.4)));
-  const titleWidth = Math.max(1, Math.min(title.length, available - reservedDetail));
+  const titleWidth = Math.max(1, Math.min(titleLength, available - reservedDetail));
   return { title: titleWidth, detail: Math.max(0, available - titleWidth) };
 }
 
@@ -110,7 +112,7 @@ export function FindingRow(props: FindingRowProps): JSX.Element {
       <Show when={expanded() && props.row.body}>
         {(body) => (
           <ExpandedPanel>
-            <markdown content={body()} streaming={false} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.text} />
+            <markdown content={body()} streaming={false} syntaxStyle={syntax()} fg={COLOR.text} />
           </ExpandedPanel>
         )}
       </Show>

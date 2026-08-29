@@ -9,6 +9,7 @@ import type { AgentThreadSummary } from "./runtime-port";
 
 export type ModelChoice =
   | { kind: "model_provider"; providerID: string }
+  | { kind: "model_action"; action: "add" }
   | { kind: "model"; model: string; providerID?: string; contextWindow?: number; maxOutputTokens?: number };
 export type OverlayOptionValue = Command | string | ModelChoice | AgentThreadSummary;
 
@@ -85,7 +86,17 @@ export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreVal
         return [{ id: "model-loading", title: "loading models…", description: "fetching providers and model metadata", category: "model", disabled: true, value: "" }];
       }
       const providers = [...new Set(tui.store.ui.availableModels.map(modelProviderID))];
-      if (!frame.providerID && providers.length > 1) return modelProviderOptions(tui.store.ui.availableModels, session?.model);
+      if (!frame.providerID) return [
+        ...modelProviderOptions(tui.store.ui.availableModels, session?.model),
+        {
+          id: "model-action-add-provider",
+          title: "+ add provider",
+          description: "connect an openai-compatible, anthropic, local, or routed endpoint",
+          numbered: false,
+          separatorBefore: true,
+          value: { kind: "model_action", action: "add" }
+        }
+      ];
       const providerID = frame.providerID ?? providers[0];
       return modelOptions(tui.store.ui.availableModels, providerID, session?.model);
     }
@@ -185,7 +196,6 @@ function modelProviderOptions(choices: ModelChoiceInfo[], sessionModel: string |
         readyCount ? `${readyCount} ready` : undefined,
         first?.baseUrl
       ].filter(Boolean).join(" · "),
-      category: "provider",
       footer: current ? "current" : "",
       value: { kind: "model_provider" as const, providerID }
     };

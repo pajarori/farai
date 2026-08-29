@@ -27,7 +27,7 @@ export function ReasoningRow(props: ReasoningRowProps): JSX.Element {
       </box>
       <Show when={expanded() && props.row.body.trim()}>
         <ExpandedPanel>
-          <markdown content={props.row.body} streaming={props.row.streaming} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.dim} />
+          <markdown content={props.row.body} streaming={props.row.streaming} syntaxStyle={syntax()} fg={COLOR.dim} />
         </ExpandedPanel>
       </Show>
     </box>

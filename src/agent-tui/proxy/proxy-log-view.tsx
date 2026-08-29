@@ -10,6 +10,7 @@ import { proxyFlowsForFilter, type ProxyViewFilter } from "../store";
 import { ProxyFlowSplitView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
+import { fitTerminal, truncateTerminal } from "../terminal-text";
 
 export function proxyListHeightFromDrag(startHeight: number, startY: number, pointerY: number): number {
   return startHeight + pointerY - startY;
@@ -300,11 +301,11 @@ function shortTime(value: string): string {
 }
 
 function pad(value: string, width: number): string {
-  return value.length >= width ? value.slice(0, width - 1).padEnd(width) : value.padEnd(width);
+  return fitTerminal(value, width);
 }
 
 function truncate(value: string, width: number): string {
-  return value.length <= width ? value : `${value.slice(0, width - 1)}…`;
+  return truncateTerminal(value, width);
 }
 
 function methodColor(method: string): string {

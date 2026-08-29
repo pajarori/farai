@@ -3,6 +3,7 @@ research/
 .git.old/
 test/
 .farai/*
+.local/
 artifacts/
 node_modules/
 dist/

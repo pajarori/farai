@@ -8,8 +8,9 @@ const ANTHROPIC_VERSION = "2023-06-01";
 
 type AnthropicContentBlock =
   | { type: "text"; text: string }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string };
+  | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[] };
 
 type AnthropicMessage = { role: "user" | "assistant"; content: AnthropicContentBlock[] };
 
@@ -181,10 +182,11 @@ function toAnthropicMessages(messages: ProviderMessage[]): AnthropicMessage[] {
   const out: AnthropicMessage[] = [];
   for (const entry of messages) {
     if (entry.role === "user" || entry.role === "context") {
-      const block: AnthropicContentBlock = { type: "text", text: entry.text };
+      const blocks: AnthropicContentBlock[] = [{ type: "text", text: entry.text }];
+      if (entry.role === "user") blocks.push(...anthropicImages(entry.attachments));
       const last = out[out.length - 1];
-      if (last?.role === "user") last.content.push(block);
-      else out.push({ role: "user", content: [block] });
+      if (last?.role === "user") last.content.push(...blocks);
+      else out.push({ role: "user", content: blocks });
       continue;
     }
     if (entry.role === "assistant") {
@@ -198,7 +200,10 @@ function toAnthropicMessages(messages: ProviderMessage[]): AnthropicMessage[] {
       out.push({ role: "assistant", content });
       continue;
     }
-    const block: AnthropicContentBlock = { type: "tool_result", tool_use_id: entry.toolCallId, content: entry.text };
+    const toolContent: string | AnthropicContentBlock[] = entry.attachments?.length
+      ? [{ type: "text", text: entry.text }, ...anthropicImages(entry.attachments)]
+      : entry.text;
+    const block: AnthropicContentBlock = { type: "tool_result", tool_use_id: entry.toolCallId, content: toolContent };
     const last = out[out.length - 1];
     if (last && last.role === "user" && last.content.every((item) => item.type === "tool_result")) {
       last.content.push(block);
@@ -207,6 +212,13 @@ function toAnthropicMessages(messages: ProviderMessage[]): AnthropicMessage[] {
     }
   }
   return out;
+}
+
+function anthropicImages(attachments: import("../../types").ToolAttachment[] | undefined): AnthropicContentBlock[] {
+  return (attachments ?? []).map((item) => ({
+    type: "image",
+    source: { type: "base64", media_type: item.mediaType, data: item.data }
+  }));
 }
 
 type AnthropicUsage = {

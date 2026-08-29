@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import type { AgentPromptResult, BackgroundJob, Message, MessageWithParts, Note, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn } from "../types";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
+import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, Message, MessageWithParts, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/registry";
 import { formatMcpInventory, listMcpServerStatuses, stopMcpToolsForSession } from "../agent-tools/mcp-manager";
@@ -34,6 +34,8 @@ import { buildSubagentTaskPrompt, hasSharedWorkspaceEdits, resolveSubagentToolSc
 import { SubagentGate } from "./subagents/gate";
 import { SessionActor } from "./session-actor";
 import { SessionMailbox } from "./session-mailbox";
+import { mailboxInputText, queuedInputAction, SessionInputQueue, type QueuedInputAction } from "./session-input-queue";
+import { SessionMailboxDispatcher } from "./session-mailbox-dispatcher";
 import { JobManager } from "./jobs/manager";
 import { ContextEngine, formatContextManifest, mergeProviderToolCatalog, type ContextManifest, type ContextProjection, type ContextRequest } from "./context-engine";
 import { FileStateCache } from "./file-state";
@@ -49,11 +51,28 @@ import { KnowledgeStore } from "../agent-knowledge/store";
 import { knowledgeDbPath } from "../agent-knowledge/paths";
 import { calculateUsageCost, estimateMaximumRequestCost, type UsageTokenCounts } from "./model-pricing";
 import { recordSessionLocation } from "../session-catalog";
+import { SessionUserInputCoordinator } from "./session-user-input";
+import {
+  abortablePromise,
+  leasedToolCapability,
+  ToolDeadlineError,
+  ToolExecutionDeadline,
+  ToolExecutionGate,
+  ToolExecutionLease,
+  ToolGateLease,
+  ToolScopeQuarantinedError,
+  toolConcurrencyKey,
+  toolForExecution,
+  toolOperationTimeout,
+  toolSchedulingDefinition
+} from "./tool-execution-control";
+import { validateToolArgs } from "./tool-input-validation";
+import { normalizeToolResult } from "./tool-result-normalization";
+import { ToolCallJournal, type ToolErrorState } from "./tool-call-journal";
 
 export { activeBackgroundJobs } from "./loop/background";
 export type { ActiveBackgroundJob } from "./loop/background";
 
-const TOOL_OUTPUT_MAX_BYTES = 50 * 1024;
 const REASONING_MAX_BYTES = 8 * 1024;
 const STREAM_RENDER_INTERVAL_MS = 100;
 const STREAM_PERSIST_INTERVAL_MS = 2_000;
@@ -61,8 +80,6 @@ const MAX_RECOVERABLE_AUTO_CONTINUE = 3;
 const LIVE_OUTPUT_MAX_BYTES = 2 * 1024;
 const LIVE_OUTPUT_FLUSH_INTERVAL_MS = 150;
 const LIVE_OUTPUT_INITIAL_DELAY_MS = 320;
-const TOOL_OUTPUT_HEAD_BYTES = 24 * 1024;
-const TOOL_OUTPUT_TAIL_BYTES = 24 * 1024;
 const TOOL_HUMAN_RESULT_MAX_BYTES = 24 * 1024;
 const BACKGROUND_COMPLETION_MAX_STEPS = 1;
 const LOOP_SUPERVISION_NO_PROGRESS_STEPS = 12;
@@ -81,7 +98,6 @@ const TIME_LIMIT_WRAPUP_DIRECTIVE = "You have reached the interactive wall-clock
 type ToolPlannerAction = Extract<PlannerAction, { kind: "tool" }>;
 type ToolActionOutcome = { shouldContinue: boolean; resetAutoContinue?: boolean; cancelled?: boolean };
 type StepControl = { cancelled?: boolean; timedOut?: boolean; empty?: boolean; shouldContinue: boolean };
-type QueuedInputAction = QueuedUserInput["action"];
 type ProviderSlot = { contextMessage: Message; assistantMessage: Message };
 type ProviderCatalogPayload = { key: string; tools: ProviderToolDef[] };
 type StreamingPartsState = {
@@ -92,13 +108,6 @@ type StreamingPartsState = {
   reasoningPartId?: string;
   reasoningAccum?: string;
   lastReasoningRender?: number;
-};
-type ToolErrorState = {
-  interrupted?: boolean;
-  cancelled?: boolean;
-  timedOut?: boolean;
-  quarantined?: boolean;
-  reason?: string;
 };
 type RenderedToolResult = { result: ToolResult; humanResult: string; modelResult: string };
 
@@ -116,22 +125,9 @@ class ModelCallDeadlineError extends Error {
   }
 }
 
-class ToolDeadlineError extends Error {
-  constructor(readonly tool: string, readonly timeoutMs: number) {
-    super(`Tool ${tool} timed out after ${timeoutMs}ms`);
-    this.name = "ToolDeadlineError";
-  }
-}
-
-class ToolScopeQuarantinedError extends Error {
-  constructor(readonly scope: string, readonly cause: Error) {
-    super(`Tool concurrency scope ${scope} is quarantined after: ${cause.message}`);
-    this.name = "ToolScopeQuarantinedError";
-  }
-}
-
-export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "toolScope">>;
+export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "toolScope" | "workspace">>;
 export type ShutdownOptions = { gracePeriodMs?: number };
+type RuntimeContainerBackend = Pick<KaliContainerBackend, "status" | "startPersistent" | "stopPersistent">;
 export type AgentRuntimeOptions = {
   maxSteps?: number;
   maxTurnSeconds?: number;
@@ -146,6 +142,7 @@ export type AgentRuntimeOptions = {
   enableProjectInstructions?: boolean;
   executionBackend?: ToolExecutionBackend;
   registerSessionCatalog?: boolean;
+  containerBackendFactory?: (workspace: string, sessionId: string, timeoutMs?: number) => RuntimeContainerBackend;
 };
 type PromptOptions = { signal?: AbortSignal };
 
@@ -159,17 +156,18 @@ export class AgentRuntime {
   private readonly subagentControllers = new Map<string, AbortController>();
   private readonly shutdownController = new AbortController();
   private readonly actors = new Map<string, SessionActor>();
-  private readonly wakePromises = new Map<string, Promise<void>>();
-  private readonly queuedInputWakePromises = new Map<string, Promise<void>>();
-  private readonly scheduledPromptMailboxIds = new Set<string>();
+  private readonly steeringWaiters = new Map<string, Set<() => void>>();
   private readonly modelCallsByTurn = new Map<string, number>();
   private readonly providerCatalogs = new Map<string, ProviderToolDef[]>();
   private readonly streamingParts = new Map<string, StreamingPartsState>();
   private readonly toolInputPreviews = new Map<string, { id?: string; name: string; arguments: string }>();
   private readonly toolExecutionGate = new ToolExecutionGate();
+  private readonly workspaceBindingGate = new ToolExecutionGate();
   private readonly subagentGate: SubagentGate;
   private readonly subagentWorkspaceMutationGate = new SubagentGate(1);
   private readonly pendingSteeringContext = new Map<string, string[]>();
+  private readonly userInputs: SessionUserInputCoordinator;
+  private readonly toolCalls: ToolCallJournal;
   private hooks: HookDefinition[] | undefined;
   private readonly firedSessionStart = new Set<string>();
   private readonly pendingHookContext = new Map<string, string[]>();
@@ -177,6 +175,8 @@ export class AgentRuntime {
   private readonly compactionControllers = new Map<string, AbortController>();
   private readonly runtimeId = id();
   private readonly mailbox: SessionMailbox;
+  private readonly inputQueue: SessionInputQueue;
+  private readonly mailboxDispatcher: SessionMailboxDispatcher;
   private readonly jobs: JobManager;
   private readonly fileState = new FileStateCache();
   private readonly lsp: LspManager;
@@ -190,6 +190,7 @@ export class AgentRuntime {
   private readonly hooksEnabled: boolean;
   private readonly mcpEnabled: boolean;
   private readonly executionBackend: ToolExecutionBackend | undefined;
+  private readonly containerBackendFactory: (workspace: string, sessionId: string, timeoutMs?: number) => RuntimeContainerBackend;
   private readonly registerSessionCatalog: boolean;
   private knowledgeStore: KnowledgeStore | null | undefined;
   private recovered = false;
@@ -203,10 +204,16 @@ export class AgentRuntime {
     this.inheritConfig = options.inheritConfig !== false;
     const config: FaraiConfig = this.inheritConfig ? loadConfig(workspace) : {};
     this.store = new SqliteStore(join(workspace, ".farai"));
+    this.toolCalls = new ToolCallJournal(this.store, (sessionId, type, payload) => this.event(sessionId, type, payload));
     this.knowledgeEnabled = options.enableKnowledge !== false;
     this.hooksEnabled = options.enableHooks !== false;
     this.mcpEnabled = options.enableMcp !== false;
     this.executionBackend = options.executionBackend;
+    this.containerBackendFactory = options.containerBackendFactory ?? ((containerWorkspace, sessionId, timeoutMs) => new KaliContainerBackend({
+      workspace: containerWorkspace,
+      containerName: containerNameForSession(sessionId),
+      ...(timeoutMs ? { timeoutMs } : {})
+    }));
     this.registerSessionCatalog = options.registerSessionCatalog !== false;
     this.contextEngine = new ContextEngine(workspace, this.store, this.fileState, () => this.knowledge(), options.enableSkills !== false, options.enableProjectInstructions !== false);
     this.lsp = new LspManager(workspace, config.lsp);
@@ -216,6 +223,30 @@ export class AgentRuntime {
     this.maxCostUsd = positiveFinite(options.maxCostUsd ?? config.maxCostUsd);
     this.maxInputTokens = positiveFinite(options.maxInputTokens);
     this.mailbox = new SessionMailbox(this.store, this.runtimeId);
+    this.inputQueue = new SessionInputQueue(this.mailbox, (sessionId, type, payload) => this.event(sessionId, type, payload));
+    this.userInputs = new SessionUserInputCoordinator({
+      emitControl: (sessionId, payload) => this.event(sessionId, "control", payload),
+      queueRecoveredAnswer: (sessionId, text, requestId) => this.queueRecoveredUserInput(sessionId, text, requestId)
+    });
+    this.mailboxDispatcher = new SessionMailboxDispatcher(this.mailbox, this.inputQueue, {
+      runExclusive: (sessionId, work) => this.actor(sessionId).run(work),
+      runPrompt: async (sessionId, text, promptOptions) => {
+        await this.runPrompt(this.store.loadSession(sessionId), text, promptOptions);
+      },
+      clearSession: async (sessionId) => {
+        this.cancelCompaction(sessionId);
+        await this.cancelSessionJobs(sessionId);
+        this.clearSessionState(sessionId);
+      },
+      emitConsumed: (sessionId, item, inputMode) => this.event(sessionId, "mailbox_consumed", {
+        mailboxId: item.id,
+        sequence: item.sequence,
+        ...(inputMode ? { inputMode } : {})
+      }),
+      isShuttingDown: () => this.shuttingDown,
+      isRecovered: () => this.recovered,
+      isStoreOpen: () => this.store.isOpen()
+    });
     this.jobs = new JobManager(this.runtimeId, this.store, sessionManager, (item, job) => {
       void this.recordJobCompletion(item, job);
     });
@@ -240,10 +271,14 @@ export class AgentRuntime {
       for (const controller of controllers) controller.abort("runtime shutdown");
     }
     this.turnControllers.clear();
+    for (const waiters of this.steeringWaiters.values()) for (const wake of waiters) wake();
+    this.steeringWaiters.clear();
     for (const controller of this.activeToolControllers) controller.abort("runtime shutdown");
+    this.userInputs.rejectAll(new Error("runtime shutdown"));
     for (const controller of this.subagentControllers.values()) controller.abort("runtime shutdown");
     const drain = Promise.allSettled([
       ...[...this.actors.values()].map((actor) => actor.idle()),
+      this.workspaceBindingGate.idle(),
       this.toolExecutionGate.idle(),
       this.subagentGate.idle(),
       this.subagentWorkspaceMutationGate.idle(),
@@ -297,6 +332,26 @@ export class AgentRuntime {
     if (this.shuttingDown) throw new Error("Farai runtime is shutting down");
   }
 
+  pendingUserInput(sessionId: string): PendingUserInput | undefined {
+    return this.userInputs.get(sessionId);
+  }
+
+  answerUserInput(sessionId: string, raw: string): UserInputAnswer {
+    return this.userInputs.answer(sessionId, raw);
+  }
+
+  answerUserInputStructured(sessionId: string, answer: UserInputAnswer): UserInputAnswer {
+    return this.userInputs.answerStructured(sessionId, answer);
+  }
+
+  cancelUserInput(sessionId: string): PendingUserInput {
+    return this.userInputs.cancel(sessionId);
+  }
+
+  private requestUserInput(session: Session, input: UserInputRequest, signal?: AbortSignal): Promise<UserInputAnswer> {
+    return this.userInputs.request(session.id, input, signal);
+  }
+
   private startRuntimeLease(): void {
     this.store.renewRuntimeLease(this.runtimeId, RUNTIME_LEASE_MS);
     if (this.runtimeHeartbeat) return;
@@ -344,6 +399,9 @@ export class AgentRuntime {
         for (const turn of turns) {
           if (newlyInterruptedTurns.has(turn.id)) this.store.updateTurn(turn.id, { status: "failed", stopReason: "planner_error", errorSummary: "Interrupted by runtime restart." });
         }
+        if (!session.archivedAt) {
+          this.userInputs.recover(session.id, this.store.listEvents(session.id, 10_000));
+        }
       }
       for (const job of this.store.listRecoverableJobs()) {
         if (job.runtimeId === this.runtimeId || activeRuntimeIds.has(job.runtimeId)) continue;
@@ -361,7 +419,7 @@ export class AgentRuntime {
       this.recovered = true;
       for (const sessionId of this.store.listSessionsWithQueuedMailbox()) {
         const session = this.store.loadSession(sessionId);
-        if (!session.archivedAt) void this.wakePendingMailbox(sessionId);
+        if (!session.archivedAt) void this.mailboxDispatcher.wakePending(sessionId);
       }
     })();
     try {
@@ -372,27 +430,6 @@ export class AgentRuntime {
     } finally {
       this.recoveryPromise = undefined;
     }
-  }
-
-  private settleToolError(toolCall: ToolCallRecord, error: string, state: ToolErrorState = {}, emitEvent = true): ToolCallRecord {
-    const payload = {
-      toolCallId: toolCall.id,
-      tool: toolCall.tool,
-      error,
-      interrupted: state.interrupted ?? false,
-      cancelled: state.cancelled ?? false,
-      timedOut: state.timedOut ?? false,
-      ...(state.quarantined !== undefined ? { quarantined: state.quarantined } : {}),
-      ...(state.reason ? { reason: state.reason } : {})
-    };
-    const settled = this.store.settleToolCall(
-      { ...toolCall, status: "error" },
-      { type: "error", payload }
-    ).toolCall;
-    if (emitEvent) {
-      try { this.event(toolCall.sessionId, "error", payload); } catch {  }
-    }
-    return settled;
   }
 
   private emitRecoverableToolError(toolCall: ToolCallRecord, stage: string, error: unknown): void {
@@ -441,14 +478,11 @@ export class AgentRuntime {
   }
 
   private recordRecoveredToolError(toolCall: ToolCallRecord, error: string, state: ToolErrorState = { interrupted: true, reason: "runtime_restart" }): ToolCallRecord {
-    return this.settleToolError(toolCall, error, state, false);
+    return this.toolCalls.settleError(toolCall, error, state, false);
   }
 
   private recordRecoveredToolSuccess(toolCall: ToolCallRecord, summary: string): ToolCallRecord {
-    return this.store.settleToolCall(
-      { ...toolCall, status: "done" },
-      { type: "tool_result", payload: { toolCallId: toolCall.id, tool: toolCall.tool, result: `status: done\nsummary: ${summary}` } }
-    ).toolCall;
+    return this.toolCalls.settleRecoveredSuccess(toolCall, summary);
   }
 
   private reconcileRecoveredBackgroundTools(sessionId: string, activeRuntimeIds: ReadonlySet<string>): void {
@@ -523,14 +557,21 @@ export class AgentRuntime {
       tool,
       status: job.status
     });
-    if (item.triggerPolicy === "wake" && this.recovered && !this.shuttingDown) void this.wakeCompletionSession(item.sessionId, "wake");
+    if (item.triggerPolicy === "wake" && this.recovered && !this.shuttingDown) void this.mailboxDispatcher.wakeCompletion(item.sessionId, "wake");
   }
 
   private get hookRunner(): HookRunner {
     return {
       mcp: async (hook, payload) => {
         const session = this.store.loadSession(payload.sessionId);
-        const result = await callMcpServerTool({ workspace: this.workspace, session, server: hook.mcp!.server, tool: hook.mcp!.tool, args: payload });
+        const result = await callMcpServerTool({
+          workspace: session.workspace,
+          configWorkspace: this.workspace,
+          session,
+          server: hook.mcp!.server,
+          tool: hook.mcp!.tool,
+          args: payload
+        });
         return typeof result === "string" ? result : JSON.stringify(result);
       }
     };
@@ -596,44 +637,80 @@ export class AgentRuntime {
     if (!trimmed || this.shuttingDown) return false;
     const running = this.store.listTurns(sessionId, 5).some((turn) => turn.status === "running");
     if (!running) return false;
-    this.mailbox.enqueue({
-      sessionId,
-      kind: "user",
-      payload: { text: trimmed, inputMode: "steer" },
-      triggerPolicy: "interrupt",
-      dedupeKey: `steer:${id()}`
-    });
+    if (!this.inputQueue.enqueueSteer(sessionId, trimmed)) return false;
+    this.notifySteeringWaiters(sessionId);
     return true;
   }
 
+  listPendingSteeringInputs(sessionId: string): PendingSteerInput[] {
+    return this.inputQueue.listPendingSteers(sessionId);
+  }
+
   queueUserInput(sessionId: string, text: string, action: QueuedInputAction = queuedInputAction(text)): QueuedUserInput | undefined {
-    const trimmed = text.trim();
-    if (!trimmed || this.shuttingDown) return undefined;
-    const item = this.mailbox.enqueue({
+    if (this.shuttingDown) return undefined;
+    const queued = this.inputQueue.enqueueFollowup(sessionId, text, action);
+    if (!queued) return undefined;
+    if (!this.hasRunningTurn(sessionId) && !this.compactionControllers.has(sessionId)) void this.mailboxDispatcher.wakeQueuedInputs(sessionId);
+    return queued;
+  }
+
+  private queueRecoveredUserInput(sessionId: string, text: string, requestId: string): void {
+    if (this.shuttingDown) throw new Error("cannot resume recovered user input while Farai is shutting down");
+    const queued = this.inputQueue.enqueueFollowup(
       sessionId,
-      kind: "user",
-      payload: { text: trimmed, inputMode: "queued_followup", action },
-      triggerPolicy: "queue",
-      dedupeKey: `queued-input:${id()}`
-    });
-    this.event(sessionId, "mailbox_queued", { mailboxId: item.id, kind: item.kind, sequence: item.sequence, inputMode: "queued_followup", action });
-    if (!this.hasRunningTurn(sessionId) && !this.compactionControllers.has(sessionId)) void this.wakeQueuedUserInputs(sessionId);
-    return queuedUserInput(item);
+      text,
+      "plain",
+      `recovered-user-input:${requestId}`
+    );
+    if (!queued) throw new Error("failed to persist recovered user input continuation");
+    if (this.recovered && !this.hasRunningTurn(sessionId) && !this.compactionControllers.has(sessionId)) {
+      void this.mailboxDispatcher.wakeQueuedInputs(sessionId);
+    }
   }
 
   listQueuedUserInputs(sessionId: string): QueuedUserInput[] {
-    return this.mailbox.queued(sessionId).map(queuedUserInput).filter((item): item is QueuedUserInput => Boolean(item));
+    return this.inputQueue.listQueuedUserInputs(sessionId);
+  }
+
+  listQueuedFollowupInputs(sessionId: string): QueuedUserInput[] {
+    return this.inputQueue.listFollowups(sessionId);
   }
 
   takeBackQueuedUserInput(sessionId: string): QueuedUserInput | undefined {
-    const item = [...this.mailbox.queued(sessionId)].reverse().find((candidate) => queuedFollowupUserInput(candidate));
-    if (!item || !this.mailbox.cancel(item.id)) return undefined;
-    this.event(sessionId, "mailbox_consumed", { mailboxId: item.id, sequence: item.sequence, disposition: "taken_back" });
-    return queuedFollowupUserInput(item);
+    return this.inputQueue.takeBackLatestFollowup(sessionId);
   }
 
   hasRunningTurn(sessionId: string): boolean {
     return this.store.listTurns(sessionId, 5).some((turn) => turn.status === "running");
+  }
+
+  private agentLifecycleEntry(parentSessionId: string, child: Session): AgentLifecycleEntry {
+    if (child.parentId !== parentSessionId) throw new Error(`subagent session ${child.id} does not belong to this parent`);
+    const job = this.store.listJobs(parentSessionId, 10_000).find((candidate) => candidate.kind === "agent" && candidate.childSessionId === child.id);
+    const result = job?.result && typeof job.result === "object" ? job.result as Record<string, unknown> : undefined;
+    const running = this.hasRunningTurn(child.id) || Boolean(job && ["created", "starting", "running", "cancelling"].includes(job.status));
+    return {
+      sessionId: child.id,
+      ...(child.title ? { title: child.title } : {}),
+      ...(job?.lane ? { lane: job.lane } : {}),
+      ...(job?.agentMode ? { mode: job.agentMode } : {}),
+      ...(job ? { jobId: job.id } : {}),
+      status: child.archivedAt ? "archived" : job?.status ?? "idle",
+      running,
+      archived: Boolean(child.archivedAt),
+      ...(typeof result?.response === "string" ? { response: result.response } : {}),
+      ...(job?.error ? { error: job.error } : {}),
+      ...(job?.outputArtifactId ? { outputArtifactId: job.outputArtifactId } : {}),
+      createdAt: child.createdAt,
+      updatedAt: job?.updatedAt ?? child.updatedAt
+    };
+  }
+
+  private listAgentLifecycleEntries(parentSessionId: string): AgentLifecycleEntry[] {
+    return this.store.listSessions(10_000, { includeArchived: true })
+      .filter((candidate) => candidate.parentId === parentSessionId)
+      .map((candidate) => this.agentLifecycleEntry(parentSessionId, candidate))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   private createProviderSlot(session: Session, turn: Turn): ProviderSlot {
@@ -725,39 +802,18 @@ export class AgentRuntime {
   }
 
   private drainPendingUserInput(session: Session, turn: Turn): ProviderSlot | undefined {
-    const items = this.mailbox.claim(session.id, "interrupt");
+    const items = this.inputQueue.claimSteers(session.id);
     if (items.length === 0) return undefined;
     for (const item of items) {
-      const text = mailboxText(item);
+      const text = mailboxInputText(item);
       if (!text) continue;
       const userMessage = this.store.createMessage({ sessionId: session.id, turnId: turn.id, role: "user" });
       this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: userMessage.id, type: "text", payload: { text } });
       this.event(session.id, "text", { role: "user", text });
     }
-    this.mailbox.consume(items);
+    this.inputQueue.consumeSteers(session.id, items);
     const context = this.pendingSteeringContext.get(session.id) ?? [];
     context.push("The latest user message arrived while prior model/tool work was still running. Reconcile it against any tool results that completed afterward; if those results already satisfy the request, report them instead of repeating the work.");
-    this.pendingSteeringContext.set(session.id, context);
-    return this.createProviderSlot(session, turn);
-  }
-
-  private drainQueuedFollowupMessages(session: Session, turn: Turn): ProviderSlot | undefined {
-    const candidates = this.mailbox.queued(session.id).filter((item) => {
-      const queued = queuedFollowupUserInput(item);
-      return queued?.action === "plain";
-    });
-    const items = candidates.map((item) => this.mailbox.claimById(item.id)).filter((item): item is SessionMailboxItem => Boolean(item));
-    if (items.length === 0) return undefined;
-    for (const item of items) {
-      const text = mailboxText(item);
-      if (!text) continue;
-      const userMessage = this.store.createMessage({ sessionId: session.id, turnId: turn.id, role: "user" });
-      this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: userMessage.id, type: "text", payload: { text } });
-      this.event(session.id, "text", { role: "user", text, queued: true });
-    }
-    this.mailbox.consume(items);
-    const context = this.pendingSteeringContext.get(session.id) ?? [];
-    context.push("Queued user follow-up messages were delivered at a safe boundary after the prior model/tool step. Treat them as newer intent and do not repeat tool work that already completed.");
     this.pendingSteeringContext.set(session.id, context);
     return this.createProviderSlot(session, turn);
   }
@@ -777,6 +833,7 @@ export class AgentRuntime {
 
   cancelTurn(turnId: string, reason = "cancelled by user"): Turn {
     const turn = this.store.cancelTurn(turnId, reason);
+    this.inputQueue.restorePendingSteersAfterCancellation(turn.sessionId);
     const controllers = this.turnControllers.get(turnId);
     if (controllers) {
       for (const c of controllers) { try { c.abort(reason); } catch {  } }
@@ -818,6 +875,34 @@ export class AgentRuntime {
     };
   }
 
+  private waitForSteering(sessionId: string): { promise: Promise<void>; cancel: () => void } {
+    let settled = false;
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    const wake = () => {
+      if (settled) return;
+      settled = true;
+      this.steeringWaiters.get(sessionId)?.delete(wake);
+      resolve();
+    };
+    const waiters = this.steeringWaiters.get(sessionId) ?? new Set<() => void>();
+    waiters.add(wake);
+    this.steeringWaiters.set(sessionId, waiters);
+    return {
+      promise,
+      cancel: () => {
+        if (settled) return;
+        settled = true;
+        waiters.delete(wake);
+        if (waiters.size === 0) this.steeringWaiters.delete(sessionId);
+      }
+    };
+  }
+
+  private notifySteeringWaiters(sessionId: string): void {
+    for (const wake of [...(this.steeringWaiters.get(sessionId) ?? [])]) wake();
+  }
+
   updateSession(sessionId: string, patch: SessionPatch): Session {
     const session = this.store.updateSession(sessionId, patch);
     this.recordSession(session);
@@ -841,7 +926,7 @@ export class AgentRuntime {
     await this.lsp.shutdownSession(sessionId).catch(() => {});
     await stopBrowserContextsForSession(sessionId).catch(() => {});
     await stopMcpToolsForSession(sessionId).catch(() => {});
-    await new KaliContainerBackend({ workspace: this.workspace, containerName: containerNameForSession(sessionId) })
+    await this.containerBackend(session.workspace, sessionId)
       .stopPersistent()
       .catch(() => {});
     return session;
@@ -870,7 +955,7 @@ export class AgentRuntime {
       await stopMcpToolsForSession(session.id).catch(() => {});
       serviceRegistry.unregisterSession(session.id);
       if (options.stopContainers !== false) {
-        await new KaliContainerBackend({ workspace: this.workspace, containerName: containerNameForSession(session.id) })
+        await this.containerBackend(session.workspace, session.id)
           .stopPersistent()
           .catch(() => {});
       }
@@ -891,6 +976,12 @@ export class AgentRuntime {
       if (!changed) break;
     }
     return sessions.filter((session) => included.has(session.id));
+  }
+
+  private sessionFamily(sessionId: string): Session[] {
+    let root = this.store.loadSession(sessionId);
+    while (root.parentId) root = this.store.loadSession(root.parentId);
+    return this.sessionTree(root.id);
   }
 
   private async cancelSessionJobs(sessionId: string): Promise<void> {
@@ -924,18 +1015,19 @@ export class AgentRuntime {
   }
 
   containerStatus(sessionId: string): Promise<ContainerStatus> {
-    return new KaliContainerBackend({ workspace: this.workspace, containerName: containerNameForSession(sessionId) }).status();
+    return this.containerBackend(this.store.loadSession(sessionId).workspace, sessionId).status();
   }
 
   async startContainer(sessionId: string): Promise<void> {
-    const result = await new KaliContainerBackend({ workspace: this.workspace, containerName: containerNameForSession(sessionId) }).startPersistent();
+    const result = await this.containerBackend(this.store.loadSession(sessionId).workspace, sessionId).startPersistent();
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not start Kali container");
   }
 
   async refreshMcp(session: Session): Promise<void> {
     if (!this.mcpEnabled) return;
     await refreshMcpTools({
-      workspace: this.workspace,
+      workspace: session.workspace,
+      configWorkspace: this.workspace,
       session,
       background: true,
       includeResources: false,
@@ -946,8 +1038,50 @@ export class AgentRuntime {
   async stopContainer(sessionId: string): Promise<void> {
     await stopBrowserContextsForSession(sessionId).catch(() => {});
     await stopMcpToolsForSession(sessionId).catch(() => {});
-    const result = await new KaliContainerBackend({ workspace: this.workspace, containerName: containerNameForSession(sessionId) }).stopPersistent();
+    const result = await this.containerBackend(this.store.loadSession(sessionId).workspace, sessionId).stopPersistent();
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not stop Kali container");
+  }
+
+  private assertWorkspaceTransitionIdle(sessionId: string): void {
+    const background = activeBackgroundJobs(this.store.listToolCalls(sessionId, 10_000));
+    const jobs = this.store.listJobs(sessionId, 10_000).filter((job) => ["created", "starting", "running", "cancelling"].includes(job.status));
+    if (background.length === 0 && jobs.length === 0) return;
+    const labels = [
+      ...background.map((job) => job.processId),
+      ...jobs.map((job) => job.childSessionId ?? job.processId ?? job.id)
+    ];
+    throw new Error(`workspace transition requires all background work to finish or be stopped first: ${labels.join(", ")}`);
+  }
+
+  private async stopWorkspaceBoundServices(sessionId: string, workspace: string, includeContainer: boolean): Promise<void> {
+    const operations: Array<{ name: string; run: () => Promise<unknown> }> = [
+      { name: "browser contexts", run: () => stopBrowserContextsForSession(sessionId) },
+      { name: "MCP servers", run: () => stopMcpToolsForSession(sessionId) },
+      { name: "LSP servers", run: () => this.lsp.shutdownSession(sessionId) }
+    ];
+    if (includeContainer) {
+      operations.push({
+        name: "Kali container",
+        run: async () => {
+          const result = await this.containerBackend(workspace, sessionId, 5_000).stopPersistent();
+          if (result.exitCode !== 0 || result.timedOut) throw new Error(result.stderr || "container stop was not confirmed");
+        }
+      });
+    }
+    const results = await Promise.all(operations.map(async (operation) => {
+      try {
+        await withDeadlineMs(operation.run(), 7_500, `${operation.name} shutdown`);
+        return undefined;
+      } catch (error) {
+        return `${operation.name}: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }));
+    const failures = results.filter((result): result is string => Boolean(result));
+    if (failures.length) throw new Error(`workspace services could not be stopped safely (${failures.join("; ")})`);
+  }
+
+  private containerBackend(workspace: string, sessionId: string, timeoutMs?: number): RuntimeContainerBackend {
+    return this.containerBackendFactory(workspace, sessionId, timeoutMs);
   }
 
   exportReport(sessionId: string, options: { write?: boolean } = {}): { markdown: string; path?: string } {
@@ -990,14 +1124,7 @@ export class AgentRuntime {
       this.assertAcceptingWork();
       return { session: await this.clearSession(session.id), response: "conversation cleared", events: [] };
     }
-    const item = this.mailbox.enqueue({
-      sessionId: session.id,
-      kind: "user",
-      payload: { text: input, inputMode: "turn" },
-      triggerPolicy: "queue",
-      dedupeKey: `prompt:${id()}`
-    });
-    this.scheduledPromptMailboxIds.add(item.id);
+    const item = this.inputQueue.schedulePrompt(session.id, input);
     try {
       await this.recover();
       this.assertAcceptingWork();
@@ -1034,127 +1161,8 @@ export class AgentRuntime {
       });
       return await scheduled;
     } finally {
-      this.scheduledPromptMailboxIds.delete(item.id);
+      this.inputQueue.finishScheduledPrompt(item.id);
     }
-  }
-
-  private wakeQueuedInput(sessionId: string): Promise<void> {
-    if (this.shuttingDown) return Promise.resolve();
-    return this.actor(sessionId).run(async () => {
-      const items = this.mailbox.claim(sessionId, "interrupt");
-      if (items.length === 0) return;
-      const text = items.map(mailboxText).filter(Boolean).join("\n\n");
-      try {
-        await this.runPrompt(this.store.loadSession(sessionId), text);
-        this.mailbox.consume(items);
-      } catch {
-        this.mailbox.release(items);
-      }
-    }).catch(() => undefined);
-  }
-
-  private wakePendingMailbox(sessionId: string): Promise<void> {
-    const queued = this.mailbox.queued(sessionId);
-    const nextUserInput = queued.find((item) => item.kind === "user" && item.triggerPolicy === "queue");
-    if (nextUserInput && !this.scheduledPromptMailboxIds.has(nextUserInput.id)) {
-      return this.wakeQueuedUserInputs(sessionId);
-    }
-    if (queued.some((item) => item.triggerPolicy === "wake")) return this.wakeCompletionSession(sessionId, "wake");
-    if (queued.some((item) => item.triggerPolicy === "interrupt")) return this.wakeQueuedInput(sessionId);
-    if (queued.some((item) => item.triggerPolicy === "context")) return this.wakeCompletionSession(sessionId, "context");
-    return Promise.resolve();
-  }
-
-  private wakeQueuedUserInputs(sessionId: string): Promise<void> {
-    if (this.shuttingDown) return Promise.resolve();
-    const existing = this.queuedInputWakePromises.get(sessionId);
-    if (existing) return existing;
-    const wake = this.actor(sessionId).run(async () => {
-      while (!this.shuttingDown) {
-        const item = this.mailbox.queued(sessionId).find((candidate) =>
-          candidate.kind === "user"
-          && candidate.triggerPolicy === "queue"
-        );
-        if (!item) return;
-        if (this.scheduledPromptMailboxIds.has(item.id)) return;
-        const claimed = this.mailbox.claimById(item.id);
-        if (!claimed) continue;
-        const text = mailboxText(claimed);
-        if (!text) {
-          this.mailbox.consume([claimed]);
-          continue;
-        }
-        const completionItems = text.trimStart().startsWith("/")
-          ? []
-          : this.mailbox.claim(sessionId, "context", BACKGROUND_MAILBOX_BATCH_SIZE);
-        try {
-          if (text.trim() === "/clear") {
-            this.cancelCompaction(sessionId);
-            await this.cancelSessionJobs(sessionId);
-            this.clearSessionState(sessionId);
-            return;
-          }
-          await this.runPrompt(this.store.loadSession(sessionId), text, { mailboxItems: completionItems });
-          this.mailbox.consume([claimed]);
-          this.mailbox.consume(completionItems);
-          this.event(sessionId, "mailbox_consumed", { mailboxId: claimed.id, sequence: claimed.sequence });
-          for (const completion of completionItems) {
-            this.event(sessionId, "mailbox_consumed", { mailboxId: completion.id, sequence: completion.sequence });
-          }
-        } catch {
-          this.mailbox.release([claimed]);
-          this.mailbox.release(completionItems);
-          return;
-        }
-      }
-    });
-    const tracked = wake.catch(() => undefined).finally(() => {
-      if (this.queuedInputWakePromises.get(sessionId) === tracked) this.queuedInputWakePromises.delete(sessionId);
-      if (this.shuttingDown || !this.store.isOpen()) return;
-      const nextUserInput = this.mailbox.queued(sessionId).find((item) => item.kind === "user" && item.triggerPolicy === "queue");
-      const hasDeliverable = Boolean(nextUserInput && !this.scheduledPromptMailboxIds.has(nextUserInput.id));
-      if (hasDeliverable) void this.wakeQueuedUserInputs(sessionId);
-      else if (this.recovered) void this.wakePendingMailbox(sessionId);
-    });
-    this.queuedInputWakePromises.set(sessionId, tracked);
-    return tracked;
-  }
-
-  private wakeCompletionSession(sessionId: string, triggerPolicy: "wake" | "context"): Promise<void> {
-    if (this.shuttingDown) return Promise.resolve();
-    const existing = this.wakePromises.get(sessionId);
-    if (existing) return existing;
-    const wake = this.actor(sessionId).run(async () => {
-      while (!this.shuttingDown) {
-        let items: SessionMailboxItem[];
-        try {
-          items = this.mailbox.claim(sessionId, triggerPolicy, BACKGROUND_MAILBOX_BATCH_SIZE);
-        } catch {
-          return;
-        }
-        if (items.length === 0) return;
-        const text = renderMailboxItems(items);
-        try {
-          await this.runPrompt(this.store.loadSession(sessionId), text, { source: "background", mailboxItems: items });
-          this.mailbox.consume(items);
-          for (const item of items) this.event(sessionId, "mailbox_consumed", { mailboxId: item.id, sequence: item.sequence });
-        } catch {
-          if (this.store.isOpen()) {
-            try { this.mailbox.release(items); } catch {  }
-          }
-          return;
-        }
-      }
-    });
-    const tracked = wake.catch(() => undefined).finally(() => {
-      if (this.wakePromises.get(sessionId) === tracked) this.wakePromises.delete(sessionId);
-      if (this.shuttingDown || !this.store.isOpen()) return;
-      try {
-        void this.wakePendingMailbox(sessionId);
-      } catch {  }
-    });
-    this.wakePromises.set(sessionId, tracked);
-    return tracked;
   }
 
   private async runPrompt(
@@ -1211,7 +1219,17 @@ export class AgentRuntime {
     const lower = input.toLowerCase();
     let response = "";
 
-    if (source === "user" && lower.startsWith("/")) {
+    if (source === "user" && input.trimStart().startsWith("!")) {
+      const command = input.trimStart().slice(1).trim();
+      if (!command) {
+        response = "Usage: !<command>";
+      } else {
+        await this.runTool(session, "shell_exec", { command }, { turn, assistantMessage });
+        response = "Shell command submitted.";
+      }
+      this.persistTextPart(session.id, turn.id, assistantMessage.id, response);
+      this.stopTurn(turn, "completed", "final_response");
+    } else if (source === "user" && lower.startsWith("/")) {
       response = await this.handleSlash(session, turn, assistantMessage, input);
       this.persistTextPart(session.id, turn.id, assistantMessage.id, response);
       this.stopTurn(turn, "completed", "final_response");
@@ -1219,7 +1237,9 @@ export class AgentRuntime {
       response = await this.runAgentLoop(session, turn, contextMessage, assistantMessage, input, source === "user", options.mailboxItems);
     }
 
-    if (source === "user" && !this.shuttingDown) void this.wakeQueuedUserInputs(session.id);
+    if (source === "user" && !this.shuttingDown && this.store.loadTurn(turn.id).status !== "cancelled") {
+      void this.mailboxDispatcher.wakeQueuedInputs(session.id);
+    }
 
     const cursor = startedEvents.at(-1)?.sequence ?? 0;
     return {
@@ -1244,7 +1264,7 @@ export class AgentRuntime {
     if (this.planner) {
       planner = this.planner;
     } else {
-      chatProvider = this.chatProviderOverride ?? await createChatProviderForSession(session);
+      chatProvider = this.chatProviderOverride ?? await createChatProviderForSession(session, this.workspace);
       planner = new ChatProviderPlanner(chatProvider);
     }
     this.store.updateTurn(turn.id, {
@@ -1255,7 +1275,6 @@ export class AgentRuntime {
 
     let autoContinueStreak = 0;
     let resumeAfterCompaction = false;
-    let canDrainQueuedFollowups = false;
     const maxSteps = userAuthored ? this.maxSteps : BACKGROUND_COMPLETION_MAX_STEPS;
     const maxTurnMs = userAuthored ? this.maxTurnMs : Number.POSITIVE_INFINITY;
     const loopStartedAt = Date.now();
@@ -1277,6 +1296,7 @@ export class AgentRuntime {
         this.event(session.id, "loop_stop", { turnId: turn.id, reason: "cancelled" });
         return responses.join("\n");
       }
+      session = this.store.loadSession(session.id);
       const elapsedMs = Date.now() - loopStartedAt;
       if (step > 0 && elapsedMs >= maxTurnMs) {
         responses.push(...await this.forceTimeLimitWrapUp(session, turn, assistantMessage, planner, maxTurnMs));
@@ -1326,14 +1346,6 @@ export class AgentRuntime {
       if (injectedSlot) {
         ({ contextMessage, assistantMessage } = injectedSlot);
         providerSlotReady = true;
-      }
-      if (canDrainQueuedFollowups) {
-        const queuedSlot = this.drainQueuedFollowupMessages(session, turn);
-        if (queuedSlot) {
-          ({ contextMessage, assistantMessage } = queuedSlot);
-          providerSlotReady = true;
-        }
-        canDrainQueuedFollowups = false;
       }
       if (step > 0 && !providerSlotReady) {
         ({ contextMessage, assistantMessage } = this.createProviderSlot(session, turn));
@@ -1447,16 +1459,15 @@ export class AgentRuntime {
         this.stopTurn(turn, "completed", "final_response");
         break;
       }
-      canDrainQueuedFollowups = true;
     }
 
-    if (responses.length === 0) {
+    if (responses.length === 0 && this.store.loadTurn(turn.id).status === "running") {
       if (userAuthored && !this.turnHasTranscriptOwnedActivity(session.id, turn.id)) {
         const text = "Completed without model-visible response.";
         responses.push(text);
         this.persistTextPart(session.id, turn.id, assistantMessage.id, text);
         this.stopTurn(turn, "completed", "final_response");
-      } else if (this.store.loadTurn(turn.id).status === "running") {
+      } else {
         this.stopTurn(turn, "completed", "no_actions");
       }
     }
@@ -1479,7 +1490,7 @@ export class AgentRuntime {
 
   private turnHasTranscriptOwnedActivity(sessionId: string, turnId: string): boolean {
     return this.store.listToolCalls(sessionId, 10_000).some((call) => {
-      if (call.turnId !== turnId || call.tool !== "agent_task") return false;
+      if (call.turnId !== turnId || !["agent_task", "agent_spawn", "agent_followup"].includes(call.tool)) return false;
       if (!call.args || typeof call.args !== "object" || Array.isArray(call.args)) return false;
       return (call.args as Record<string, unknown>).mode === "detached";
     });
@@ -1549,6 +1560,7 @@ export class AgentRuntime {
       if (error instanceof ModelCallDeadlineError) return { timedOut: true, shouldContinue: false };
       throw error;
     }
+    if (this.store.loadTurn(turn.id).status === "cancelled") return { cancelled: true, shouldContinue: false };
     if (actions.length === 0) return { empty: true, shouldContinue: false };
     let shouldContinue = false;
     let sawResponse = false;
@@ -1610,7 +1622,11 @@ export class AgentRuntime {
     modelTimeoutMs?: number
   ): Promise<StepControl> {
     const { signal, release, timedOut } = this.registerTurnController(turn.id, modelTimeoutMs);
-    const request = buildChatRequest(plannerInput, signal);
+    const requestController = new AbortController();
+    const relayTurnAbort = () => requestController.abort(signal.reason);
+    if (signal.aborted) relayTurnAbort();
+    else signal.addEventListener("abort", relayTurnAbort, { once: true });
+    const request = buildChatRequest(plannerInput, requestController.signal);
     let lastError = "";
     this.streamingParts.delete(turn.id);
     try {
@@ -1627,7 +1643,27 @@ export class AgentRuntime {
         try {
           const iterator = provider.stream(request)[Symbol.asyncIterator]();
           for (;;) {
-            const next = await abortablePromise(iterator.next(), signal);
+            const steering = this.waitForSteering(session.id);
+            let next: IteratorResult<import("./provider/protocol").ProviderStreamEvent>;
+            try {
+              if (this.mailbox.hasQueued(session.id, "interrupt")) {
+                interrupted = true;
+                requestController.abort("steered by user");
+                break;
+              }
+              const outcome = await Promise.race([
+                abortablePromise(iterator.next(), signal).then((value) => ({ kind: "stream" as const, value })),
+                steering.promise.then(() => ({ kind: "steer" as const }))
+              ]);
+              if (outcome.kind === "steer") {
+                interrupted = true;
+                requestController.abort("steered by user");
+                break;
+              }
+              next = outcome.value;
+            } finally {
+              steering.cancel();
+            }
             if (next.done) break;
             const event = next.value;
             if (signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") break;
@@ -1680,7 +1716,7 @@ export class AgentRuntime {
               throw new PlannerHttpError(event.message, event.status ?? 0, event.retryAfterMs);
             }
           }
-          if (signal.aborted) void iterator.return?.();
+          if (signal.aborted || interrupted) void iterator.return?.();
         } catch (error) {
           this.persistModelUsage(provider, session, turn, usage, Date.now() - requestStarted);
           const outcomes = await Promise.allSettled(dispatched);
@@ -1770,6 +1806,7 @@ export class AgentRuntime {
         return { shouldContinue };
       }
     } finally {
+      signal.removeEventListener("abort", relayTurnAbort);
       release();
     }
   }
@@ -2160,7 +2197,7 @@ export class AgentRuntime {
       if (gateController.signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") {
         return { shouldContinue: false, cancelled: true };
       }
-      const detachedAgent = action.tool === "agent_task" && record.status === "running_background";
+      const detachedAgent = ["agent_spawn", "agent_followup"].includes(action.tool) && record.status === "running_background";
       return {
         shouldContinue: !detachedAgent && (record.status === "done" || record.status === "error" || record.status === "running_background"),
         resetAutoContinue: !detachedAgent && (record.status === "done" || record.status === "error" || record.status === "running_background")
@@ -2458,6 +2495,7 @@ export class AgentRuntime {
     } finally {
       release();
     }
+    if (this.store.loadTurn(turn.id).status === "cancelled") return [];
     this.store.updateTurn(turn.id, { errorSummary: lastError });
     return [{ kind: "respond", text: `planner error: ${lastError}` }];
   }
@@ -2496,6 +2534,8 @@ export class AgentRuntime {
   }
 
   private stopTurn(turn: Turn, status: Turn["status"], reason: NonNullable<Turn["stopReason"]>, errorSummary?: string): Turn {
+    const current = this.store.loadTurn(turn.id);
+    if (current.status !== "running") return current;
     this.event(turn.sessionId, "loop_stop", { turnId: turn.id, status, reason, ...(errorSummary ? { errorSummary } : {}) });
     const updated = this.store.updateTurn(turn.id, { status, stopReason: reason, ...(errorSummary ? { errorSummary } : {}) });
     this.modelCallsByTurn.delete(turn.id);
@@ -2526,19 +2566,31 @@ export class AgentRuntime {
     await this.recover();
     this.assertAcceptingWork();
     session = this.store.loadSession(session.id);
-    const tool = toolForExecution(session, toolName);
-    const schedulingTool = toolSchedulingDefinition(tool, args, session);
+    let tool = toolForExecution(session, toolName);
+    let schedulingTool = toolSchedulingDefinition(tool, args, session);
+    const workspaceTransition = isWorkspaceTransitionTool(schedulingTool);
     const gateSignal = signal
       ? AbortSignal.any([signal, this.shutdownController.signal])
       : this.shutdownController.signal;
     try {
-      return await this.toolExecutionGate.run(
-        toolConcurrencyKey(schedulingTool, session, this.workspace),
-        schedulingTool.parallel,
-        async (gateLease) => {
-          gateSignal.throwIfAborted();
-          if (owner && this.store.loadTurn(owner.turn.id).status === "cancelled") throw new Error("turn cancelled before tool start");
-          return await this.runToolUnderGate(session, tool, args, owner, providerToolCallId, gateLease);
+      return await this.workspaceBindingGate.run(
+        `session-workspace:${session.id}`,
+        !workspaceTransition,
+        async (bindingLease) => {
+          session = this.store.loadSession(session.id);
+          tool = toolForExecution(session, toolName);
+          schedulingTool = toolSchedulingDefinition(tool, args, session);
+          return await this.toolExecutionGate.run(
+            toolConcurrencyKey(schedulingTool, session, session.workspace),
+            schedulingTool.parallel,
+            async (gateLease) => {
+              gateLease.mirrorTo(bindingLease);
+              gateSignal.throwIfAborted();
+              if (owner && this.store.loadTurn(owner.turn.id).status === "cancelled") throw new Error("turn cancelled before tool start");
+              return await this.runToolUnderGate(session, tool, args, owner, providerToolCallId, gateLease);
+            },
+            gateSignal
+          );
         },
         gateSignal
       );
@@ -2568,30 +2620,14 @@ export class AgentRuntime {
     owner?: { turn: Turn; assistantMessage: Message },
     providerToolCallId?: string
   ): ToolCallRecord {
-    const toolCall: ToolCallRecord = {
-      id: id(),
+    const toolCall = this.toolCalls.begin({
       sessionId: session.id,
       tool: tool.name,
       args,
-      status: "pending",
-      evidenceIds: [],
-      ...(providerToolCallId ? { providerToolCallId } : {}),
-      ...(owner ? { turnId: owner.turn.id, messageId: owner.assistantMessage.id } : {})
-    };
-    this.store.saveToolCall(toolCall);
-    if (owner) {
-      const part = this.store.addPart({
-        sessionId: session.id,
-        turnId: owner.turn.id,
-        messageId: owner.assistantMessage.id,
-        type: "tool_call",
-        payload: { record: toolCall }
-      });
-      toolCall.timelinePartId = part.id;
-      this.store.saveToolCall(toolCall);
-    }
-    this.event(session.id, "tool_call", { id: toolCall.id, ...(providerToolCallId ? { providerToolCallId } : {}), tool: tool.name, args });
-    return this.settleToolError(toolCall, message, state);
+      ...(owner ? { owner: { turnId: owner.turn.id, messageId: owner.assistantMessage.id } } : {}),
+      ...(providerToolCallId ? { providerToolCallId } : {})
+    });
+    return this.toolCalls.settleError(toolCall, message, state);
   }
 
   private async runToolUnderGate(
@@ -2602,31 +2638,13 @@ export class AgentRuntime {
     providerToolCallId?: string,
     gateLease?: ToolGateLease
   ): Promise<ToolCallRecord> {
-    const toolCall: ToolCallRecord = {
-      id: id(),
+    const toolCall = this.toolCalls.begin({
       sessionId: session.id,
       tool: tool.name,
       args,
-      status: "pending",
-      evidenceIds: [],
-      ...(providerToolCallId ? { providerToolCallId } : {}),
-      ...(owner ? { turnId: owner.turn.id, messageId: owner.assistantMessage.id } : {})
-    };
-    this.store.saveToolCall(toolCall);
-
-    if (owner) {
-      const part = this.store.addPart({
-        sessionId: session.id,
-        turnId: owner.turn.id,
-        messageId: owner.assistantMessage.id,
-        type: "tool_call",
-        payload: { record: toolCall }
-      });
-      toolCall.timelinePartId = part.id;
-      this.store.saveToolCall(toolCall);
-    }
-
-    this.event(session.id, "tool_call", { id: toolCall.id, ...(providerToolCallId ? { providerToolCallId } : {}), tool: tool.name, args });
+      ...(owner ? { owner: { turnId: owner.turn.id, messageId: owner.assistantMessage.id } } : {}),
+      ...(providerToolCallId ? { providerToolCallId } : {})
+    });
     await this.executeToolUnderGate(session, toolCall.id, owner, gateLease);
     return this.store.loadToolCall(toolCall.id);
   }
@@ -2642,21 +2660,33 @@ export class AgentRuntime {
     session = this.store.loadSession(session.id);
     const toolCall = this.store.loadToolCall(toolCallId);
     if (toolCall.sessionId !== session.id) throw new Error(`Tool call ${toolCallId} belongs to another session`);
-    const tool = toolForExecution(session, toolCall.tool);
-    const schedulingTool = toolSchedulingDefinition(tool, toolCall.args, session);
+    let tool = toolForExecution(session, toolCall.tool);
+    let schedulingTool = toolSchedulingDefinition(tool, toolCall.args, session);
+    const workspaceTransition = isWorkspaceTransitionTool(schedulingTool);
     const turnId = owner?.turn.id ?? toolCall.turnId;
     const gateController = turnId ? this.registerTurnController(turnId) : undefined;
     const gateSignal = gateController
       ? AbortSignal.any([gateController.signal, this.shutdownController.signal])
       : this.shutdownController.signal;
     try {
-      return await this.toolExecutionGate.run(
-        toolConcurrencyKey(schedulingTool, session, this.workspace),
-        schedulingTool.parallel,
-        async (gateLease) => {
-          gateSignal.throwIfAborted();
-          if (turnId && this.store.loadTurn(turnId).status === "cancelled") throw new Error("turn cancelled before tool start");
-          return await this.executeToolUnderGate(session, toolCallId, owner, gateLease);
+      return await this.workspaceBindingGate.run(
+        `session-workspace:${session.id}`,
+        !workspaceTransition,
+        async (bindingLease) => {
+          session = this.store.loadSession(session.id);
+          tool = toolForExecution(session, toolCall.tool);
+          schedulingTool = toolSchedulingDefinition(tool, toolCall.args, session);
+          return await this.toolExecutionGate.run(
+            toolConcurrencyKey(schedulingTool, session, session.workspace),
+            schedulingTool.parallel,
+            async (gateLease) => {
+              gateLease.mirrorTo(bindingLease);
+              gateSignal.throwIfAborted();
+              if (turnId && this.store.loadTurn(turnId).status === "cancelled") throw new Error("turn cancelled before tool start");
+              return await this.executeToolUnderGate(session, toolCallId, owner, gateLease);
+            },
+            gateSignal
+          );
         },
         gateSignal
       );
@@ -2664,7 +2694,7 @@ export class AgentRuntime {
       if (error instanceof ToolScopeQuarantinedError) {
         const rejected = this.store.loadToolCall(toolCallId);
         if (rejected.status === "pending") {
-          return this.settleToolError(rejected, error.message, { quarantined: true, reason: "concurrency_scope_quarantined" });
+          return this.toolCalls.settleError(rejected, error.message, { quarantined: true, reason: "concurrency_scope_quarantined" });
         }
         return rejected;
       }
@@ -2672,7 +2702,7 @@ export class AgentRuntime {
       const cancelled = this.store.loadToolCall(toolCallId);
       if (cancelled.status === "pending") {
         const message = turnId ? "turn cancelled before tool start" : String(gateSignal.reason ?? "tool gate cancelled before start");
-        return this.settleToolError(cancelled, message, {
+        return this.toolCalls.settleError(cancelled, message, {
           interrupted: true,
           cancelled: true,
           reason: this.shuttingDown ? "runtime_shutdown" : turnId ? "turn_cancelled_before_tool_start" : "tool_gate_cancelled"
@@ -2693,10 +2723,7 @@ export class AgentRuntime {
     let toolCall = this.store.loadToolCall(toolCallId);
     if (toolCall.status !== "pending") return toolCall;
     const tool = toolForExecution(session, toolCall.tool);
-    toolCall.status = "running";
-    this.store.saveToolCall(toolCall);
-    this.syncToolCallPart(toolCall);
-    this.event(session.id, "tool_started", { toolCallId: toolCall.id, tool: toolCall.tool, args: toolCall.args });
+    toolCall = this.toolCalls.markRunning(toolCall);
     const controller = new AbortController();
     this.activeToolControllers.add(controller);
     const lease = new ToolExecutionLease();
@@ -2743,11 +2770,12 @@ export class AgentRuntime {
       : undefined;
     const context: ToolContext = {
       session,
-      workspace: this.workspace,
+      workspace: session.workspace,
+      rootWorkspace: this.workspace,
       toolCallId: toolCall.id,
       now: nowIso,
       fileState: leasedToolCapability(this.fileState, lease),
-      lsp: leasedToolCapability(this.lsp.forSession(session.id), lease),
+      lsp: leasedToolCapability(this.lsp.forSession(session.id, session.workspace), lease),
       ...(this.knowledge() ? { knowledge: leasedToolCapability(this.knowledge()!, lease) } : {}),
       store: leasedToolCapability(this.store as unknown as ToolContext["store"], lease),
       signal: deadline.signal,
@@ -2756,6 +2784,130 @@ export class AgentRuntime {
       availableTools: () => {
         lease.assertActive();
         return listToolsForSession(session).filter((item) => item.name !== "tool_search" && item.name !== "tool_invoke");
+      },
+      requestUserInput: (input, signal) => this.requestUserInput(session, input, signal ?? deadline.signal),
+      agentControl: {
+        list: () => {
+          lease.assertActive();
+          return this.listAgentLifecycleEntries(session.id);
+        },
+        wait: async (sessionIds, timeoutMs, signal) => {
+          lease.assertActive();
+          const wanted = sessionIds?.length ? new Set(sessionIds) : undefined;
+          const started = Date.now();
+          while (true) {
+            lease.assertActive();
+            if (signal?.aborted) throw signal.reason ?? new Error("agent wait cancelled");
+            const entries = this.listAgentLifecycleEntries(session.id).filter((entry) => !wanted || wanted.has(entry.sessionId));
+            if (wanted) {
+              const missing = [...wanted].filter((id) => !entries.some((entry) => entry.sessionId === id));
+              if (missing.length) throw new Error(`unknown child session: ${missing.join(", ")}`);
+            }
+            if (entries.length === 0 || entries.some((entry) => !entry.running) || Date.now() - started >= timeoutMs) return entries;
+            await new Promise<void>((resolve) => setTimeout(resolve, 200));
+          }
+        },
+        message: (childSessionId, text) => {
+          lease.assertActive();
+          const child = this.store.loadSession(childSessionId);
+          if (child.parentId !== session.id) throw new Error(`subagent session ${childSessionId} does not belong to this parent`);
+          if (!this.injectUserInput(childSessionId, text)) throw new Error(`subagent session ${childSessionId} is not currently running; use agent_followup to start a new turn`);
+          return "delivered";
+        },
+        interrupt: async (childSessionId, reason = "interrupted by parent agent") => {
+          lease.assertActive();
+          const child = this.store.loadSession(childSessionId);
+          if (child.parentId !== session.id) throw new Error(`subagent session ${childSessionId} does not belong to this parent`);
+          if (child.archivedAt) throw new Error(`subagent session ${childSessionId} is closed`);
+          const job = this.store.listJobs(session.id, 10_000).find((candidate) => candidate.kind === "agent" && candidate.childSessionId === childSessionId && ["created", "starting", "running", "cancelling"].includes(candidate.status));
+          if (job) {
+            this.subagentControllers.get(job.id)?.abort(reason);
+            for (const childTurn of this.store.listTurns(childSessionId, 10_000)) if (childTurn.status === "running") this.cancelTurn(childTurn.id, reason);
+            await this.jobs.cancel(job.id, false);
+          } else {
+            const runningTurn = this.store.listTurns(childSessionId, 10_000).find((candidate) => candidate.status === "running");
+            if (!runningTurn) throw new Error(`subagent session ${childSessionId} is not currently running`);
+            this.cancelTurn(runningTurn.id, reason);
+          }
+          return this.agentLifecycleEntry(session.id, this.store.loadSession(childSessionId));
+        },
+        close: async (childSessionId) => {
+          lease.assertActive();
+          const child = this.store.loadSession(childSessionId);
+          if (child.parentId !== session.id) throw new Error(`subagent session ${childSessionId} does not belong to this parent`);
+          if (!child.archivedAt) await this.archiveSession(childSessionId);
+          return this.agentLifecycleEntry(session.id, this.store.loadSession(childSessionId));
+        }
+      },
+      worktreeControl: {
+        enter: async ({ name, ref, branch }) => {
+          lease.assertActive();
+          if (session.workspace !== this.workspace) throw new Error(`session is already using an isolated worktree: ${session.workspace}`);
+          this.assertWorkspaceTransitionIdle(session.id);
+          const safeName = name.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+          if (!safeName) throw new Error("worktree name must contain a letter or number");
+          const root = (await runHostGit(this.workspace, ["rev-parse", "--show-toplevel"])).trim();
+          if (realpathSync(root) !== realpathSync(this.workspace)) throw new Error(`Farai workspace is not the Git repository root: ${root}`);
+          const worktreesRoot = join(this.workspace, ".farai", "worktrees");
+          mkdirSync(worktreesRoot, { recursive: true });
+          const path = join(worktreesRoot, safeName);
+          const registered = await registeredWorktree(this.workspace, path);
+          if (existsSync(path) && !registered) throw new Error(`worktree path already exists but is not a registered Git worktree: ${path}`);
+          if (!existsSync(path) && registered) throw new Error(`worktree registration exists but its directory is missing: ${path}; repair or prune it before re-entry`);
+          if (registered) {
+            if (ref || branch) throw new Error("ref and branch can only be specified when creating a new worktree");
+            const familyIds = new Set(this.sessionFamily(session.id).map((candidate) => candidate.id));
+            const owners = this.store.listSessions(100_000, { includeArchived: true }).filter((candidate) => !familyIds.has(candidate.id) && candidate.workspace === path);
+            if (owners.length) throw new Error(`worktree is already active in session ${owners.map((owner) => owner.id).join(", ")}`);
+            await this.stopWorkspaceBoundServices(session.id, session.workspace, false);
+            this.updateSession(session.id, { workspace: path });
+            this.fileState.clear(session.id);
+            return { path, ref: registered.ref, ...(registered.branch ? { branch: registered.branch } : {}), created: false };
+          }
+          const baseRef = ref ?? "HEAD";
+          const addArgs = branch
+            ? ["worktree", "add", "-b", branch, path, baseRef]
+            : ["worktree", "add", "--detach", path, baseRef];
+          await this.stopWorkspaceBoundServices(session.id, session.workspace, false);
+          await runHostGit(this.workspace, addArgs);
+          this.updateSession(session.id, { workspace: path });
+          this.fileState.clear(session.id);
+          return { path, ref: baseRef, ...(branch ? { branch } : {}), created: true };
+        },
+        exit: async ({ remove = false } = {}) => {
+          lease.assertActive();
+          const current = this.store.loadSession(session.id);
+          if (current.workspace === this.workspace) throw new Error("session is not inside an isolated worktree");
+          this.assertWorkspaceTransitionIdle(session.id);
+          const worktreesRoot = join(this.workspace, ".farai", "worktrees");
+          const managedPath = relative(worktreesRoot, current.workspace);
+          if (!managedPath || managedPath.startsWith("..") || isAbsolute(managedPath)) {
+            throw new Error(`refusing to leave an unmanaged worktree: ${current.workspace}`);
+          }
+          if (remove) {
+            const family = this.sessionFamily(session.id);
+            const familyIds = new Set(family.map((candidate) => candidate.id));
+            const owners = this.store.listSessions(100_000, { includeArchived: true }).filter((candidate) => !familyIds.has(candidate.id) && candidate.workspace === current.workspace);
+            if (owners.length) throw new Error(`worktree is still referenced by session ${owners.map((owner) => owner.id).join(", ")}`);
+            for (const member of family.filter((candidate) => candidate.workspace === current.workspace)) this.assertWorkspaceTransitionIdle(member.id);
+            const dirtyBeforeCleanup = await runHostGit(current.workspace, ["status", "--porcelain=v1", "--untracked-files=all"]);
+            if (dirtyBeforeCleanup.trim()) throw new Error("worktree has uncommitted or untracked changes; leave it preserved or clean it before removal");
+          }
+          const affected = remove
+            ? this.sessionFamily(session.id).filter((candidate) => candidate.workspace === current.workspace)
+            : [current];
+          await Promise.all(affected.map((member) => this.stopWorkspaceBoundServices(member.id, current.workspace, remove)));
+          if (remove) {
+            const dirtyAfterCleanup = await runHostGit(current.workspace, ["status", "--porcelain=v1", "--untracked-files=all"]);
+            if (dirtyAfterCleanup.trim()) throw new Error("workspace services changed the worktree during shutdown; removal was refused");
+            await runHostGit(this.workspace, ["worktree", "remove", current.workspace]);
+          }
+          for (const member of affected) {
+            this.updateSession(member.id, { workspace: this.workspace });
+            this.fileState.clear(member.id);
+          }
+          return { path: current.workspace, root: this.workspace, removed: remove };
+        }
       },
       invokeTool: async (name, args) => {
         lease.assertActive();
@@ -2839,6 +2991,7 @@ export class AgentRuntime {
         if (resumeSessionId) {
           child = this.store.loadSession(resumeSessionId);
           if (child.parentId !== session.id) throw new Error(`subagent session ${resumeSessionId} does not belong to this parent`);
+          if (child.archivedAt) throw new Error(`subagent session ${resumeSessionId} is closed`);
           const active = this.store.listJobs(session.id, 10_000).some((job) => (
             job.kind === "agent"
             && job.childSessionId === child.id
@@ -2993,7 +3146,7 @@ export class AgentRuntime {
       const message = error instanceof Error ? error.message : String(error);
       const timedOut = error instanceof ToolDeadlineError;
       const cancelled = deadline.signal.aborted && !timedOut;
-      toolCall = this.settleToolError(toolCall, message, {
+      toolCall = this.toolCalls.settleError(toolCall, message, {
         interrupted: timedOut || cancelled,
         cancelled,
         timedOut,
@@ -3101,7 +3254,7 @@ export class AgentRuntime {
       toolCall = this.store.settleToolCall(toolCall, { type: "tool_result", payload: terminalPayload }).toolCall;
     } catch (error) {
       const message = `tool result processing failed: ${error instanceof Error ? error.message : String(error)}`;
-      toolCall = this.settleToolError(toolCall, message, { reason: "result_processing_failure" });
+      toolCall = this.toolCalls.settleError(toolCall, message, { reason: "result_processing_failure" });
       await this.fireHooks(session, "tool.post", toolCall.tool, {
         tool: toolCall.tool,
         toolCallId: toolCall.id,
@@ -3167,33 +3320,16 @@ export class AgentRuntime {
     });
   }
 
-  private syncToolCallPart(toolCall: ToolCallRecord): void {
-    if (!toolCall.timelinePartId) return;
-    this.store.updatePartPayload(toolCall.timelinePartId, { record: toolCall });
-  }
-
   private settleBackgroundProcess(sessionId: string, processId: string, status: "done" | "error"): void {
     this.store.settleBackgroundProcess(sessionId, processId, status);
   }
 
   private boundToolOutput(sessionId: string, toolCall: ToolCallRecord, result: ToolResult): ToolResult {
-    if (!result.output) return result;
-    const rawOutput = result.output;
-    const sanitizedOutput = sanitizeToolOutput(rawOutput);
-    const bytes = Buffer.byteLength(sanitizedOutput, "utf8");
-    if (bytes <= TOOL_OUTPUT_MAX_BYTES) {
-      return sanitizedOutput === rawOutput ? result : { ...result, output: sanitizedOutput };
-    }
-    const artifact = this.store.saveOutputArtifact({ sessionId, toolCallId: toolCall.id, content: rawOutput });
-    const head = takeBytes(sanitizedOutput, TOOL_OUTPUT_HEAD_BYTES, "head");
-    const tail = takeBytes(sanitizedOutput, TOOL_OUTPUT_TAIL_BYTES, "tail");
-    const preview = `${head}\n\n[output truncated: full ${artifact.bytes} bytes stored as artifact ${artifact.id}; read it with tool_output_read]\n\n${tail}`;
-    return {
-      ...result,
-      output: preview,
-      outputArtifactId: artifact.id,
-      metadata: { ...(result.metadata ?? {}), outputArtifact: artifact }
-    };
+    return normalizeToolResult(result, {
+      sessionId,
+      toolCallId: toolCall.id,
+      saveOutputArtifact: (input) => this.store.saveOutputArtifact(input)
+    });
   }
 
   private event(sessionId: string, type: SessionEvent["type"], payload: unknown): void {
@@ -3240,7 +3376,8 @@ export class AgentRuntime {
     }
     if (command === "/mcp") {
       await refreshMcpTools({
-        workspace: this.workspace,
+        workspace: session.workspace,
+        configWorkspace: this.workspace,
         session,
         background: true,
         force: true,
@@ -3324,7 +3461,7 @@ export class AgentRuntime {
   }
 
   async compactSession(session: Session, customInstructions?: string): Promise<Session> {
-    const planner = this.planner ?? await createPlannerForSessionAsync(session);
+    const planner = this.planner ?? await createPlannerForSessionAsync(session, this.workspace);
     const controller = new AbortController();
     this.compactionControllers.get(session.id)?.abort("new compaction started");
     this.compactionControllers.set(session.id, controller);
@@ -3332,7 +3469,7 @@ export class AgentRuntime {
       return await this.compactSessionWithPlanner(session, planner, { trigger: "manual", ...(customInstructions ? { customInstructions } : {}), signal: controller.signal });
     } finally {
       if (this.compactionControllers.get(session.id) === controller) this.compactionControllers.delete(session.id);
-      if (!this.shuttingDown) void this.wakeQueuedUserInputs(session.id);
+      if (!this.shuttingDown) void this.mailboxDispatcher.wakeQueuedInputs(session.id);
     }
   }
 
@@ -3525,97 +3662,6 @@ export class AgentRuntime {
   }
 }
 
-function validateToolArgs(schema: Record<string, unknown> | undefined, args: unknown): string | undefined {
-  if (!schema || typeof schema !== "object") return undefined;
-  if (typeof schema.type === "string" && schema.type !== "object") return undefined;
-  if (!args || typeof args !== "object" || Array.isArray(args)) return "expected an object of arguments";
-  return validateObjectSchema(schema, args as Record<string, unknown>, "");
-}
-
-function validateSchemaValue(schema: Record<string, unknown>, value: unknown, path: string): string | undefined {
-  const expected = typeof schema.type === "string"
-    ? [schema.type]
-    : Array.isArray(schema.type)
-      ? schema.type.filter((item): item is string => typeof item === "string")
-      : [];
-  if (expected.length && !expected.some((type) => matchesJsonType(value, type))) {
-    return `${fieldName(path)} should be of type ${expected.join(" or ")}`;
-  }
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
-    return `${fieldName(path)} must be one of: ${schema.enum.join(", ")}`;
-  }
-  if (typeof value === "string") {
-    if (typeof schema.minLength === "number" && value.length < schema.minLength) return `${fieldName(path)} must contain at least ${schema.minLength} character(s)`;
-    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return `${fieldName(path)} cannot exceed ${schema.maxLength} character(s)`;
-    if (typeof schema.pattern === "string") {
-      try {
-        if (!new RegExp(schema.pattern).test(value)) return `${fieldName(path)} does not match the required pattern`;
-      } catch {
-        return `${fieldName(path)} has an invalid schema pattern`;
-      }
-    }
-  }
-  if (typeof value === "number") {
-    if (typeof schema.minimum === "number" && value < schema.minimum) return `${fieldName(path)} must be at least ${schema.minimum}`;
-    if (typeof schema.maximum === "number" && value > schema.maximum) return `${fieldName(path)} cannot exceed ${schema.maximum}`;
-  }
-  if (Array.isArray(value)) {
-    if (typeof schema.minItems === "number" && value.length < schema.minItems) return `${fieldName(path)} must contain at least ${schema.minItems} item(s)`;
-    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return `${fieldName(path)} cannot contain more than ${schema.maxItems} item(s)`;
-    if (schema.uniqueItems === true && new Set(value.map(stableValue)).size !== value.length) return `${fieldName(path)} must contain unique items`;
-    const itemSchema = schema.items;
-    if (itemSchema && typeof itemSchema === "object" && !Array.isArray(itemSchema)) {
-      for (let index = 0; index < value.length; index += 1) {
-        const error = validateSchemaValue(itemSchema as Record<string, unknown>, value[index], `${path}[${index}]`);
-        if (error) return error;
-      }
-    }
-  }
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return validateObjectSchema(schema, value as Record<string, unknown>, path);
-  }
-  return undefined;
-}
-
-function validateObjectSchema(schema: Record<string, unknown>, record: Record<string, unknown>, path: string): string | undefined {
-  const required = Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : [];
-  for (const key of required) {
-    if (record[key] === undefined || record[key] === null) return `missing required field "${joinFieldPath(path, key)}"`;
-  }
-  const properties = schema.properties && typeof schema.properties === "object" ? schema.properties as Record<string, Record<string, unknown>> : {};
-  for (const [key, value] of Object.entries(record)) {
-    const propSchema = properties[key];
-    if (!propSchema || typeof propSchema !== "object") {
-      if (schema.additionalProperties === false) return `unexpected field "${joinFieldPath(path, key)}"`;
-      continue;
-    }
-    const error = validateSchemaValue(propSchema, value, joinFieldPath(path, key));
-    if (error) return error;
-  }
-  return undefined;
-}
-
-function joinFieldPath(path: string, key: string): string {
-  return path ? `${path}.${key}` : key;
-}
-
-function fieldName(path: string): string {
-  return path ? `field "${path}"` : "value";
-}
-
-function matchesJsonType(value: unknown, type: string): boolean {
-  switch (type) {
-    case "string": return typeof value === "string";
-    case "number": return typeof value === "number" && Number.isFinite(value);
-    case "integer": return typeof value === "number" && Number.isInteger(value);
-    case "boolean": return typeof value === "boolean";
-    case "array": return Array.isArray(value);
-    case "object": return !!value && typeof value === "object" && !Array.isArray(value);
-    case "null": return value === null;
-    default: return true;
-  }
-}
-
 function plannerRetryState(error: unknown, attempt: number, safeToReplay: boolean): { willRetry: boolean; maxAttempts: number; delayMs: number; reason: string } {
   if (error instanceof PlannerOutputValidationError) {
     const maxAttempts = 2;
@@ -3651,56 +3697,6 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function abortablePromise<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(abortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const cleanup = () => signal.removeEventListener("abort", onAbort);
-    const onAbort = () => {
-      cleanup();
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => { cleanup(); resolve(value); },
-      (error) => { cleanup(); reject(error); }
-    );
-  });
-}
-
-function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? "aborted"));
-}
-
-function mailboxText(item: import("../types").SessionMailboxItem): string {
-  if (!item.payload || typeof item.payload !== "object") return "";
-  const text = (item.payload as { text?: unknown }).text;
-  return typeof text === "string" ? text : "";
-}
-
-function queuedUserInput(item: SessionMailboxItem): QueuedUserInput | undefined {
-  if (item.kind !== "user" || item.triggerPolicy !== "queue" || !item.payload || typeof item.payload !== "object") return undefined;
-  const payload = item.payload as { text?: unknown; inputMode?: unknown; action?: unknown };
-  if ((payload.inputMode !== "queued_followup" && payload.inputMode !== "turn") || typeof payload.text !== "string" || !payload.text.trim()) return undefined;
-  const action = payload.action === "slash" || payload.action === "shell" || payload.action === "plain"
-    ? payload.action
-    : queuedInputAction(payload.text);
-  return { id: item.id, sequence: item.sequence, text: payload.text, action, createdAt: item.createdAt };
-}
-
-function queuedFollowupUserInput(item: SessionMailboxItem): QueuedUserInput | undefined {
-  if (!item.payload || typeof item.payload !== "object") return undefined;
-  if ((item.payload as { inputMode?: unknown }).inputMode !== "queued_followup") return undefined;
-  return queuedUserInput(item);
-}
-
-function queuedInputAction(text: string): QueuedInputAction {
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith("!")) return "shell";
-  if (trimmed.startsWith("/")) return "slash";
-  return "plain";
-}
-
 function isProviderToolDef(value: unknown): value is ProviderToolDef {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const tool = value as Partial<ProviderToolDef>;
@@ -3723,7 +3719,7 @@ function completedToolCallStatus(result: ToolResult): ToolCallRecord["status"] {
 function agentTaskOutput(payload: unknown): string[] {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
   const record = payload as Record<string, unknown>;
-  if (record.tool !== "agent_task") return [];
+  if (!["agent_task", "agent_spawn", "agent_followup"].includes(String(record.tool))) return [];
   const toolResult = record.toolResult;
   if (!toolResult || typeof toolResult !== "object" || Array.isArray(toolResult)) return [];
   const output = (toolResult as Record<string, unknown>).output;
@@ -3776,103 +3772,6 @@ function outputArtifactPath(result: ToolResult): unknown {
   return result.metadata?.fullOutputArtifactPath;
 }
 
-class ToolExecutionLease {
-  private active = true;
-  private reason = "tool execution finished";
-
-  isActive(): boolean {
-    return this.active;
-  }
-
-  assertActive(): void {
-    if (!this.active) throw new Error(`Tool context is no longer active: ${this.reason}`);
-  }
-
-  revoke(reason: string): void {
-    this.active = false;
-    this.reason = reason;
-  }
-}
-
-class ToolExecutionDeadline {
-  readonly signal: AbortSignal;
-  private readonly controller = new AbortController();
-  private readonly tool: string;
-  private readonly timeoutMs: number;
-  private timer: ReturnType<typeof setTimeout> | undefined;
-  private readonly parentSignal: AbortSignal | undefined;
-  private readonly abortFromParent: (() => void) | undefined;
-
-  constructor(tool: string, timeoutMs: number, parentSignal?: AbortSignal) {
-    this.tool = tool;
-    this.timeoutMs = normalizeToolTimeout(timeoutMs);
-    this.signal = this.controller.signal;
-    this.parentSignal = parentSignal;
-    this.abortFromParent = parentSignal
-      ? () => this.controller.abort(parentSignal.reason ?? new Error("tool execution cancelled"))
-      : undefined;
-    if (parentSignal?.aborted) this.abortFromParent?.();
-    else if (parentSignal && this.abortFromParent) parentSignal.addEventListener("abort", this.abortFromParent, { once: true });
-  }
-
-  async run<T>(work: () => Promise<T>, gateLease: ToolGateLease): Promise<T> {
-    this.signal.throwIfAborted();
-    this.timer ??= setTimeout(() => {
-      if (!this.signal.aborted) this.controller.abort(new ToolDeadlineError(this.tool, this.timeoutMs));
-    }, this.timeoutMs);
-    this.signal.throwIfAborted();
-    const running = Promise.resolve().then(work);
-    try {
-      return await abortablePromise(running, this.signal);
-    } catch (error) {
-      if (this.signal.aborted) gateLease.quarantineUntil(running, abortReason(this.signal));
-      throw error;
-    }
-  }
-
-  dispose(): void {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = undefined;
-    if (this.parentSignal && this.abortFromParent) this.parentSignal.removeEventListener("abort", this.abortFromParent);
-  }
-}
-
-class ToolGateLease {
-  private readonly quarantines: Array<{ running: Promise<unknown>; error: Error }> = [];
-
-  quarantineUntil(running: Promise<unknown>, error: Error): void {
-    this.quarantines.push({ running, error });
-  }
-
-  takeQuarantines(): Array<{ running: Promise<unknown>; error: Error }> {
-    return this.quarantines.splice(0);
-  }
-}
-
-function leasedToolCapability<T extends object>(target: T, lease: ToolExecutionLease): T {
-  return new Proxy(target, {
-    get(object, property, receiver) {
-      const value = Reflect.get(object, property, receiver);
-      if (typeof value !== "function") return value;
-      return (...args: unknown[]) => {
-        lease.assertActive();
-        return Reflect.apply(value, target, args);
-      };
-    }
-  });
-}
-
-function normalizeToolTimeout(timeoutMs: number): number {
-  if (!Number.isFinite(timeoutMs)) return 120_000;
-  return Math.max(1, Math.floor(timeoutMs));
-}
-
-function toolOperationTimeout(timeoutMs: number): number {
-  const deadline = normalizeToolTimeout(timeoutMs);
-  const handoffGrace = Math.min(5_000, Math.max(50, Math.floor(deadline * 0.05)));
-  return Math.max(1, deadline - handoffGrace);
-}
-
 function shutdownGracePeriod(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
   return Math.max(0, value);
@@ -3902,166 +3801,73 @@ function waitForShutdownFinalization(finalization: Promise<void>, gracePeriodMs:
   });
 }
 
-type ToolGateState = {
-  activeReaders: number;
-  activeWriter: boolean;
-  queue: ToolGateWaiter[];
-  quarantines: Set<Promise<unknown>>;
-  quarantineError?: Error;
-};
-
-type ToolGateWaiter = {
-  mode: "read" | "write";
-  resolve: (release: () => void) => void;
-  reject: (error: unknown) => void;
-  signal?: AbortSignal;
-  onAbort?: () => void;
-};
-
-class ToolExecutionGate {
-  private readonly states = new Map<string, ToolGateState>();
-  private readonly idleResolvers = new Set<() => void>();
-
-  idle(): Promise<void> {
-    if (this.states.size === 0) return Promise.resolve();
-    return new Promise((resolve) => this.idleResolvers.add(resolve));
+async function withDeadlineMs<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs);
+        timer.unref?.();
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-
-  async run<T>(key: string, parallel: boolean, fn: (lease: ToolGateLease) => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const release = await this.acquire(key, parallel ? "read" : "write", signal);
-    const lease = new ToolGateLease();
-    try {
-      signal?.throwIfAborted();
-      return await fn(lease);
-    } finally {
-      this.quarantine(key, lease.takeQuarantines());
-      release();
-    }
-  }
-
-  private acquire(key: string, mode: "read" | "write", signal?: AbortSignal): Promise<() => void> {
-    return new Promise((resolve, reject) => {
-      if (signal?.aborted) {
-        reject(signal.reason ?? new Error("tool gate acquisition cancelled"));
-        return;
-      }
-      const state = this.states.get(key) ?? { activeReaders: 0, activeWriter: false, queue: [], quarantines: new Set<Promise<unknown>>() };
-      this.states.set(key, state);
-      if (state.quarantineError) {
-        reject(state.quarantineError);
-        return;
-      }
-      const waiter: ToolGateWaiter = { mode, resolve, reject, ...(signal ? { signal } : {}) };
-      if (signal) {
-        waiter.onAbort = () => {
-          const index = state.queue.indexOf(waiter);
-          if (index === -1) return;
-          state.queue.splice(index, 1);
-          this.detach(waiter);
-          reject(signal.reason ?? new Error("tool gate acquisition cancelled"));
-          this.drain(key, state);
-          this.cleanup(key, state);
-        };
-        signal.addEventListener("abort", waiter.onAbort, { once: true });
-      }
-      state.queue.push(waiter);
-      this.drain(key, state);
-    });
-  }
-
-  private drain(key: string, state: ToolGateState): void {
-    if (state.activeWriter || state.quarantineError) return;
-    const first = state.queue[0];
-    if (!first) return;
-    if (first.mode === "write") {
-      if (state.activeReaders > 0) return;
-      state.queue.shift();
-      state.activeWriter = true;
-      this.grant(first, () => {
-        state.activeWriter = false;
-        this.drain(key, state);
-        this.cleanup(key, state);
-      });
-      return;
-    }
-    while (state.queue[0]?.mode === "read" && !state.activeWriter) {
-      const next = state.queue.shift()!;
-      state.activeReaders += 1;
-      this.grant(next, () => {
-        state.activeReaders -= 1;
-        this.drain(key, state);
-        this.cleanup(key, state);
-      });
-    }
-  }
-
-  private cleanup(key: string, state: ToolGateState): void {
-    if (state.activeReaders === 0 && !state.activeWriter && state.queue.length === 0 && state.quarantines.size === 0 && this.states.get(key) === state) {
-      this.states.delete(key);
-      if (this.states.size === 0) {
-        for (const resolve of this.idleResolvers) resolve();
-        this.idleResolvers.clear();
-      }
-    }
-  }
-
-  private grant(waiter: ToolGateWaiter, release: () => void): void {
-    this.detach(waiter);
-    waiter.resolve(release);
-  }
-
-  private detach(waiter: ToolGateWaiter): void {
-    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-    delete waiter.onAbort;
-  }
-
-  private quarantine(key: string, entries: Array<{ running: Promise<unknown>; error: Error }>): void {
-    if (entries.length === 0) return;
-    const state = this.states.get(key);
-    if (!state) return;
-    state.quarantineError ??= new ToolScopeQuarantinedError(key, entries[0]!.error);
-    for (const waiter of state.queue.splice(0)) {
-      this.detach(waiter);
-      waiter.reject(state.quarantineError);
-    }
-    for (const entry of entries) {
-      let tracked: Promise<unknown>;
-      tracked = entry.running.catch(() => undefined).finally(() => {
-        state.quarantines.delete(tracked);
-        if (state.quarantines.size === 0) {
-          delete state.quarantineError;
-          this.drain(key, state);
-          this.cleanup(key, state);
-        }
-      });
-      state.quarantines.add(tracked);
-    }
-  }
-}
-
-function toolForExecution(session: Session, name: string): ToolDefinition {
-  const canonical = canonicalToolName(name);
-  const tool = getTool(canonical, session);
-  if (!tool) throw new Error(`unknown tool: ${canonical}`);
-  const scoped = session.toolScope?.length ? new Set(session.toolScope.map(canonicalToolName)) : undefined;
-  if (scoped && !scoped.has(canonical) && canonical !== "tool_invoke") {
-    throw new Error(`tool ${canonical} is outside this session's scope`);
-  }
-  return tool;
-}
-
-function toolConcurrencyKey(tool: ToolDefinition, session: Session, workspace: string): string {
-  if (tool.concurrencyScope === "runtime") return "runtime";
-  if (tool.concurrencyScope === "session") return `session:${session.id}`;
-  return `workspace:${workspace}`;
-}
-
-function toolSchedulingDefinition(tool: ToolDefinition, args: unknown, session: Session): ToolDefinition {
-  if (canonicalToolName(tool.name) !== "tool_invoke" || !args || typeof args !== "object" || Array.isArray(args)) return tool;
-  const targetName = canonicalToolName(String((args as Record<string, unknown>).name ?? ""));
-  return getTool(targetName, session) ?? tool;
 }
 
 function positiveFinite(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function isWorkspaceTransitionTool(tool: ToolDefinition): boolean {
+  const name = canonicalToolName(tool.name);
+  return name === "worktree_enter" || name === "worktree_exit";
+}
+
+async function runHostGit(cwd: string, args: string[]): Promise<string> {
+  const process = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text()
+  ]);
+  if (exitCode !== 0) throw new Error(stderr.trim() || `git ${args[0] ?? "command"} failed with exit code ${exitCode}`);
+  return stdout;
+}
+
+async function registeredWorktree(root: string, wantedPath: string): Promise<{ ref: string; branch?: string } | undefined> {
+  const output = await runHostGit(root, ["worktree", "list", "--porcelain"]);
+  let path = "";
+  let ref = "";
+  let branch: string | undefined;
+  const match = (): { ref: string; branch?: string } | undefined => {
+    if (!sameExistingPath(path, wantedPath) || !ref) return undefined;
+    return { ref, ...(branch ? { branch } : {}) };
+  };
+  for (const line of `${output}\n`.split("\n")) {
+    if (!line) {
+      const found = match();
+      if (found) return found;
+      path = "";
+      ref = "";
+      branch = undefined;
+    } else if (line.startsWith("worktree ")) {
+      path = line.slice("worktree ".length);
+    } else if (line.startsWith("HEAD ")) {
+      ref = line.slice("HEAD ".length);
+    } else if (line.startsWith("branch refs/heads/")) {
+      branch = line.slice("branch refs/heads/".length);
+    }
+  }
+  return undefined;
+}
+
+function sameExistingPath(left: string, right: string): boolean {
+  if (left === right) return true;
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
 }

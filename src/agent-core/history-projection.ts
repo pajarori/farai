@@ -1,6 +1,6 @@
 import type { MessageWithParts, ToolCallRecord } from "../types";
 import { canonicalToolName } from "../tool-names";
-import type { ConversationEntry } from "./provider";
+import { estimateConversationEntriesTokens, type ConversationEntry } from "./provider";
 import { ensureToolResultsPaired, fitToolResultText } from "./loop/history";
 
 export type HistoryProjection = {
@@ -79,7 +79,7 @@ export function projectConversationHistory(messages: MessageWithParts[], options
         if (record && tool) pendingToolCalls.push({ id: record.providerToolCallId ?? record.id, tool, args: record.args });
       } else if (part.type === "tool_result") {
         flush();
-        const payload = part.payload as { toolCallId?: string; tool?: unknown; result?: unknown };
+        const payload = part.payload as { toolCallId?: string; tool?: unknown; result?: unknown; toolResult?: { attachments?: import("../types").ToolAttachment[] } };
         const raw = typeof payload.result === "string" ? payload.result : JSON.stringify(payload.result ?? "");
         const tool = canonicalToolName(payload.tool) || "unknown";
         const text = fitToolResultText(raw, options.fullToolResultMaxBytes ?? 8 * 1024);
@@ -88,7 +88,8 @@ export function projectConversationHistory(messages: MessageWithParts[], options
           role: "tool",
           toolCallId: (payload.toolCallId ? providerToolCallIds.get(payload.toolCallId) : undefined) ?? payload.toolCallId ?? tool,
           tool,
-          text
+          text,
+          ...(payload.toolResult?.attachments?.length ? { attachments: payload.toolResult.attachments } : {})
         });
       } else if (part.type === "error") {
         const payload = part.payload as { toolCallId?: string; tool?: unknown; error?: string; text?: string };
@@ -202,6 +203,6 @@ function truncateEntryToBudget(entry: ConversationEntry, maxTokens: number): Con
   return { ...entry, text: best };
 }
 
-function estimateTokens(value: unknown): number {
-  return Math.max(0, Math.ceil(Buffer.byteLength(JSON.stringify(value), "utf8") / 4));
+function estimateTokens(value: ConversationEntry[]): number {
+  return estimateConversationEntriesTokens(value);
 }

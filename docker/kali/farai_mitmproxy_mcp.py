@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,15 +30,16 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 MAX_BODY_PREVIEW = env_int("FARAI_PROXY_BODY_PREVIEW_BYTES", 65536, 1024, 1024 * 1024)
 MAX_MESSAGE_PREVIEW = env_int("FARAI_PROXY_MESSAGE_PREVIEW_BYTES", 16384, 1024, 256 * 1024)
 MAX_MESSAGES = env_int("FARAI_PROXY_MAX_MESSAGES", 200, 1, 1000)
+REPLAY_CORRELATION_HEADER = "X-Farai-Replay-Correlation"
 
 
-class FlowStoreV2:
+class FlowStore:
     def __init__(self, db_path: str):
         self.db_path = db_path
         with self._connect() as conn:
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS farai_flows_v2 (
+                CREATE TABLE IF NOT EXISTS farai_flows (
                     id TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
                     timestamp REAL NOT NULL,
@@ -46,12 +49,12 @@ class FlowStoreV2:
                 """
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_farai_flows_v2_timestamp "
-                "ON farai_flows_v2(timestamp)"
+                "CREATE INDEX IF NOT EXISTS idx_farai_flows_timestamp "
+                "ON farai_flows(timestamp)"
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_farai_flows_v2_kind "
-                "ON farai_flows_v2(kind)"
+                "CREATE INDEX IF NOT EXISTS idx_farai_flows_kind "
+                "ON farai_flows(kind)"
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -65,7 +68,7 @@ class FlowStoreV2:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO farai_flows_v2(id, kind, timestamp, summary_json, detail_json)
+                INSERT INTO farai_flows(id, kind, timestamp, summary_json, detail_json)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     kind=excluded.kind,
@@ -78,7 +81,7 @@ class FlowStoreV2:
 
     def summaries(self, limit: int, kind: str | None = None) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(int(limit), 1000))
-        sql = "SELECT summary_json FROM farai_flows_v2"
+        sql = "SELECT summary_json FROM farai_flows"
         params: list[Any] = []
         if kind:
             sql += " WHERE kind = ?"
@@ -92,22 +95,42 @@ class FlowStoreV2:
     def detail(self, flow_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT detail_json FROM farai_flows_v2 WHERE id = ?", (flow_id,)
+                "SELECT detail_json FROM farai_flows WHERE id = ?", (flow_id,)
             ).fetchone()
         return json.loads(row[0]) if row else None
 
     def clear(self) -> None:
         with self._connect() as conn:
-            conn.execute("DELETE FROM farai_flows_v2")
+            conn.execute("DELETE FROM farai_flows")
 
 
 class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
     def __init__(self, scope: Any):
         super().__init__(scope)
-        self.v2 = FlowStoreV2(self.db.db_path)
+        self.flows = FlowStore(self.db.db_path)
+        self.intercept_config: dict[str, Any] = {
+            "enabled": False,
+            "host_pattern": ".*",
+            "path_pattern": ".*",
+            "methods": [],
+        }
+        self.pending_intercepts: dict[str, http.HTTPFlow] = {}
+        self.replay_correlations: dict[str, dict[str, str]] = {}
 
     def request(self, flow: http.HTTPFlow) -> None:
+        correlation = flow.request.headers.get(REPLAY_CORRELATION_HEADER)
+        if correlation:
+            flow.request.headers.pop(REPLAY_CORRELATION_HEADER, None)
+            replay = self.replay_correlations.get(str(correlation))
+            if replay is not None:
+                replay["descendantFlowId"] = flow.id
+                metadata = getattr(flow, "metadata", None)
+                if isinstance(metadata, dict):
+                    metadata["faraiReplayParentId"] = replay["parentFlowId"]
         super().request(flow)
+        if self._should_intercept(flow):
+            flow.intercept()
+            self.pending_intercepts[flow.id] = flow
         self._capture(flow)
 
     def response(self, flow: http.HTTPFlow) -> None:
@@ -160,24 +183,106 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
     def dns_error(self, flow: dns.DNSFlow) -> None:
         self._capture(flow)
 
-    def get_flow_summary_v2(self, limit: int = 20, kind: str | None = None) -> list[dict[str, Any]]:
-        return self.v2.summaries(limit, kind)
+    def farai_flow_summaries(self, limit: int = 20, kind: str | None = None) -> list[dict[str, Any]]:
+        return self.flows.summaries(limit, kind)
 
-    def get_flow_detail_v2(self, flow_id: str) -> dict[str, Any] | None:
-        return self.v2.detail(flow_id)
+    def farai_flow_detail(self, flow_id: str) -> dict[str, Any] | None:
+        return self.flows.detail(flow_id)
 
     def clear(self) -> None:
         super().clear()
-        self.v2.clear()
+        self.flows.clear()
+
+    def scope_state(self) -> dict[str, Any]:
+        return {"allowedDomains": list(self.scope.config.allowed_domains)}
+
+    def configure_intercept(
+        self,
+        enabled: bool,
+        host_pattern: str = ".*",
+        path_pattern: str = ".*",
+        methods: list[str] | None = None,
+    ) -> dict[str, Any]:
+        re.compile(host_pattern)
+        re.compile(path_pattern)
+        self.intercept_config = {
+            "enabled": bool(enabled),
+            "host_pattern": host_pattern,
+            "path_pattern": path_pattern,
+            "methods": sorted({method.upper() for method in (methods or [])}),
+        }
+        return {**self.intercept_config, "pending": len(self.pending_intercepts)}
+
+    def list_intercepts(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for flow in self.pending_intercepts.values():
+            summary, _, _ = serialize_http(flow)
+            result.append(summary)
+        return sorted(result, key=lambda item: str(item.get("timestamp", "")))
+
+    def begin_replay(self, parent_flow_id: str) -> tuple[str, dict[str, str]]:
+        token = uuid.uuid4().hex
+        state = {"parentFlowId": parent_flow_id}
+        self.replay_correlations[token] = state
+        return token, state
+
+    def finish_replay(self, token: str) -> dict[str, str]:
+        return self.replay_correlations.pop(token, {})
+
+    def resolve_intercept(
+        self,
+        flow_id: str,
+        action: str,
+        method: str | None = None,
+        url: str | None = None,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        flow = self.pending_intercepts.pop(flow_id, None)
+        if flow is None:
+            raise ValueError(f"Unknown pending intercepted flow: {flow_id}")
+        if action == "drop":
+            flow.kill()
+            return {"flowId": flow_id, "action": "drop"}
+        if action not in {"forward", "edit"}:
+            self.pending_intercepts[flow_id] = flow
+            raise ValueError("action must be forward, edit, or drop")
+        if action == "edit":
+            if method:
+                flow.request.method = method.upper()
+            if url:
+                flow.request.url = url
+            for key, value in (headers or {}).items():
+                flow.request.headers[key] = value
+            if body is not None:
+                flow.request.text = body
+        flow.resume()
+        return {"flowId": flow_id, "action": action}
+
+    def _should_intercept(self, flow: http.HTTPFlow) -> bool:
+        config = self.intercept_config
+        if not config["enabled"] or flow.id in self.pending_intercepts:
+            return False
+        methods = config["methods"]
+        return (
+            (not methods or flow.request.method.upper() in methods)
+            and re.search(config["host_pattern"], http_display_host(flow.request)) is not None
+            and re.search(config["path_pattern"], flow.request.path) is not None
+        )
 
     def _capture(self, flow: Any) -> None:
         try:
             if not self._is_allowed(flow):
                 return
             summary, detail, timestamp = serialize_flow(flow)
-            self.v2.save(summary, detail, timestamp)
+            metadata = getattr(flow, "metadata", None)
+            parent_flow_id = metadata.get("faraiReplayParentId") if isinstance(metadata, dict) else None
+            if parent_flow_id:
+                summary["parentFlowId"] = parent_flow_id
+                detail["parentFlowId"] = parent_flow_id
+            self.flows.save(summary, detail, timestamp)
         except Exception as exc:
-            print(f"Failed to save Farai v2 flow: {exc}", file=sys.stderr)
+            print(f"Failed to save Farai flow: {exc}", file=sys.stderr)
 
     def _is_allowed(self, flow: Any) -> bool:
         if isinstance(flow, http.HTTPFlow):
@@ -537,22 +642,148 @@ def optional(target: dict[str, Any], key: str, value: Any) -> None:
 
 
 @server.mcp.tool()
-async def get_flow_summary_v2(limit: int = 20, kind: str | None = None) -> str:
+async def proxy_flow_summaries(limit: int = 20, kind: str | None = None) -> str:
     """Return HTTP, WebSocket, TCP, UDP, and DNS flow summaries."""
     recorder = server.controller.recorder
     if not isinstance(recorder, FaraiTrafficRecorder):
         return "[]"
-    return json.dumps(recorder.get_flow_summary_v2(limit, kind), indent=2)
+    return json.dumps(recorder.farai_flow_summaries(limit, kind), indent=2)
 
 
 @server.mcp.tool()
-async def inspect_flow_v2(flow_id: str) -> str:
+async def proxy_flow_inspect(flow_id: str) -> str:
     """Return protocol-aware detail for a captured flow."""
     recorder = server.controller.recorder
     if not isinstance(recorder, FaraiTrafficRecorder):
         return "Couldn't find that flow."
-    detail = recorder.get_flow_detail_v2(flow_id)
+    detail = recorder.farai_flow_detail(flow_id)
     return json.dumps(detail, indent=2) if detail else "Couldn't find that flow."
+
+
+@server.mcp.tool()
+async def proxy_replay_correlated(
+    flow_id: str,
+    method: str | None = None,
+    headers_json: str | None = None,
+    body: str | None = None,
+    timeout: float = 30.0,
+) -> str:
+    """Replay an HTTP flow and return its exact captured descendant flow id."""
+    recorder = server.controller.recorder
+    if not isinstance(recorder, FaraiTrafficRecorder):
+        return json.dumps({"ok": False, "error": "Farai recorder is unavailable."})
+    if recorder.farai_flow_detail(flow_id) is None:
+        return json.dumps({"ok": False, "error": f"Couldn't find flow {flow_id}."})
+    try:
+        headers = json.loads(headers_json) if headers_json else {}
+    except json.JSONDecodeError as exc:
+        return json.dumps({"ok": False, "error": f"Invalid headers_json: {exc}"})
+    if not isinstance(headers, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
+        return json.dumps({"ok": False, "error": "headers_json must encode a string-to-string object."})
+
+    # Upstream treats None as "reuse the captured body"; an empty string omits it.
+    resolved_body = "" if body == "__omit__" else body
+    variables = getattr(server.controller, "session_variables", {})
+    resolver = getattr(server, "_resolve_template", None)
+    if variables and callable(resolver):
+        headers = json.loads(resolver(json.dumps(headers), variables))
+        if resolved_body:
+            resolved_body = resolver(resolved_body, variables)
+
+    token, correlation = recorder.begin_replay(flow_id)
+    headers[REPLAY_CORRELATION_HEADER] = token
+    try:
+        message = await server.controller.replay_request(flow_id, method, headers, resolved_body, timeout)
+        result = recorder.finish_replay(token)
+    except Exception as exc:
+        recorder.finish_replay(token)
+        return json.dumps({"ok": False, "parentFlowId": flow_id, "error": str(exc)})
+    ok = not any(marker in message.lower() for marker in ("couldn't find", "didn't work", "invalid"))
+    return json.dumps(
+        {
+            "ok": ok,
+            **correlation,
+            **result,
+            "message": message,
+            **({} if ok else {"error": message}),
+        },
+        indent=2,
+    )
+
+
+@server.mcp.tool()
+async def proxy_scope_get() -> str:
+    """Return Farai's active mitmproxy capture scope."""
+    recorder = server.controller.recorder
+    if not isinstance(recorder, FaraiTrafficRecorder):
+        return json.dumps({"allowedDomains": []})
+    return json.dumps(recorder.scope_state(), indent=2)
+
+
+@server.mcp.tool()
+async def proxy_intercept_configure(
+    enabled: bool,
+    host_pattern: str = ".*",
+    path_pattern: str = ".*",
+    methods: list[str] | None = None,
+) -> str:
+    """Enable or disable Farai's manual request interception queue."""
+    recorder = server.controller.recorder
+    if not isinstance(recorder, FaraiTrafficRecorder):
+        raise RuntimeError("Farai recorder is unavailable.")
+    try:
+        return json.dumps(
+            recorder.configure_intercept(enabled, host_pattern, path_pattern, methods),
+            indent=2,
+        )
+    except re.error as exc:
+        raise ValueError(f"Invalid interception pattern: {exc}") from exc
+
+
+@server.mcp.tool()
+async def proxy_intercept_get() -> str:
+    """Return Farai's manual interception configuration and queue size."""
+    recorder = server.controller.recorder
+    if not isinstance(recorder, FaraiTrafficRecorder):
+        return json.dumps({"enabled": False, "pending": 0})
+    return json.dumps(
+        {**recorder.intercept_config, "pending": len(recorder.pending_intercepts)},
+        indent=2,
+    )
+
+
+@server.mcp.tool()
+async def proxy_intercept_list() -> str:
+    """List requests currently paused in Farai's interception queue."""
+    recorder = server.controller.recorder
+    if not isinstance(recorder, FaraiTrafficRecorder):
+        return "[]"
+    return json.dumps(recorder.list_intercepts(), indent=2)
+
+
+@server.mcp.tool()
+async def proxy_intercept_resolve(
+    flow_id: str,
+    action: str,
+    method: str | None = None,
+    url: str | None = None,
+    headers_json: str | None = None,
+    body: str | None = None,
+) -> str:
+    """Forward, edit, or drop one request from Farai's interception queue."""
+    recorder = server.controller.recorder
+    if not isinstance(recorder, FaraiTrafficRecorder):
+        raise RuntimeError("Farai recorder is unavailable.")
+    headers = json.loads(headers_json) if headers_json else None
+    if headers is not None and (
+        not isinstance(headers, dict)
+        or not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items())
+    ):
+        raise ValueError("headers_json must encode a string-to-string object.")
+    return json.dumps(
+        recorder.resolve_intercept(flow_id, action, method, url, headers, body),
+        indent=2,
+    )
 
 
 server.TrafficRecorder = FaraiTrafficRecorder

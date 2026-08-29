@@ -7,6 +7,7 @@ import { useTuiRuntime } from "./runtime";
 import type { ProxyFlowQuery, ProxyFlowSummary } from "../../agent-tools/services/mitmproxy/flows";
 import { projectMessagesToRows, type TimelineRow } from "../renderers";
 import type { AgentThreadSummary } from "../runtime-port";
+import type { UserInputAnswer } from "../../types";
 
 export function proxyRefreshQuery(): ProxyFlowQuery {
   return { limit: 300 };
@@ -16,8 +17,11 @@ export type TuiStoreValue = {
   store: FaraiTuiStore;
   actions: StoreActions;
   timelineRows: () => TimelineRow[];
-  submitPrompt: (text: string) => Promise<void>;
-  queuePrompt: (text: string) => Promise<void>;
+  submitPrompt: (text: string) => boolean;
+  submitUserInput: (answer: UserInputAnswer) => Promise<boolean>;
+  answerUserInputQuestion: (questionId: string, answer: string) => Promise<boolean>;
+  cancelUserInput: () => Promise<void>;
+  queuePrompt: (text: string) => boolean;
   createSession: () => Promise<void>;
   forkCurrentSession: () => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
@@ -30,6 +34,7 @@ export type TuiStoreValue = {
   refreshServices: () => Promise<void>;
   refreshProxyFlows: () => Promise<void>;
   refreshAvailableModels: () => Promise<void>;
+  openModelsOverlay: () => Promise<void>;
   refreshAgentThreads: () => Promise<void>;
   openAgentsOverlay: () => Promise<void>;
   openMcpOverlay: () => Promise<void>;
@@ -283,12 +288,23 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     if (disposed) return;
     const generation = ++modelRefreshGeneration;
     try {
-      const models = await port.listAvailableModels();
+      const catalog = await port.loadModelCatalog();
       if (disposed || modelRefreshGeneration !== generation) return;
-      actions.availableModelsSet(models);
+      actions.modelCatalogSet(catalog.providers, catalog.models);
     } catch {
       if (disposed || modelRefreshGeneration !== generation) return;
       actions.availableModelsSet([]);
+    }
+  }
+
+  async function openModelsOverlay(): Promise<void> {
+    if (disposed) return;
+    actions.overlayOpen("model");
+    setStatusDetail("loading models");
+    try {
+      await refreshAvailableModels();
+    } finally {
+      if (!disposed && store.ui.statusDetail === "loading models") setStatusDetail(undefined);
     }
   }
 
@@ -382,51 +398,125 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     return toggle;
   }
 
-  async function submitPrompt(text: string): Promise<void> {
-    if (disposed) return;
+  function submitPrompt(text: string): boolean {
+    if (disposed) return false;
     const sid = store.activeSessionId;
-    if (!sid || !text.trim()) return;
-    if (promptSubmissions.has(sid) || isAgentBusy(store) || port.getRunningTurnId(sid)) {
-      await queuePrompt(text);
-      return;
-    }
-    actions.promptHistoryAdd(text);
-    const submission = { generation: actions.promptSubmissionStarted() };
-    promptSubmissions.set(sid, submission);
-    try {
-      await port.prompt(sid, text);
-    } catch (error) {
-      if (disposed || store.activeSessionId !== sid) return;
-      actions.errorSet(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (promptSubmissions.get(sid) === submission) {
-        promptSubmissions.delete(sid);
-        if (disposed || store.activeSessionId !== sid) return;
-        actions.promptSubmissionFinished(submission.generation);
+    if (!sid || !text.trim()) return false;
+    if (store.snapshot.pendingUserInput) {
+      actions.promptHistoryAdd(text);
+      void (async () => {
         try {
+          await port.answerUserInput(sid, text);
           await requestSnapshotRefresh(sid);
         } catch (error) {
           if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
         }
+      })();
+      return true;
+    }
+    if (promptSubmissions.has(sid) || isAgentBusy(store) || port.getRunningTurnId(sid)) {
+      if (port.steer?.(sid, text)) {
+        actions.promptHistoryAdd(text);
+        setStatusDetail("steering submitted", 1_500);
+        return true;
       }
+      return queuePrompt(text);
+    }
+    actions.promptHistoryAdd(text);
+    const submission = { generation: actions.promptSubmissionStarted() };
+    promptSubmissions.set(sid, submission);
+    void (async () => {
+      try {
+        await port.prompt(sid, text);
+      } catch (error) {
+        if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (promptSubmissions.get(sid) === submission) {
+          promptSubmissions.delete(sid);
+          if (disposed || store.activeSessionId !== sid) return;
+          actions.promptSubmissionFinished(submission.generation);
+          try {
+            await requestSnapshotRefresh(sid);
+          } catch (error) {
+            if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+    })();
+    return true;
+  }
+
+  async function submitUserInput(answer: UserInputAnswer): Promise<boolean> {
+    if (disposed) return false;
+    const sid = store.activeSessionId;
+    const request = store.snapshot.pendingUserInput;
+    if (!sid || !request || request.sessionId !== sid || store.ui.requestUserInput?.submitting) return false;
+    const requestId = request.id;
+    actions.requestUserInputSubmittingSet(true);
+    actions.errorSet(undefined);
+    try {
+      await port.answerUserInputStructured(sid, answer);
+      if (disposed || store.activeSessionId !== sid) return true;
+      actions.snapshotPatched({ pendingUserInput: undefined });
+      await requestSnapshotRefresh(sid);
+      return true;
+    } catch (error) {
+      if (!disposed && store.activeSessionId === sid && store.snapshot.pendingUserInput?.id === requestId) {
+        actions.requestUserInputSubmittingSet(false);
+        actions.errorSet(error instanceof Error ? error.message : String(error));
+      }
+      return false;
     }
   }
 
-  async function queuePrompt(text: string): Promise<void> {
+  async function answerUserInputQuestion(questionId: string, rawAnswer: string): Promise<boolean> {
+    const request = store.snapshot.pendingUserInput;
+    const state = store.ui.requestUserInput;
+    const answer = rawAnswer.trim();
+    if (!request || !state || state.requestId !== request.id || state.submitting || !answer) return false;
+    if (!request.questions.some((question) => question.id === questionId)) return false;
+    const answers = { ...state.answers, [questionId]: answer };
+    actions.requestUserInputAnswerSet(questionId, answer);
+    const nextIndex = request.questions.findIndex((question) => !answers[question.id]?.trim());
+    if (nextIndex >= 0) {
+      actions.requestUserInputQuestionSet(nextIndex);
+      return true;
+    }
+    return submitUserInput({ answers });
+  }
+
+  async function cancelUserInput(): Promise<void> {
     if (disposed) return;
     const sid = store.activeSessionId;
-    if (!sid || !text.trim()) return;
-    const owner = captureSessionOwner(sid);
-    if (!owner) return;
-    const queued = port.queueInput(sid, text);
-    if (!queued) return;
-    actions.snapshotPatched({ queuedPrompts: mergeQueuedPrompts(store.snapshot.queuedPrompts, queued) });
-    actions.promptHistoryAdd(text);
+    const request = store.snapshot.pendingUserInput;
+    if (!sid || !request || request.sessionId !== sid) return;
     try {
-      const activity = await port.loadActivityState(sid);
-      if (!ownsSession(owner)) return;
-      actions.snapshotPatched(activity);
-    } catch {
+      await port.cancelUserInput(sid);
+      if (disposed || store.activeSessionId !== sid) return;
+      actions.snapshotPatched({ pendingUserInput: undefined });
+      const turnId = store.snapshot.runningTurnId ?? port.getRunningTurnId(sid);
+      if (turnId && capabilities.cancel) {
+        try { await port.cancelTurn(turnId, "user input cancelled"); } catch { }
+      }
+      await requestSnapshotRefresh(sid);
+    } catch (error) {
+      if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function queuePrompt(text: string): boolean {
+    if (disposed) return false;
+    const sid = store.activeSessionId;
+    try {
+      if (!sid || !text.trim() || !captureSessionOwner(sid)) return false;
+      const queued = port.queueInput(sid, text);
+      if (!queued) return false;
+      actions.snapshotPatched({ queuedPrompts: mergeQueuedPrompts(store.snapshot.queuedPrompts, queued) });
+      actions.promptHistoryAdd(text);
+      return true;
+    } catch (error) {
+      if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
+      return false;
     }
   }
 
@@ -570,6 +660,9 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     actions,
     timelineRows,
     submitPrompt,
+    submitUserInput,
+    answerUserInputQuestion,
+    cancelUserInput,
     queuePrompt,
     createSession,
     forkCurrentSession,
@@ -583,6 +676,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     refreshServices,
     refreshProxyFlows,
     refreshAvailableModels,
+    openModelsOverlay,
     refreshAgentThreads,
     openAgentsOverlay,
     openMcpOverlay,

@@ -5,10 +5,13 @@ import type { StoreChange } from "../agent-store/sqlite-store";
 import type { McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
 import type { ProxyFlowDetail, ProxyFlowSummary } from "../agent-tools/services/mitmproxy/flows";
 import type { ServiceStatus } from "../agent-tools/services/types";
-import type { CompactionBoundary, Evidence, Finding, MemoryItem, MessageWithParts, Note, QueuedUserInput, Session, SessionEvent, TodoItem, ToolCallRecord, ToolInputPreview } from "../types";
+import type { CompactionBoundary, Evidence, Finding, MemoryItem, MessageWithParts, Note, PendingSteerInput, QueuedUserInput, Session, SessionEvent, TodoItem, ToolCallRecord, ToolInputPreview } from "../types";
 import type { OverlayKind } from "./input/router";
 import { subagentActivityFromJob, type AgentThreadSummary, type BackgroundActivitySummary, type SessionListItem, type SessionSnapshot, type SubagentActivity } from "./runtime-port";
 import type { BrowserContextActivity } from "../agent-tools/browser/context-manager";
+import { clampIndex as clampRequestIndex, syncRequestUserInputUiState, wrapIndex as wrapRequestIndex, type RequestUserInputUiState } from "./request-user-input-state";
+import type { ModelProviderInfo } from "../agent-core/model-provider-management";
+import { createModelProviderWizard, type ModelProviderWizardState } from "./model-provider-state";
 
 export type OverlayFrame =
   | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory" | "mcp"; query: string; index: number }
@@ -65,7 +68,9 @@ export type StoreSnapshot = {
   memory: MemoryItem[];
   runningTurnId: string | undefined;
   runningTurnStartedAt?: string | undefined;
+  pendingSteers: PendingSteerInput[];
   queuedPrompts: QueuedUserInput[];
+  pendingUserInput: import("../types").PendingUserInput | undefined;
   compactionBoundary?: CompactionBoundary | undefined;
 };
 
@@ -100,6 +105,9 @@ export type FaraiTuiStore = {
     containerStatus: "running" | "stopped" | "missing" | "unknown";
     services: ServiceStatus[];
     availableModels: ModelChoiceInfo[];
+    modelProviders: ModelProviderInfo[];
+    modelProviderWizard: ModelProviderWizardState | undefined;
+    modelProviderRemoval: ModelProviderInfo | undefined;
     mcpStatuses: McpServerRuntimeStatus[];
     mcpStatusError: string | undefined;
     messageNavigation: { direction: "next" | "prev"; sequence: number };
@@ -107,6 +115,7 @@ export type FaraiTuiStore = {
     sessionStats: Record<string, Omit<SessionListItem, "session">>;
     agentThreads: AgentThreadSummary[];
     lastError: string | undefined;
+    requestUserInput: RequestUserInputUiState | undefined;
   };
 };
 
@@ -179,6 +188,12 @@ export type StoreActions = {
   containerStatusSet: (status: FaraiTuiStore["ui"]["containerStatus"]) => void;
   servicesSet: (services: ServiceStatus[]) => void;
   availableModelsSet: (models: ModelChoiceInfo[]) => void;
+  modelCatalogSet: (providers: ModelProviderInfo[], models: ModelChoiceInfo[]) => void;
+  modelProviderWizardOpen: (provider?: ModelProviderInfo) => void;
+  modelProviderWizardPatch: (patch: Partial<ModelProviderWizardState>) => void;
+  modelProviderWizardClose: () => void;
+  modelProviderRemovalOpen: (provider: ModelProviderInfo) => void;
+  modelProviderRemovalClose: () => void;
   mcpStatusesSet: (statuses: McpServerRuntimeStatus[]) => void;
   mcpStatusErrorSet: (message: string | undefined) => void;
   agentThreadsSet: (threads: AgentThreadSummary[]) => void;
@@ -195,6 +210,14 @@ export type StoreActions = {
   streamTextUpdated: (partId: string, text: string) => void;
   toolInputPreviewUpdated: (preview: ToolInputPreview) => void;
   toolInputPreviewRemoved: (previewId: string) => void;
+  requestUserInputQuestionSet: (index: number) => void;
+  requestUserInputQuestionMove: (delta: number) => void;
+  requestUserInputOptionSet: (questionId: string, index: number, optionCount: number) => void;
+  requestUserInputOptionMove: (questionId: string, delta: number, optionCount: number) => void;
+  requestUserInputTextModeSet: (questionId: string | undefined) => void;
+  requestUserInputDraftSet: (questionId: string, draft: string) => void;
+  requestUserInputAnswerSet: (questionId: string, answer: string) => void;
+  requestUserInputSubmittingSet: (submitting: boolean) => void;
 };
 
 export type FaraiStore = {
@@ -228,7 +251,9 @@ function emptySnapshot(): StoreSnapshot {
     memory: [],
     runningTurnId: undefined,
     runningTurnStartedAt: undefined,
+    pendingSteers: [],
     queuedPrompts: [],
+    pendingUserInput: undefined,
     compactionBoundary: undefined
   };
 }
@@ -265,13 +290,17 @@ export function initialStore(workspace: string): FaraiTuiStore {
       containerStatus: "unknown",
       services: [],
       availableModels: [],
+      modelProviders: [],
+      modelProviderWizard: undefined,
+      modelProviderRemoval: undefined,
       mcpStatuses: [],
       mcpStatusError: undefined,
       messageNavigation: { direction: "next", sequence: 0 },
       centerScroll: { action: "down", sequence: 0 },
       sessionStats: {},
       agentThreads: [],
-      lastError: undefined
+      lastError: undefined,
+      requestUserInput: undefined
     }
   };
 }
@@ -326,11 +355,14 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.expandedCells = {};
         s.ui.containerStatus = "unknown";
         s.ui.services = [];
+        s.ui.modelProviderWizard = undefined;
+        s.ui.modelProviderRemoval = undefined;
         s.ui.mcpStatuses = [];
         s.ui.agentThreads = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
         s.ui.mcpStatusError = undefined;
         s.ui.lastError = undefined;
+        s.ui.requestUserInput = undefined;
       }));
     },
     snapshotApplied(next: SessionSnapshot): void {
@@ -341,6 +373,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         : [];
       batch(() => {
         applySnapshotPatch(setStore, { ...next, toolInputPreviews });
+        setStore("ui", "requestUserInput", syncRequestUserInputUiState(store.ui.requestUserInput, next.pendingUserInput));
         if (next.runningTurnId) setStore("ui", "submitting", false);
         syncTurnLifecycle(store, setStore, previousTurnId, next.runningTurnId, next.runningTurnStartedAt);
         setStore("ui", "contextUsage", contextUsageFromEvents(next.events));
@@ -359,6 +392,9 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       if (nextTurnId && store.ui.submitting) promptSubmissionGeneration += 1;
       batch(() => {
         applySnapshotPatch(setStore, patch);
+        if (Object.prototype.hasOwnProperty.call(patch, "pendingUserInput")) {
+          setStore("ui", "requestUserInput", syncRequestUserInputUiState(store.ui.requestUserInput, patch.pendingUserInput));
+        }
         if (nextTurnId) setStore("ui", "submitting", false);
         if (patchesTurn) syncTurnLifecycle(store, setStore, previousTurnId, nextTurnId, nextStartedAt);
         if (patch.events) setStore("ui", "contextUsage", contextUsageFromEvents(patch.events));
@@ -645,6 +681,30 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     availableModelsSet(models: ModelChoiceInfo[]): void {
       setStore("ui", "availableModels", models);
     },
+    modelCatalogSet(providers: ModelProviderInfo[], models: ModelChoiceInfo[]): void {
+      setStore(produce((s) => {
+        s.ui.modelProviders = providers;
+        s.ui.availableModels = models;
+      }));
+    },
+    modelProviderWizardOpen(provider?: ModelProviderInfo): void {
+      setStore("ui", "modelProviderWizard", createModelProviderWizard(provider));
+    },
+    modelProviderWizardPatch(patch: Partial<ModelProviderWizardState>): void {
+      setStore(produce((s) => {
+        if (!s.ui.modelProviderWizard) return;
+        Object.assign(s.ui.modelProviderWizard, patch);
+      }));
+    },
+    modelProviderWizardClose(): void {
+      setStore("ui", "modelProviderWizard", undefined);
+    },
+    modelProviderRemovalOpen(provider: ModelProviderInfo): void {
+      setStore("ui", "modelProviderRemoval", provider);
+    },
+    modelProviderRemovalClose(): void {
+      setStore("ui", "modelProviderRemoval", undefined);
+    },
     mcpStatusesSet(statuses: McpServerRuntimeStatus[]): void {
       setStore("ui", "mcpStatuses", statuses);
     },
@@ -680,6 +740,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.contextUsage = undefined;
         s.ui.lastError = undefined;
         s.snapshot.toolInputPreviews = [];
+        s.snapshot.pendingSteers = [];
         s.snapshot.queuedPrompts = [];
       }));
     },
@@ -768,6 +829,65 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     toolInputPreviewRemoved(previewId: string): void {
       setStore(produce((s) => {
         s.snapshot.toolInputPreviews = s.snapshot.toolInputPreviews.filter((item) => item.id !== previewId);
+      }));
+    },
+    requestUserInputQuestionSet(index: number): void {
+      setStore(produce((s) => {
+        const request = s.snapshot.pendingUserInput;
+        const state = s.ui.requestUserInput;
+        if (!request || !state) return;
+        state.questionIndex = clampRequestIndex(index, request.questions.length);
+        const question = request.questions[state.questionIndex];
+        state.textModeQuestionId = question && !question.choices?.length ? question.id : undefined;
+      }));
+    },
+    requestUserInputQuestionMove(delta: number): void {
+      setStore(produce((s) => {
+        const request = s.snapshot.pendingUserInput;
+        const state = s.ui.requestUserInput;
+        if (!request || !state) return;
+        state.questionIndex = wrapRequestIndex(state.questionIndex + delta, request.questions.length);
+        const question = request.questions[state.questionIndex];
+        state.textModeQuestionId = question && !question.choices?.length ? question.id : undefined;
+      }));
+    },
+    requestUserInputOptionSet(questionId: string, index: number, optionCount: number): void {
+      setStore(produce((s) => {
+        const state = s.ui.requestUserInput;
+        if (!state) return;
+        state.optionIndices[questionId] = clampRequestIndex(index, optionCount);
+      }));
+    },
+    requestUserInputOptionMove(questionId: string, delta: number, optionCount: number): void {
+      setStore(produce((s) => {
+        const state = s.ui.requestUserInput;
+        if (!state) return;
+        const current = state.optionIndices[questionId] ?? 0;
+        state.optionIndices[questionId] = wrapRequestIndex(current + delta, optionCount);
+      }));
+    },
+    requestUserInputTextModeSet(questionId: string | undefined): void {
+      setStore(produce((s) => {
+        if (!s.ui.requestUserInput) return;
+        s.ui.requestUserInput.textModeQuestionId = questionId;
+      }));
+    },
+    requestUserInputDraftSet(questionId: string, draft: string): void {
+      setStore(produce((s) => {
+        if (!s.ui.requestUserInput) return;
+        s.ui.requestUserInput.drafts[questionId] = draft;
+      }));
+    },
+    requestUserInputAnswerSet(questionId: string, answer: string): void {
+      setStore(produce((s) => {
+        if (!s.ui.requestUserInput) return;
+        s.ui.requestUserInput.answers[questionId] = answer;
+      }));
+    },
+    requestUserInputSubmittingSet(submitting: boolean): void {
+      setStore(produce((s) => {
+        if (!s.ui.requestUserInput) return;
+        s.ui.requestUserInput.submitting = submitting;
       }));
     }
   };

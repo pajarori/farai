@@ -1,7 +1,7 @@
 import type { Session, ToolDefinition } from "../../types";
 import { canonicalToolName } from "../../tool-names";
 
-const NON_DELEGABLE_TOOLS = new Set(["tool_search", "tool_invoke", "agent_task", "campaign_dispatch"]);
+const NON_DELEGABLE_TOOLS = new Set(["tool_search", "tool_invoke", "request_user_input", "agent_spawn", "agent_list", "agent_wait", "agent_message", "agent_followup", "agent_interrupt", "agent_close", "campaign_dispatch"]);
 const SHARED_WORKSPACE_EDIT_TOOLS = new Set(["fs_write", "fs_edit", "patch_apply", "code_write_script"]);
 const TOOL_SCOPE_ALIASES = new Map([
   ["shell", "shell_exec"]

@@ -4,9 +4,10 @@ import { assertCanonicalToolName, canonicalToolName } from "../../tool-names";
 import { logDebugEntry, parseRetryAfterMs, planRequestSignal } from "./http";
 import type { ModelPricingSnapshot } from "../../types";
 
+type OpenAiContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 type OpenAiChatMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: string | OpenAiContentPart[] }
   | { role: "assistant"; content: string | null; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }
   | { role: "tool"; tool_call_id: string; content: string };
 
@@ -199,20 +200,55 @@ function toToolsPayload(tools: ProviderToolDef[]): Array<{ type: "function"; fun
 }
 
 function toOpenAiMessages(messages: ProviderMessage[]): OpenAiChatMessage[] {
-  return messages.map((entry): OpenAiChatMessage => {
-    if (entry.role === "user") return { role: "user", content: entry.text };
-    if (entry.role === "context") return { role: "system", content: entry.text };
-    if (entry.role === "tool") return { role: "tool", tool_call_id: entry.toolCallId, content: entry.text };
+  const out: OpenAiChatMessage[] = [];
+  const pendingToolImages: import("../../types").ToolAttachment[] = [];
+  const flushToolImages = (): void => {
+    if (!pendingToolImages.length) return;
+    out.push({ role: "user", content: openAiUserContent("images returned by the preceding tools", pendingToolImages.splice(0)) });
+  };
+  for (const entry of messages) {
+    if (entry.role === "user") {
+      flushToolImages();
+      out.push({ role: "user", content: openAiUserContent(entry.text, entry.attachments) });
+      continue;
+    }
+    if (entry.role === "context") {
+      flushToolImages();
+      out.push({ role: "system", content: entry.text });
+      continue;
+    }
+    if (entry.role === "tool") {
+      out.push({ role: "tool", tool_call_id: entry.toolCallId, content: entry.text });
+      if (entry.attachments?.length) pendingToolImages.push(...entry.attachments);
+      continue;
+    }
+    flushToolImages();
     const toolCalls = (entry.toolCalls ?? []).flatMap((call) => {
       const name = canonicalToolName(call.name);
       return name ? [{ id: call.id, type: "function" as const, function: { name, arguments: call.arguments } }] : [];
     });
-    return {
+    out.push({
       role: "assistant",
       content: entry.text ?? null,
       ...(toolCalls.length ? { tool_calls: toolCalls } : {})
-    };
-  });
+    });
+  }
+  flushToolImages();
+  return out;
+}
+
+function openAiUserContent(text: string, attachments: import("../../types").ToolAttachment[] | undefined): string | OpenAiContentPart[] {
+  if (!attachments?.length) return text;
+  return [
+    { type: "text", text },
+    ...attachments.map((item): OpenAiContentPart => ({
+      type: "image_url",
+      image_url: {
+        url: `data:${item.mediaType};base64,${item.data}`,
+        ...(item.detail ? { detail: item.detail } : {})
+      }
+    }))
+  ];
 }
 
 type OpenAiUsage = {

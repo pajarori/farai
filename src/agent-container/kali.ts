@@ -64,6 +64,7 @@ export type TransparentProxyOptions = {
 const kaliSessions = new SpawnSessionStore();
 const kaliPtySessions = new PtySessionStore();
 const containerStartLocks = new Map<string, Promise<ContainerExecResult>>();
+const containerWorkspaces = new Map<string, string>();
 let globalContainerStartChain: Promise<unknown> = Promise.resolve();
 
 function withGlobalContainerStartLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -108,7 +109,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     this.containerName = options.containerName ?? "farai-kali";
     this.workspace = options.workspace;
     this.timeoutMs = options.timeoutMs ?? 120_000;
-    this.processRunner = options.processRunner ?? runProcess;
+    this.processRunner = options.processRunner ?? ((command, args) => runProcess(command, args, Math.min(this.timeoutMs, 15_000)));
     this.signal = options.signal;
     this.onOutputChunk = options.onOutputChunk;
   }
@@ -213,7 +214,7 @@ export class KaliContainerBackend implements ExecutionBackend {
         timedOut: false
       };
     }
-    if (status.persistentRunning && status.persistentImageCurrent) {
+    if (status.persistentRunning && status.persistentImageCurrent && containerWorkspaces.get(this.containerName) === this.workspace) {
       return { exitCode: 0, stdout: "already running", stderr: "", durationMs: 0, timedOut: false };
     }
     return await withGlobalContainerStartLock(async () => {
@@ -236,6 +237,7 @@ export class KaliContainerBackend implements ExecutionBackend {
         "sleep",
         "infinity"
       ]);
+      if (result.exitCode === 0) containerWorkspaces.set(this.containerName, this.workspace);
       return { ...result, durationMs: Date.now() - started, timedOut: false };
     });
   }
@@ -260,6 +262,12 @@ export class KaliContainerBackend implements ExecutionBackend {
   async stopPersistent(): Promise<ContainerExecResult> {
     const started = Date.now();
     const result = await this.processRunner("docker", ["rm", "-f", this.containerName]);
+    if (result.exitCode === 0 || containerDoesNotExist(result)) {
+      containerWorkspaces.delete(this.containerName);
+      if (result.exitCode !== 0) {
+        return { ...result, exitCode: 0, stdout: result.stdout || "already stopped", durationMs: Date.now() - started, timedOut: false };
+      }
+    }
     return { ...result, durationMs: Date.now() - started, timedOut: false };
   }
 
@@ -532,9 +540,8 @@ function imageIdsMatch(left: string, right: string): boolean {
     || normalizedRight.startsWith(normalizedLeft);
 }
 
-async function runProcess(command: string, args: string[]): Promise<ContainerExecResult> {
+async function runProcess(command: string, args: string[], timeoutMs = 15_000): Promise<ContainerExecResult> {
   const started = Date.now();
-  const timeoutMs = 15_000;
   let proc: ReturnType<typeof spawn>;
   try {
     proc = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -581,4 +588,8 @@ async function runProcess(command: string, args: string[]): Promise<ContainerExe
     durationMs: Date.now() - started,
     timedOut: exitCode === null
   };
+}
+
+function containerDoesNotExist(result: ContainerExecResult): boolean {
+  return /no such container/i.test(`${result.stdout}\n${result.stderr}`);
 }

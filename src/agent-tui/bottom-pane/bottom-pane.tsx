@@ -13,6 +13,9 @@ import { isAgentBusy, type CenterSurfaceFrame } from "../store";
 import { COLOR } from "../theme";
 import { truncateLine } from "../renderers";
 import { activityStatusVisible, bottomPaneSlot, isFooterStatusDetail, isTranscriptActivityDetail, transcriptOwnsActivity } from "./footer-state";
+import { RequestUserInput } from "./request-user-input";
+import { ModelProviderWizard } from "./model-provider-wizard";
+import { ModelProviderRemoval } from "./model-provider-removal";
 
 export function BottomPane(): JSX.Element {
   const tui = useTuiStore();
@@ -50,7 +53,10 @@ export function BottomPane(): JSX.Element {
     activeMainTab: tui.store.ui.activeMainTab
   });
   const proxyTabActive = () => slot() === "proxy_tab";
-  const footerHidden = () => Boolean(frame()) || Boolean(centerFrame()) || slashPanelActive() || proxyTabActive();
+  const providerWizardActive = () => Boolean(tui.store.ui.modelProviderWizard);
+  const providerRemovalActive = () => Boolean(tui.store.ui.modelProviderRemoval);
+  const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput);
+  const footerHidden = () => Boolean(frame()) || Boolean(centerFrame()) || slashPanelActive() || proxyTabActive() || inputRequestActive() || providerWizardActive() || providerRemovalActive();
   const inlineStatusDetail = () => {
     const detail = tui.store.ui.statusDetail;
     if (!detail || isFooterStatusDetail(detail)) return undefined;
@@ -78,23 +84,33 @@ export function BottomPane(): JSX.Element {
 
   return (
     <box style={{ flexShrink: 0, flexDirection: "column" }}>
-      <Show when={activityStatusVisible(tui.store.ui.activeMainTab) && (statusActivity() || inlineStatusDetail())}>
+      <Show when={!inputRequestActive() && !providerWizardActive() && !providerRemovalActive() && activityStatusVisible(tui.store.ui.activeMainTab) && (statusActivity() || inlineStatusDetail())}>
         <StatusIndicator elapsed={elapsed()} activity={statusActivity()} />
       </Show>
       <Show when={tui.store.ui.lastError}>
         {(error) => <text fg={COLOR.error}>{`• error · ${truncateLine(error(), 160)}`}</text>}
       </Show>
-      <PendingInputPreview />
-      <Show when={listFrame()} fallback={
-        <Show when={centerFrame()} fallback={
-          <Show when={proxyTabActive()} fallback={<Composer />}>
-            <ProxyTabFooter />
+      <Show when={!inputRequestActive() && !providerWizardActive() && !providerRemovalActive()}>
+        <PendingInputPreview />
+      </Show>
+      <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={tui.store.snapshot.pendingUserInput} fallback={
+        <Show when={listFrame()} fallback={
+          <Show when={centerFrame()} fallback={
+            <Show when={proxyTabActive()} fallback={<Composer />}>
+              <ProxyTabFooter />
+            </Show>
+          }>
+            {(surface) => <CenterSurfaceFooter frame={surface()} />}
           </Show>
         }>
-          {(surface) => <CenterSurfaceFooter frame={surface()} />}
+          {(top) => <ListOverlay frame={top()} options={overlayOptions(top(), tui, ctx())} docked />}
         </Show>
       }>
-        {(top) => <ListOverlay frame={top()} options={overlayOptions(top(), tui, ctx())} docked />}
+        {(request) => <RequestUserInput request={request()} />}
+      </Show>}>
+        <ModelProviderWizard />
+      </Show>}>
+        <ModelProviderRemoval />
       </Show>
       <Show when={!footerHidden()}>
         <Footer elapsed={elapsed()} />

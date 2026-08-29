@@ -237,7 +237,7 @@ export class SqliteStore {
     return Boolean(row);
   }
 
-  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "provider" | "model" | "toolScope">>): Session {
+  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">>): Session {
     const current = this.loadSession(sessionId);
     const next: Session = {
       ...current,
@@ -247,6 +247,7 @@ export class SqliteStore {
       ...(patch.provider !== undefined ? { provider: patch.provider } : {}),
       ...(patch.model !== undefined ? { model: patch.model } : {}),
       ...(patch.toolScope !== undefined ? { toolScope: patch.toolScope.map(canonicalToolName) } : {}),
+      ...(patch.workspace !== undefined ? { workspace: patch.workspace } : {}),
       updatedAt: nowIso()
     };
     this.upsertSession(next);
@@ -505,7 +506,7 @@ export class SqliteStore {
     if (source.model) options.model = source.model;
     if (source.summary) options.summary = source.summary;
     if (source.summaryUpdatedAt) options.summaryUpdatedAt = source.summaryUpdatedAt;
-    const fork = await this.createSession(options);
+    const fork = await this.createSession({ ...options, workspace: source.workspace });
     this.appendEvent({
       id: id(),
       sessionId: fork.id,

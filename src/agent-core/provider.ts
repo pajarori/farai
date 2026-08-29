@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Session, ToolDefinition } from "../types";
+import type { Session, ToolAttachment, ToolDefinition } from "../types";
 import { getTool } from "../agent-tools/registry";
 import { canonicalToolName } from "../tool-names";
 import { HEURISTIC_MODEL_ID, resolveDefaultModel, resolveModel, type ConcreteResolvedModel, type ResolvedModel } from "./model-registry";
@@ -25,10 +25,10 @@ export type PlannerAction =
   | { kind: "tool_parse_error"; tool: string; toolCallId: string; rawArguments: string; error: string };
 
 export type ConversationEntry =
-  | { role: "user"; text: string }
+  | { role: "user"; text: string; attachments?: ToolAttachment[] }
   | { role: "context"; text: string }
   | { role: "assistant"; text?: string; toolCalls?: Array<{ id: string; tool: string; args: unknown }> }
-  | { role: "tool"; toolCallId: string; tool: string; text: string };
+  | { role: "tool"; toolCallId: string; tool: string; text: string; attachments?: ToolAttachment[] };
 
 export type PlannerInput = {
   session: Session;
@@ -168,9 +168,17 @@ export function buildChatRequest(input: PlannerInput, signal?: AbortSignal): Cha
 
 export function toProviderMessages(history: ConversationEntry[]): ProviderMessage[] {
   return history.map((entry): ProviderMessage => {
-    if (entry.role === "user") return { role: "user", text: entry.text };
+    if (entry.role === "user") return { role: "user", text: entry.text, ...(entry.attachments?.length ? { attachments: entry.attachments } : {}) };
     if (entry.role === "context") return { role: "context", text: entry.text };
-    if (entry.role === "tool") return { role: "tool", toolCallId: entry.toolCallId, name: entry.tool, text: entry.text };
+    if (entry.role === "tool") {
+      return {
+        role: "tool",
+        toolCallId: entry.toolCallId,
+        name: entry.tool,
+        text: entry.text,
+        ...(entry.attachments?.length ? { attachments: entry.attachments } : {})
+      };
+    }
     return {
       role: "assistant",
       ...(entry.text !== undefined ? { text: entry.text } : {}),
@@ -179,6 +187,41 @@ export function toProviderMessages(history: ConversationEntry[]): ProviderMessag
         : {})
     };
   });
+}
+
+export function estimateProviderMessagesTokens(messages: ProviderMessage[]): number {
+  let imageTokens = 0;
+  const withoutImageData = messages.map((entry) => {
+    if ((entry.role !== "user" && entry.role !== "tool") || !entry.attachments?.length) return entry;
+    imageTokens += entry.attachments.reduce((total, attachment) => total + imageTokenEstimate(attachment.detail), 0);
+    return {
+      ...entry,
+      attachments: entry.attachments.map((attachment) => ({
+        kind: attachment.kind,
+        mediaType: attachment.mediaType,
+        ...(attachment.name ? { name: attachment.name } : {}),
+        ...(attachment.detail ? { detail: attachment.detail } : {}),
+        bytes: decodedBase64Bytes(attachment.data)
+      }))
+    };
+  });
+  return Math.ceil(Buffer.byteLength(JSON.stringify(withoutImageData), "utf8") / 4) + imageTokens;
+}
+
+export function estimateConversationEntriesTokens(history: ConversationEntry[]): number {
+  return estimateProviderMessagesTokens(toProviderMessages(history));
+}
+
+function imageTokenEstimate(detail: ToolAttachment["detail"]): number {
+  if (detail === "low") return 85;
+  if (detail === "high") return 765;
+  return 512;
+}
+
+function decodedBase64Bytes(data: string): number {
+  if (!data) return 0;
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(data.length * 3 / 4) - padding);
 }
 
 export function promptCacheKey(session: Session): string {
@@ -230,20 +273,20 @@ export function actionsFromMessage(message: AssembledMessage): PlannerAction[] {
   return actions;
 }
 
-export function createPlannerForSession(session: Session): PlannerProvider {
+export function createPlannerForSession(session: Session, configWorkspace = session.workspace): PlannerProvider {
   if (!session.model) return createPlannerFromResolved(requireConcreteModel(resolveDefaultModel()));
-  const profiles = loadModelProfiles(session.workspace);
+  const profiles = loadModelProfiles(configWorkspace);
   const profileResolved = resolveProfile(profiles, session.model);
   const resolved = profileResolved ?? resolveModel({ model: session.model });
   return createPlannerFromResolved(requireConcreteModel(resolved));
 }
 
-export async function createPlannerForSessionAsync(session: Session): Promise<PlannerProvider> {
-  return createPlannerFromResolved(await resolveModelSelection(session.workspace, session.model));
+export async function createPlannerForSessionAsync(session: Session, configWorkspace = session.workspace): Promise<PlannerProvider> {
+  return createPlannerFromResolved(await resolveModelSelection(configWorkspace, session.model));
 }
 
-export async function createChatProviderForSession(session: Session): Promise<ChatProvider> {
-  const resolved = await resolveModelSelection(session.workspace, session.model);
+export async function createChatProviderForSession(session: Session, configWorkspace = session.workspace): Promise<ChatProvider> {
+  const resolved = await resolveModelSelection(configWorkspace, session.model);
   const pricing = resolved.pricing ?? await lookupModelsDevPricing(resolved.model, session.provider, resolved.baseUrl);
   return createChatProvider(pricing ? { ...resolved, pricing } : resolved);
 }

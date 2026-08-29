@@ -23,7 +23,7 @@ export const campaignCreateTool: ToolDefinition = {
     const kind = asString(args.kind, "kind") as Campaign["kind"];
     if (!["pentest", "bug_bounty", "ctf", "lab"].includes(kind)) throw new Error(`unsupported campaign kind: ${kind}`);
     const campaign = context.store.createCampaign?.({
-      workspace: context.workspace,
+      workspace: context.rootWorkspace ?? context.workspace,
       name: asString(args.name, "name"),
       kind,
       status: "active"

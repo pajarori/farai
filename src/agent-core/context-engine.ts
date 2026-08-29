@@ -5,7 +5,7 @@ import { canonicalToolName } from "../tool-names";
 import { renderSkillCatalog } from "../agent-skills/registry";
 import { activeBackgroundJobs } from "./loop/background";
 import { autoCompactThreshold } from "./loop/compaction";
-import { buildToolsPayload, toProviderMessages, type ConversationEntry } from "./provider";
+import { buildToolsPayload, estimateProviderMessagesTokens, toProviderMessages, type ConversationEntry } from "./provider";
 import type { ProviderToolDef } from "./provider/protocol";
 import { buildSystemPrompt } from "./provider/system-prompt";
 import { ContextBuilderCache, spotlightUntrusted, workspaceRelativeReference, type PlannerContextBlock } from "./context-builder";
@@ -127,7 +127,7 @@ export class ContextEngine {
     });
     if (input.userText?.trim() && !historyHasLatestUserText(history.entries, input.userText.trim())) {
       history.entries.push({ role: "user", text: input.userText.trim() });
-      history.estimatedTokens = textTokens(JSON.stringify(history.entries));
+      history.estimatedTokens = estimateProviderMessagesTokens(toProviderMessages(history.entries));
     }
     const candidates = this.buildCandidates(input.session, query, activeJobs, deferredToolNames.length, input.extraBlocks ?? []);
     const admittedCandidates: ContextCandidate[] = [];
@@ -193,9 +193,10 @@ export class ContextEngine {
 
   private buildCandidates(session: Session, query: string, activeJobs: ReturnType<typeof activeBackgroundJobs>, deferredCount: number, extraBlocks: PlannerContextBlock[]): ContextCandidate[] {
     const candidates: ContextCandidate[] = [];
+    const workspace = session.workspace || this.workspace;
     const recentPaths = recentWorkspacePaths(this.store, session.id);
     if (this.instructionsEnabled) {
-      for (const item of this.contextBuilder.loadInstructionFragments(this.workspace, recentPaths)) {
+      for (const item of this.contextBuilder.loadInstructionFragments(workspace, recentPaths)) {
         candidates.push(candidate({
           id: item.id,
           class: "instructions",
@@ -214,7 +215,7 @@ export class ContextEngine {
       class: "kernel",
       title: "Environment",
       source: "runtime",
-      content: `Workspace: ${this.workspace}\nContainer workspace: /workspace`,
+      content: `Workspace: ${workspace}\nContainer workspace: /workspace`,
       mandatory: true,
       stable: true,
       priority: 100,
@@ -302,7 +303,7 @@ export class ContextEngine {
     }));
 
     const skills = this.skillsEnabled && (isSecurityTask(session, query) || /\b(skill|playbook)\b/i.test(query))
-      ? renderSkillCatalog(this.workspace, 700)
+      ? renderSkillCatalog(workspace, 700)
       : undefined;
     if (skills) candidates.push(candidate({
       id: "skill-catalog",
@@ -317,7 +318,7 @@ export class ContextEngine {
     }));
 
     if (isCodingTask(session, query)) {
-      const outline = buildWorkspaceOutline(this.workspace, query, recentPaths, this.contextBuilder);
+      const outline = buildWorkspaceOutline(workspace, query, recentPaths, this.contextBuilder);
       if (outline) candidates.push(candidate({
         id: "workspace-outline",
         class: "retrieved",
@@ -429,7 +430,7 @@ function estimateRequestTokens(session: Session, candidates: ContextCandidate[],
     ...history,
     ...(volatileContext ? [{ role: "context" as const, text: volatileContext }] : [])
   ]);
-  return textTokens(JSON.stringify({ system, messages, tools }));
+  return textTokens(system) + estimateProviderMessagesTokens(messages) + textTokens(JSON.stringify(tools));
 }
 
 function breakdownFor(session: Session, candidates: ContextCandidate[], history: HistoryProjection, tools: ProviderToolDef[], systemInstruction?: string): Record<string, number> {

@@ -75,7 +75,25 @@ export type RouterAction =
   | { kind: "message.nav"; direction: "next" | "prev" }
   | { kind: "footer.shortcutsToggle" }
   | { kind: "footer.escHint" }
-  | { kind: "transcript.open" };
+  | { kind: "transcript.open" }
+  | { kind: "requestUserInput.optionMove"; delta: number }
+  | { kind: "requestUserInput.choose"; index?: number }
+  | { kind: "requestUserInput.questionMove"; delta: number }
+  | { kind: "requestUserInput.textModeEnter" }
+  | { kind: "requestUserInput.textModeExit" }
+  | { kind: "requestUserInput.commitText" }
+  | { kind: "requestUserInput.cancel" }
+  | { kind: "modelProvider.next"; test?: boolean }
+  | { kind: "modelProvider.back" }
+  | { kind: "modelProvider.protocolMove"; delta: number }
+  | { kind: "modelProvider.secretBackspace" }
+  | { kind: "modelProvider.credentialRemove" }
+  | { kind: "modelProviderRemoval.confirm" }
+  | { kind: "modelProviderRemoval.cancel" }
+  | { kind: "model.addProvider" }
+  | { kind: "model.editProvider" }
+  | { kind: "model.testProvider" }
+  | { kind: "model.removeProvider" };
 
 export type RouteResult =
   | { type: "consumed"; actions: RouterAction[] }
@@ -86,6 +104,7 @@ export type RouterContext = {
   overlayKind: OverlayKind | undefined;
 
   centerSurfaceKind?: CenterSurfaceKind | undefined;
+  centerProxyFlowKind?: "http" | "websocket" | "tcp" | "udp" | "dns" | undefined;
 
   running: boolean;
   cancelable?: boolean;
@@ -98,6 +117,21 @@ export type RouterContext = {
   historySearchActive?: boolean;
   queuedCount?: number;
   activeMainTab?: "chat" | "proxy";
+  requestUserInput?: {
+    textMode: boolean;
+    canExitTextMode: boolean;
+    optionCount: number;
+    submitting: boolean;
+  };
+  modelProviderWizard?: {
+    field: "id" | "protocol" | "baseUrl" | "apiKey" | "model" | "review";
+    busy: boolean;
+  };
+  modelProviderRemoval?: boolean;
+  modelOverlay?: {
+    providerID?: string;
+    removable: boolean;
+  };
 };
 
 export type KeyToken = {
@@ -157,8 +191,11 @@ export function slashActive(ctx: RouterContext): boolean {
 }
 
 export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
-  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind);
-  if (ctx.centerSurfaceKind) return routeCenterSurface(key, ctx.centerSurfaceKind);
+  if (ctx.modelProviderRemoval) return routeModelProviderRemoval(key);
+  if (ctx.modelProviderWizard) return routeModelProviderWizard(key, ctx.modelProviderWizard);
+  if (ctx.requestUserInput) return routeRequestUserInput(key, ctx.requestUserInput);
+  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay);
+  if (ctx.centerSurfaceKind) return routeCenterSurface(key, ctx.centerSurfaceKind, ctx.centerProxyFlowKind);
   if (ctx.historySearchActive) return routeHistorySearch(key);
   if (slashActive(ctx)) {
     const slash = routeSlash(key);
@@ -168,11 +205,81 @@ export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
   return routeBase(key, ctx);
 }
 
-function routeOverlay(key: KeyToken, kind: OverlayKind): RouteResult {
+function routeModelProviderRemoval(key: KeyToken): RouteResult {
+  if (key.name === "return") return consumed({ kind: "modelProviderRemoval.confirm" });
+  if (key.name === "escape" || (key.ctrl && key.name === "c")) return consumed({ kind: "modelProviderRemoval.cancel" });
+  return consumed();
+}
+
+function routeModelProviderWizard(key: KeyToken, state: NonNullable<RouterContext["modelProviderWizard"]>): RouteResult {
+  if (state.busy) return key.name === "escape" ? consumed({ kind: "modelProvider.back" }) : consumed();
+  if (key.name === "escape") return consumed({ kind: "modelProvider.back" });
+  if (state.field === "protocol") {
+    if (key.name === "up" || key.name === "left") return consumed({ kind: "modelProvider.protocolMove", delta: -1 });
+    if (key.name === "down" || key.name === "right") return consumed({ kind: "modelProvider.protocolMove", delta: 1 });
+    if (key.name === "return") return consumed({ kind: "modelProvider.next" });
+    return consumed();
+  }
+  if (state.field === "apiKey") {
+    if (key.ctrl && key.name === "r") return consumed({ kind: "modelProvider.credentialRemove" });
+    if (key.name === "backspace") return consumed({ kind: "modelProvider.secretBackspace" });
+    if (key.name === "return") return consumed({ kind: "modelProvider.next" });
+    return PASSTHROUGH;
+  }
+  if (state.field === "review") {
+    if (key.ctrl && key.name === "s") return consumed({ kind: "modelProvider.next", test: false });
+    if (key.name === "return") return consumed({ kind: "modelProvider.next", test: true });
+    return consumed();
+  }
+  if (key.name === "return") return consumed({ kind: "modelProvider.next" });
+  return PASSTHROUGH;
+}
+
+function routeRequestUserInput(key: KeyToken, state: NonNullable<RouterContext["requestUserInput"]>): RouteResult {
+  if (state.submitting) return consumed();
+  if (key.ctrl && key.name === "c") return consumed({ kind: "requestUserInput.cancel" });
+  if ((key.ctrl && key.name === "p") || key.name === "pageup") {
+    return consumed({ kind: "requestUserInput.questionMove", delta: -1 });
+  }
+  if ((key.ctrl && key.name === "n") || key.name === "pagedown") {
+    return consumed({ kind: "requestUserInput.questionMove", delta: 1 });
+  }
+  if (state.textMode) {
+    if (key.name === "escape") return consumed({
+      kind: state.canExitTextMode ? "requestUserInput.textModeExit" : "requestUserInput.cancel"
+    });
+    if (key.name === "tab" && state.canExitTextMode) return consumed({ kind: "requestUserInput.textModeExit" });
+    if (key.name === "return") return consumed({ kind: "requestUserInput.commitText" });
+    return PASSTHROUGH;
+  }
+  switch (key.name) {
+    case "escape": return consumed({ kind: "requestUserInput.cancel" });
+    case "up": return consumed({ kind: "requestUserInput.optionMove", delta: -1 });
+    case "down": return consumed({ kind: "requestUserInput.optionMove", delta: 1 });
+    case "left": return consumed({ kind: "requestUserInput.questionMove", delta: -1 });
+    case "right": return consumed({ kind: "requestUserInput.questionMove", delta: 1 });
+    case "tab":
+    case "o": return consumed({ kind: "requestUserInput.textModeEnter" });
+    case "return": return consumed({ kind: "requestUserInput.choose" });
+    default: {
+      const numeric = key.char && /^[1-9]$/.test(key.char) ? Number.parseInt(key.char, 10) - 1 : -1;
+      if (numeric >= 0 && numeric < state.optionCount) return consumed({ kind: "requestUserInput.choose", index: numeric });
+      return consumed();
+    }
+  }
+}
+
+function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["modelOverlay"]): RouteResult {
   if (key.ctrl && key.name === "c") return consumed({ kind: "overlay.pop" });
   if (key.name === "escape") return consumed({ kind: "overlay.pop" });
 
   if (isListOverlay(kind)) {
+    if (kind === "model" && key.ctrl) {
+      if (key.name === "a") return consumed({ kind: "model.addProvider" });
+      if (key.name === "t" && model?.providerID) return consumed({ kind: "model.testProvider" });
+      if (key.name === "e" && model?.providerID && model.removable) return consumed({ kind: "model.editProvider" });
+      if (key.name === "d" && model?.providerID && model.removable) return consumed({ kind: "model.removeProvider" });
+    }
     if (kind === "agents" && (key.name === "space" || key.char === " ")) {
       return consumed({ kind: "overlay.agentPreview" });
     }
@@ -194,15 +301,19 @@ function routeOverlay(key: KeyToken, kind: OverlayKind): RouteResult {
   return consumed();
 }
 
-function routeCenterSurface(key: KeyToken, kind: CenterSurfaceKind): RouteResult {
+function routeCenterSurface(key: KeyToken, kind: CenterSurfaceKind, proxyFlowKind?: RouterContext["centerProxyFlowKind"]): RouteResult {
   if (key.ctrl && key.name === "c") return consumed({ kind: "center.pop" });
   if (key.name === "escape") return consumed({ kind: "center.pop" });
   if (kind === "proxy_flow") {
     if (key.name === "left" || key.name === "[") return consumed({ kind: "proxy.detailPaneMove", delta: -1 });
     if (key.name === "right" || key.name === "]") return consumed({ kind: "proxy.detailPaneMove", delta: 1 });
     if (key.name === "tab") return consumed({ kind: "proxy.detailPaneMove", delta: 1 });
-    if (key.name === "h") return consumed({ kind: "proxy.websocketSectionSet", section: 0 });
-    if (key.name === "m") return consumed({ kind: "proxy.websocketSectionSet", section: 1 });
+    if (key.name === "h") return proxyFlowKind === "websocket"
+      ? consumed({ kind: "proxy.websocketSectionSet", section: 0 })
+      : consumed({ kind: "proxy.detailPaneSet", pane: 0 });
+    if (key.name === "m") return proxyFlowKind === "websocket"
+      ? consumed({ kind: "proxy.websocketSectionSet", section: 1 })
+      : consumed({ kind: "proxy.detailPaneSet", pane: 1 });
     if (key.name === "p") return consumed({ kind: "proxy.websocketMessageMove", delta: -1 });
     if (key.name === "n") return consumed({ kind: "proxy.websocketMessageMove", delta: 1 });
   }
@@ -295,7 +406,6 @@ function routeBase(key: KeyToken, ctx: RouterContext): RouteResult {
       : consumed({ kind: "composer.submit" });
   }
   if (key.name === "tab") {
-    if (ctx.composerText.trimStart().startsWith("!")) return PASSTHROUGH;
     return consumed(ctx.running ? { kind: "composer.queue" } : { kind: "composer.submit" });
   }
   if (key.name === "up" && ctx.composerText.length === 0 && (ctx.queuedCount ?? 0) > 0) {

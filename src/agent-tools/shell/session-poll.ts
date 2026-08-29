@@ -36,7 +36,7 @@ export const sessionPollTool: ToolDefinition = {
     const input = typeof args.input === "string" ? args.input : undefined;
     if (job && job.sessionId !== context.session.id) throw new Error(`background job ${job.id} belongs to another session`);
     if (job?.kind === "agent") {
-      if (input) throw new Error("agent jobs do not accept session input; resume the child with agent_task instead");
+      if (input) throw new Error("agent jobs do not accept session input; use agent_message for a running child or agent_followup for an idle child");
       if (["succeeded", "failed", "cancelled", "lost"].includes(job.status)) {
         const artifact = job.outputArtifactId ? context.store.readOutputArtifact?.(job.outputArtifactId) : undefined;
         const output = artifact?.content ?? terminalJobOutput(job);

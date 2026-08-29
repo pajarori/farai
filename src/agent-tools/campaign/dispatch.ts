@@ -44,7 +44,7 @@ export const campaignDispatchTool: ToolDefinition = {
     if (context.availableTools) {
       const availableTools = context.availableTools();
       for (const task of tasks) {
-        const lane = task.lane ? resolveLane(context.workspace, task.lane) : undefined;
+        const lane = task.lane ? resolveLane(context.rootWorkspace ?? context.workspace, task.lane) : undefined;
         if (task.lane && !lane) throw new Error(`unknown subagent lane: ${task.lane}`);
         const scope = resolveSubagentToolScope({
           parent: context.session,

@@ -9,6 +9,7 @@ import { slashMatches as matchSlashCommands } from "../slash-autocomplete";
 import { truncateLine } from "../renderers";
 import type { DialogOption } from "../dialog/fuzzy";
 import { isPrimaryClick } from "../input/mouse";
+import { fitTerminal, terminalWidth } from "../terminal-text";
 
 export function composerHeightFromVisualLines(visualLines: number): number {
   return Math.min(6, Math.max(1, visualLines));
@@ -59,7 +60,7 @@ export function Composer(): JSX.Element {
     && slashMatches().length > 0
     && tui.store.ui.overlayStack.length === 0;
   const popupWidth = () => Math.max(24, dims().width);
-  const commandWidth = () => Math.min(28, Math.max(8, ...slashMatches().map((option) => option.title.length + 2)));
+  const commandWidth = () => Math.min(28, Math.max(8, ...slashMatches().map((option) => terminalWidth(option.title) + 2)));
   const descWidth = () => Math.max(12, popupWidth() - commandWidth() - 6);
   const rule = () => "─".repeat(Math.max(1, dims().width));
 
@@ -139,7 +140,7 @@ export function Composer(): JSX.Element {
         <box style={{ width: popupWidth(), flexDirection: "column" }}>
           <For each={slashMatches()}>{(option, index) => {
             const active = () => index() === tui.store.ui.slashIndex;
-            const command = () => truncateLine(option.title.padEnd(commandWidth()), commandWidth());
+            const command = () => fitTerminal(option.title, commandWidth());
             const desc = () => truncateLine(option.description ?? "", descWidth());
             return (
               <box

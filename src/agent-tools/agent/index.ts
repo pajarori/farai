@@ -1,5 +1,5 @@
 import type { ToolDefinition } from "../../types";
 import { sessionRenameTool } from "./rename";
-import { agentTaskTool } from "./task";
+import { agentLifecycleTools } from "./lifecycle";
 
-export const agentTools: ToolDefinition[] = [agentTaskTool, sessionRenameTool];
+export const agentTools: ToolDefinition[] = [...agentLifecycleTools, sessionRenameTool];

@@ -12,8 +12,10 @@ import type {
   Note,
   Finding,
   MemoryItem,
+  PendingSteerInput,
   QueuedUserInput
 } from "../types";
+import type { PendingUserInput, UserInputAnswer } from "../types";
 import type { AgentRuntime } from "../agent-core/runtime";
 import type { SessionPatch } from "../agent-core/runtime";
 import { subscribeSessionEvents, type EventSubscription } from "../agent-core/events/transport";
@@ -25,8 +27,11 @@ import { serviceRegistry } from "../agent-tools/services/registry";
 import { proxyFlowDetailFromMcpInspect, proxyFlowsFromMcpTrafficSummary, readProxyFlowDetail, readProxyFlows, type ProxyFlowDetail, type ProxyFlowQuery, type ProxyFlowSummary } from "../agent-tools/services/mitmproxy/flows";
 import { callMcpServerTool, listMcpServerStatuses, refreshMcpTools, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
 import type { ModelChoiceInfo } from "../agent-core/model-choices";
-import { listModelChoices } from "../agent-core/model-choices";
+import { modelChoicesFromCatalog } from "../agent-core/model-choices";
+import { buildModelCatalog } from "../agent-core/model-catalog";
+import { listModelProviders, probeModelProvider, removeModelProvider, saveModelProvider, type ModelProviderInfo, type ModelProviderProbe, type ProbeModelProviderInput, type SaveModelProviderInput } from "../agent-core/model-provider-management";
 import { loadModelProfiles } from "../agent-core/model-profiles";
+import { HEURISTIC_MODEL_ID } from "../agent-core/model-registry";
 import type { ContextManifest } from "../agent-core/context-engine";
 import { browserContextManager, type BrowserContextActivity } from "../agent-tools/browser/context-manager";
 
@@ -34,6 +39,7 @@ export type TuiEvent =
   | { type: "event.appended"; sessionId: string; event: SessionEvent }
   | { type: "store.changed"; sessionId: string; change: StoreChange }
   | { type: "store.batch"; sessionId: string; changes: StoreChange[] }
+  | { type: "activity.changed"; sessionId: string; state: Pick<ActivityState, "backgroundActivities" | "subagents"> }
   | { type: "turn.started"; sessionId: string; turnId: string; startedAt: string }
   | { type: "turn.finished"; sessionId: string; turnId: string; status: Turn["status"] }
   | { type: "snapshot.changed"; sessionId: string }
@@ -57,11 +63,13 @@ export type SessionSnapshot = {
   memory: MemoryItem[];
   runningTurnId: string | undefined;
   runningTurnStartedAt?: string | undefined;
+  pendingSteers: PendingSteerInput[];
   queuedPrompts: QueuedUserInput[];
   compactionBoundary?: CompactionBoundary | undefined;
+  pendingUserInput?: PendingUserInput | undefined;
 };
 
-export type ActivityState = Pick<SessionSnapshot, "backgroundActivities" | "browserContexts" | "subagents" | "queuedPrompts">;
+export type ActivityState = Pick<SessionSnapshot, "backgroundActivities" | "browserContexts" | "subagents" | "pendingSteers" | "queuedPrompts">;
 
 export type BackgroundActivitySummary = {
   id: string;
@@ -112,6 +120,19 @@ export type SessionListItem = {
   running: boolean;
 };
 
+export type ModelCatalogSnapshot = {
+  providers: ModelProviderInfo[];
+  models: ModelChoiceInfo[];
+};
+
+export type RemoveModelProviderResult = {
+  id: string;
+  location: "global" | "project";
+  providerRemains: boolean;
+  fallbackModel: string;
+  updatedSessions: number;
+};
+
 export interface TuiRuntimePort {
   listSessions(): Promise<Session[]>;
   listSessionItems(): Promise<SessionListItem[]>;
@@ -127,6 +148,10 @@ export interface TuiRuntimePort {
   listProxyFlows(options?: ProxyFlowQuery): Promise<ProxyFlowSummary[]>;
   getProxyFlow(id: string): Promise<ProxyFlowDetail | undefined>;
   listAvailableModels(): Promise<ModelChoiceInfo[]>;
+  loadModelCatalog(): Promise<ModelCatalogSnapshot>;
+  probeModelProvider(input: ProbeModelProviderInput, signal?: AbortSignal): Promise<ModelProviderProbe>;
+  saveModelProvider(input: SaveModelProviderInput): Promise<ModelCatalogSnapshot>;
+  removeModelProvider(providerID: string): Promise<RemoveModelProviderResult>;
   refreshMcp(): Promise<void>;
   listMcpStatuses(): Promise<McpServerRuntimeStatus[]>;
   startContainer(): Promise<void>;
@@ -134,6 +159,9 @@ export interface TuiRuntimePort {
   loadSnapshot(sessionId: string): Promise<SessionSnapshot>;
   loadActivityState(sessionId: string): Promise<ActivityState>;
   prompt(sessionId: string, input: string): Promise<AgentPromptResult>;
+  answerUserInput(sessionId: string, input: string): Promise<UserInputAnswer>;
+  answerUserInputStructured(sessionId: string, answer: UserInputAnswer): Promise<UserInputAnswer>;
+  cancelUserInput(sessionId: string): Promise<PendingUserInput>;
   queueInput(sessionId: string, input: string): QueuedUserInput | undefined;
   takeBackQueuedInput(sessionId: string): QueuedUserInput | undefined;
   inspectContext(sessionId: string, hypotheticalInput?: string): Promise<ContextManifest>;
@@ -207,6 +235,13 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
   function enqueue(evt: TuiEvent): void {
     if (disposed) return;
     if (evt.type === "snapshot.changed" && pending.some((item) => item.type === "snapshot.changed" && item.sessionId === evt.sessionId)) return;
+    if (evt.type === "activity.changed") {
+      const existing = pending.findIndex((item) => item.type === "activity.changed" && item.sessionId === evt.sessionId);
+      if (existing >= 0) pending[existing] = evt;
+      else pending.push(evt);
+      if (!flushTimer) flushTimer = setTimeout(flush, BATCH_DEBOUNCE_MS);
+      return;
+    }
     if (evt.type === "store.changed") {
       const previous = pending.at(-1);
       if (previous?.type === "store.batch" && previous.sessionId === evt.sessionId) {
@@ -266,6 +301,16 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
           break;
         default:
           enqueue({ type: "store.changed", sessionId: change.sessionId, change });
+          if (change.kind === "job") {
+            enqueue({
+              type: "activity.changed",
+              sessionId: change.sessionId,
+              state: {
+                backgroundActivities: summarizeBackgroundActivities(store, change.sessionId),
+                subagents: summarizeSubagents(store, change.sessionId)
+              }
+            });
+          }
           break;
       }
     });
@@ -361,8 +406,10 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       memory,
       runningTurnId: running?.id,
       runningTurnStartedAt: running?.createdAt,
-      queuedPrompts: runtime.listQueuedUserInputs(sessionId),
-      compactionBoundary: store.latestCompactionBoundary(sessionId)
+      pendingSteers: runtime.listPendingSteeringInputs(sessionId),
+      queuedPrompts: runtime.listQueuedFollowupInputs(sessionId),
+      compactionBoundary: store.latestCompactionBoundary(sessionId),
+      pendingUserInput: runtime.pendingUserInput(sessionId)
     };
   }
 
@@ -388,6 +435,9 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     async forkSession(id, title) { return runtime.forkSession(id, title); },
     async archiveSession(id) { return runtime.archiveSession(id); },
     async exportReport(id, reportOptions) { return runtime.exportReport(id, reportOptions); },
+    async answerUserInput(sessionId, input) { return runtime.answerUserInput(sessionId, input); },
+    async answerUserInputStructured(sessionId, answer) { return runtime.answerUserInputStructured(sessionId, answer); },
+    async cancelUserInput(sessionId) { return runtime.cancelUserInput(sessionId); },
     async containerStatus() {
       if (!activeSessionId) {
         return {
@@ -425,19 +475,21 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       if (activeSessionId) {
         const session = runtime.loadSession(activeSessionId);
         try {
-          await refreshMcpTools({ workspace: runtime.workspace, session, includeResources: false });
+          await refreshMcpTools({ workspace: session.workspace, configWorkspace: runtime.workspace, session, includeResources: false });
           let mcpResult: unknown;
           try {
             mcpResult = await callMcpServerTool({
-              workspace: runtime.workspace,
+              workspace: session.workspace,
+              configWorkspace: runtime.workspace,
               session,
               server: "mitmproxy-mcp",
-              tool: "get_flow_summary_v2",
+              tool: "proxy_flow_summaries",
               args: { limit: options.limit ?? 300, ...(options.kind ? { kind: options.kind } : {}) }
             });
           } catch {
             mcpResult = await callMcpServerTool({
-              workspace: runtime.workspace,
+              workspace: session.workspace,
+              configWorkspace: runtime.workspace,
               session,
               server: "mitmproxy-mcp",
               tool: "get_traffic_summary",
@@ -463,10 +515,11 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
         try {
           try {
             const mcpResult = await callMcpServerTool({
-              workspace: runtime.workspace,
+              workspace: session.workspace,
+              configWorkspace: runtime.workspace,
               session,
               server: "mitmproxy-mcp",
-              tool: "inspect_flow_v2",
+              tool: "proxy_flow_inspect",
               args: { flow_id: id }
             });
             const detail = proxyFlowDetailFromMcpInspect(mcpResult);
@@ -474,7 +527,8 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
           } catch {
           }
           const legacyResult = await callMcpServerTool({
-            workspace: runtime.workspace,
+            workspace: session.workspace,
+            configWorkspace: runtime.workspace,
             session,
             server: "mitmproxy-mcp",
             tool: "inspect_flow",
@@ -494,7 +548,44 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       }
       return undefined;
     },
-    async listAvailableModels() { return listModelChoices(loadModelProfiles(runtime.workspace), runtime.workspace); },
+    async listAvailableModels() {
+      return modelChoicesFromCatalog(await buildModelCatalog(runtime.workspace, loadModelProfiles(runtime.workspace)));
+    },
+    async loadModelCatalog() {
+      const catalog = await buildModelCatalog(runtime.workspace, loadModelProfiles(runtime.workspace));
+      return {
+        providers: await listModelProviders(runtime.workspace, catalog),
+        models: modelChoicesFromCatalog(catalog)
+      };
+    },
+    async probeModelProvider(input, signal) {
+      return probeModelProvider(runtime.workspace, input, signal);
+    },
+    async saveModelProvider(input) {
+      saveModelProvider(runtime.workspace, input);
+      const catalog = await buildModelCatalog(runtime.workspace, loadModelProfiles(runtime.workspace));
+      enqueue({ type: "sessions.changed" });
+      return {
+        providers: await listModelProviders(runtime.workspace, catalog),
+        models: modelChoicesFromCatalog(catalog)
+      };
+    },
+    async removeModelProvider(providerID) {
+      const removed = removeModelProvider(runtime.workspace, providerID);
+      const catalog = await buildModelCatalog(runtime.workspace, loadModelProfiles(runtime.workspace));
+      const choices = modelChoicesFromCatalog(catalog);
+      const validModels = new Set(choices.map((choice) => choice.model));
+      const fallbackModel = choices.find((choice) => choice.verified)?.model ?? choices[0]?.model ?? HEURISTIC_MODEL_ID;
+      let updatedSessions = 0;
+      for (const session of store.listSessions(100_000, { includeArchived: true })) {
+        if (!modelSelectionNeedsFallback(session.model, providerID, validModels)) continue;
+        runtime.updateSession(session.id, { model: fallbackModel });
+        updatedSessions += 1;
+      }
+      enqueue({ type: "sessions.changed" });
+      if (activeSessionId && updatedSessions > 0) enqueue({ type: "snapshot.changed", sessionId: activeSessionId });
+      return { ...removed, fallbackModel, updatedSessions };
+    },
     async refreshMcp() {
       if (!activeSessionId) return;
       const session = runtime.loadSession(activeSessionId);
@@ -517,7 +608,8 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
         backgroundActivities: summarizeBackgroundActivities(store, sessionId),
         browserContexts: browserContextManager.list(sessionId),
         subagents: summarizeSubagents(store, sessionId),
-        queuedPrompts: runtime.listQueuedUserInputs(sessionId)
+        pendingSteers: runtime.listPendingSteeringInputs(sessionId),
+        queuedPrompts: runtime.listQueuedFollowupInputs(sessionId)
       };
     },
     async prompt(sessionId, input) {
@@ -777,4 +869,13 @@ function backgroundActivityLabel(store: SqliteStore, job: BackgroundJob): string
     } catch {  }
   }
   return job.backendKind?.trim().toLowerCase() || "process";
+}
+
+export function modelSelectionNeedsFallback(
+  selection: string | undefined,
+  providerID: string,
+  validModels: ReadonlySet<string>
+): boolean {
+  const usesProvider = selection === providerID || selection?.startsWith(`${providerID}:`) === true;
+  return usesProvider && (!selection || !validModels.has(selection));
 }

@@ -19,7 +19,7 @@ const ALWAYS = new Set([
   "todo_list"
 ]);
 const CODING = new Set([
-  "fs_list", "fs_write", "fs_edit", "patch_apply", "git_status", "git_diff", "code_write_script", "lsp_inspect"
+  "fs_list", "fs_write", "fs_edit", "patch_apply", "notebook_edit", "git_status", "git_diff", "code_write_script", "lsp_inspect", "worktree_enter", "worktree_exit"
 ]);
 const RECON = new Set([
   "port_scan", "nmap_scan", "subdomain_enum", "dir_enum", "exploit_search", "kali_tool_search", "notes_add", "evidence_save"
@@ -143,8 +143,10 @@ export function selectCapabilities(input: {
 
   for (const name of ALWAYS) reasons[name] = "kernel capability";
   if (!input.session.parentId) {
-    selected.add("agent_task");
-    reasons.agent_task = "root session delegation";
+    for (const name of ["request_user_input", "agent_spawn"]) {
+      selected.add(name);
+      reasons[name] = "root session delegation";
+    }
   }
   if (coding) for (const name of CODING) { selected.add(name); reasons[name] = "coding task"; }
   if (recon) for (const name of RECON) { selected.add(name); reasons[name] = "recon task"; }
@@ -152,6 +154,10 @@ export function selectCapabilities(input: {
     for (const tool of selectBrowserKernel(input.tools)) {
       selected.add(tool.name);
       reasons[tool.name] = "interactive web task";
+    }
+    for (const name of ["proxy_scope", "proxy_flows", "proxy_flow_get", "proxy_sitemap", "proxy_replay", "proxy_intercept", "proxy_clear"]) {
+      selected.add(name);
+      reasons[name] = "managed web proxy";
     }
   }
   if (interactiveWeb || rawHttp) {
@@ -168,8 +174,30 @@ export function selectCapabilities(input: {
     reasons["campaign_create"] = "campaign can be initialized for assessment work";
   }
   if (callback) for (const name of CALLBACK) { selected.add(name); reasons[name] = "callback or OOB task"; }
+  if (matches(text, /\b(search the web|web search|research|latest|current|internet|online|source|citation|paper|documentation)\b/)) {
+    selected.add("web_search");
+    selected.add("web_fetch");
+    reasons.web_search = "current web research";
+    reasons.web_fetch = "current web research";
+  }
+  if (matches(text, /\b(image|screenshot|photo|diagram|png|jpe?g|gif|webp)\b/)) {
+    selected.add("image_view");
+    reasons.image_view = "image inspection";
+  }
+  if (matches(text, /\bmcp\b.*\b(resource|resources)\b|\b(resource|resources)\b.*\bmcp\b/)) {
+    selected.add("mcp_resource_list");
+    selected.add("mcp_resource_read");
+    reasons.mcp_resource_list = "MCP resources";
+    reasons.mcp_resource_read = "MCP resources";
+  }
   if (input.hasActiveJobs || input.hasOutputArtifacts) {
     for (const name of BACKGROUND) { selected.add(name); reasons[name] = "active or retrievable tool output"; }
+  }
+  if (!input.session.parentId && input.hasActiveJobs) {
+    for (const name of ["agent_list", "agent_wait", "agent_message", "agent_followup", "agent_interrupt", "agent_close"]) {
+      selected.add(name);
+      reasons[name] = "active child-agent lifecycle";
+    }
   }
 
   for (const tool of input.tools) {

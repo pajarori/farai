@@ -23,7 +23,7 @@ export const skillLoadTool: ToolDefinition = {
     assertObject(args, "args");
     const name = asString(args.name, "name");
     const resource = typeof args.resource === "string" ? args.resource : undefined;
-    const skill = loadSkill(name, { workspace: context.workspace, ...(resource ? { resource } : {}) });
+    const skill = loadSkill(name, { workspace: context.rootWorkspace ?? context.workspace, ...(resource ? { resource } : {}) });
     if (!skill) {
       return {
         ok: false,

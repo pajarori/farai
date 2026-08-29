@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { join, normalize, relative, resolve } from "node:path";
 import { CONTAINER_WORKSPACE_MOUNT } from "../../agent-container/kali";
 
@@ -25,6 +26,19 @@ export function safeWorkspacePath(workspace: string, path: string, intent: "read
     if (intent === "write") throw new Error("path escapes workspace");
     return resolved;
   }
+  const normalized = rel.split(/[\\/]+/).join("/");
+  if (normalized === ".git" || normalized.startsWith(".git/")) throw new Error("path is protected: .git");
+  if (normalized === ".farai" || normalized.startsWith(".farai/")) throw new Error("path is protected: .farai");
+  if (intent === "write" && normalized === ".gitignore") throw new Error("path is protected: .gitignore");
+  return resolved;
+}
+
+export function safeExistingWorkspacePath(workspace: string, path: string, intent: "read" | "write"): string {
+  const lexical = safeWorkspacePath(workspace, path, intent);
+  const root = realpathSync(workspace);
+  const resolved = realpathSync(lexical);
+  const rel = relative(root, resolved);
+  if (rel.startsWith("..") || rel === "") throw new Error(`path escapes workspace${path.startsWith("/") ? ESCAPE_HINT : ""}`);
   const normalized = rel.split(/[\\/]+/).join("/");
   if (normalized === ".git" || normalized.startsWith(".git/")) throw new Error("path is protected: .git");
   if (normalized === ".farai" || normalized.startsWith(".farai/")) throw new Error("path is protected: .farai");
