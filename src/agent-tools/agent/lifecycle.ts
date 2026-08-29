@@ -33,6 +33,7 @@ const spawnProperties = {
   prompt: { type: "string" },
   lane: { type: "string", description: "built-in explore, recon, web, code, or verify lane, or a configured specialist lane" },
   tools: { type: "array", minItems: 1, items: { type: "string" }, description: "optional restriction that cannot exceed the parent scope" },
+  model: { type: "string", description: "optional model override" },
   mode: { type: "string", enum: ["attached", "detached"] }
 } as const;
 
@@ -41,14 +42,13 @@ function parseDelegation(args: Record<string, unknown>, context: Parameters<Tool
   if (!prompt) throw new Error("prompt must be a non-empty string");
   const mode: "attached" | "detached" = args.mode === "detached" ? "detached" : "attached";
   const lane = maybeString(args.lane);
+  const model = maybeString(args.model);
   const tools = Array.isArray(args.tools)
     ? [...new Set(args.tools.map((item) => asString(item, "tools[]").trim()).filter(Boolean))]
     : undefined;
   if (Array.isArray(args.tools) && !tools?.length) throw new Error("tools must contain at least one non-empty tool name");
-  if (resumeSessionId && (lane || tools)) throw new Error("resumed subagents preserve their original lane and tool scope");
-  if (mode === "detached" && !resumeSessionId && !lane && !tools?.length) throw new Error("detached subagents require an explicit lane or tool scope");
   const title = normalizeSessionTitle(maybeString(args.title) ?? (resumeSessionId ? childTitle(context, resumeSessionId) : titleFromPrompt(prompt, lane ? `${lane} task` : "subagent task")));
-  return { title, prompt, mode, lane, tools };
+  return { title, prompt, mode, lane, tools, model };
 }
 
 async function delegate(args: Record<string, unknown>, context: Parameters<ToolDefinition["run"]>[1], resumeSessionId?: string): Promise<ToolResult> {
@@ -59,7 +59,8 @@ async function delegate(args: Record<string, unknown>, context: Parameters<ToolD
     mode: input.mode,
     ...(resumeSessionId ? { sessionId: resumeSessionId } : {}),
     ...(input.lane ? { lane: input.lane } : {}),
-    ...(input.tools?.length ? { tools: input.tools } : {})
+    ...(input.tools?.length ? { tools: input.tools } : {}),
+    ...(input.model ? { model: input.model } : {})
   });
   return {
     ok: true,
@@ -75,10 +76,10 @@ const agentResultRenderer = (result: ToolResult): string => result.output ?? res
 
 export const agentSpawnTool: ToolDefinition = {
   name: "agent_spawn",
-  description: "Start a bounded leaf subagent. Attached waits; detached runs independently and requires a lane or tool scope.",
+  description: "Start a subagent. Attached waits for its result; detached lets it continue independently in the background.",
   inputSchema: { type: "object", required: ["prompt"], properties: spawnProperties, additionalProperties: false },
   mutates: true,
-  timeoutMs: 900_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: agentResultRenderer,
@@ -144,7 +145,7 @@ function followupTool(): ToolDefinition {
     description: "Give an idle child agent a new bounded task, preserving its model, lane, tool scope, and conversation context.",
     inputSchema: { type: "object", required: ["sessionId", "prompt"], properties: { sessionId: { type: "string" }, prompt: { type: "string" }, mode: { type: "string", enum: ["attached", "detached"] } }, additionalProperties: false },
     mutates: true,
-    timeoutMs: 900_000,
+    timeoutMs: Number.POSITIVE_INFINITY,
     parallel: true,
     concurrencyScope: "session",
     renderHuman: agentResultRenderer,

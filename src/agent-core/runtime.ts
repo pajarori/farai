@@ -21,7 +21,7 @@ import { resolveContextWindow, resolveMaxOutputTokens, resolveMaxSteps, resolveM
 import { defaultModelSelection } from "./model-catalog";
 import { sessionManager } from "../agent-tools/shared/session-manager";
 import { oastEvidenceForSession, parseOastEvents } from "../agent-tools/callback/oast-parser";
-import { activeBackgroundJobs, findEquivalentBackgroundJob, processIdFromArgs, renderBackgroundJobs, stableValue, type ActiveBackgroundJob } from "./loop/background";
+import { activeBackgroundJobs, processIdFromArgs, renderBackgroundJobs, stableValue, type ActiveBackgroundJob } from "./loop/background";
 import { isDefaultSessionTitle, sessionDisplayName, titleFromPrompt } from "../session-title";
 import { nonEmpty } from "./loop/history";
 import { AUTO_COMPACT_MAX_FAILURES, MANUAL_COMPACT_MIN_TOKENS, autoCompactThreshold, estimateTokens, runModelCompaction } from "./loop/compaction";
@@ -59,8 +59,6 @@ import {
   ToolExecutionDeadline,
   ToolExecutionGate,
   ToolExecutionLease,
-  ToolGateLease,
-  ToolScopeQuarantinedError,
   toolConcurrencyKey,
   toolForExecution,
   toolOperationTimeout,
@@ -76,12 +74,10 @@ export type { ActiveBackgroundJob } from "./loop/background";
 const REASONING_MAX_BYTES = 8 * 1024;
 const STREAM_RENDER_INTERVAL_MS = 100;
 const STREAM_PERSIST_INTERVAL_MS = 2_000;
-const MAX_RECOVERABLE_AUTO_CONTINUE = 3;
 const LIVE_OUTPUT_MAX_BYTES = 2 * 1024;
 const LIVE_OUTPUT_FLUSH_INTERVAL_MS = 150;
 const LIVE_OUTPUT_INITIAL_DELAY_MS = 320;
 const TOOL_HUMAN_RESULT_MAX_BYTES = 24 * 1024;
-const BACKGROUND_COMPLETION_MAX_STEPS = 1;
 const LOOP_SUPERVISION_NO_PROGRESS_STEPS = 12;
 const LOOP_SUPERVISION_STEER_INTERVAL = 5;
 const LOOP_PATTERN_MAX_PERIOD = 8;
@@ -400,7 +396,20 @@ export class AgentRuntime {
           if (newlyInterruptedTurns.has(turn.id)) this.store.updateTurn(turn.id, { status: "failed", stopReason: "planner_error", errorSummary: "Interrupted by runtime restart." });
         }
         if (!session.archivedAt) {
-          this.userInputs.recover(session.id, this.store.listEvents(session.id, 10_000));
+          const pendingUserInput = this.userInputs.recover(session.id, this.store.listEvents(session.id, 10_000));
+          const latestInterruptedTurn = [...turns].reverse().find((turn) => newlyInterruptedTurns.has(turn.id));
+          if (latestInterruptedTurn && !pendingUserInput && !this.mailbox.hasQueued(session.id)) {
+            this.inputQueue.enqueueFollowup(
+              session.id,
+              [
+                "Continue the task that was interrupted by the runtime restart.",
+                "Use the durable transcript and tool results as the source of truth.",
+                "Do not blindly replay mutating calls; inspect current state first, then resume from the next useful action."
+              ].join(" "),
+              "plain",
+              `runtime-recovery:${latestInterruptedTurn.id}`
+            );
+          }
         }
       }
       for (const job of this.store.listRecoverableJobs()) {
@@ -412,7 +421,7 @@ export class AgentRuntime {
             continue;
           }
         }
-        this.jobs.markLost(job.id, "Background execution owner was lost during runtime restart. The original work was not replayed.", job.agentMode !== "attached");
+        this.jobs.markLost(job.id, "Background execution owner was lost during runtime restart. Durable session work is resumable, but the original in-memory process cannot be reattached.", job.agentMode !== "attached");
       }
       for (const job of this.store.listTerminalJobsMissingMailbox()) this.jobs.repairTerminalMailbox(job.id);
       for (const session of sessions) this.reconcileRecoveredBackgroundTools(session.id, activeRuntimeIds);
@@ -1275,8 +1284,8 @@ export class AgentRuntime {
 
     let autoContinueStreak = 0;
     let resumeAfterCompaction = false;
-    const maxSteps = userAuthored ? this.maxSteps : BACKGROUND_COMPLETION_MAX_STEPS;
-    const maxTurnMs = userAuthored ? this.maxTurnMs : Number.POSITIVE_INFINITY;
+    const maxSteps = this.maxSteps;
+    const maxTurnMs = this.maxTurnMs;
     const loopStartedAt = Date.now();
     let timeBudgetWarned = false;
     let loopError: string | undefined;
@@ -1302,7 +1311,7 @@ export class AgentRuntime {
         responses.push(...await this.forceTimeLimitWrapUp(session, turn, assistantMessage, planner, maxTurnMs));
         break;
       }
-      if (!timeBudgetWarned && elapsedMs >= maxTurnMs * 0.75) {
+      if (Number.isFinite(maxTurnMs) && !timeBudgetWarned && elapsedMs >= maxTurnMs * 0.75) {
         timeBudgetWarned = true;
         const secondsLeft = Math.max(1, Math.ceil((maxTurnMs - elapsedMs) / 1_000));
         const queue = this.pendingSteeringContext.get(session.id) ?? [];
@@ -1311,8 +1320,7 @@ export class AgentRuntime {
       }
       this.store.updateTurn(turn.id, { stepCount: step + 1 });
       if (step >= maxSteps) {
-        if (userAuthored) responses.push(...await this.forceStepLimitWrapUp(session, turn, assistantMessage, planner, maxSteps));
-        else this.stopTurn(turn, "completed", "no_actions");
+        responses.push(...await this.forceStepLimitWrapUp(session, turn, assistantMessage, planner, maxSteps));
         break;
       }
       const compactResult = await this.maybeAutoCompact(session, planner);
@@ -1383,7 +1391,7 @@ export class AgentRuntime {
         contextWindow: resolveContextWindow(planner.contextWindow),
         maxOutputTokens: resolveMaxOutputTokens(planner.maxOutputTokens),
         ...this.contextBudgetInput(),
-        toolsEnabled: userAuthored,
+        toolsEnabled: true,
         extraBlocks: [
           ...(passiveCompletions ? [{ title: "Completed Background Work", body: passiveCompletions, stable: false }] : []),
           ...(backgroundCompletion ? [{ title: "Background Completion", body: backgroundCompletion, stable: false }] : []),
@@ -1428,7 +1436,7 @@ export class AgentRuntime {
         contextBlocks: context.contextBlocks,
         tools: context.tools,
         toolCatalog: context.toolCatalog,
-        toolChoice: userAuthored ? "auto" : "none"
+        toolChoice: "auto"
       };
       resumeAfterCompaction = false;
       const autoContinue = { streak: autoContinueStreak };
@@ -1437,7 +1445,7 @@ export class AgentRuntime {
         : undefined;
       const control = chatProvider
         ? await this.streamStep(chatProvider, plannerInput, session, turn, assistantMessage, planner.name, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs)
-        : await this.batchStep(planner, plannerInput, session, turn, assistantMessage, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs);
+        : await this.batchStep(planner, plannerInput, session, turn, assistantMessage, step, context.manifest, responses, autoContinue, remainingTurnMs);
       autoContinueStreak = autoContinue.streak;
       if (control.cancelled) return responses.join("\n");
       if (control.timedOut) {
@@ -1550,12 +1558,11 @@ export class AgentRuntime {
     context: ContextManifest,
     responses: string[],
     autoContinue: { streak: number },
-    toolsAllowed: boolean,
     modelTimeoutMs?: number
   ): Promise<StepControl> {
     let actions: PlannerAction[];
     try {
-      actions = await this.planWithRetry(planner, plannerInput, session, turn, assistantMessage, context, modelTimeoutMs, !toolsAllowed);
+      actions = await this.planWithRetry(planner, plannerInput, session, turn, assistantMessage, context, modelTimeoutMs);
     } catch (error) {
       if (error instanceof ModelCallDeadlineError) return { timedOut: true, shouldContinue: false };
       throw error;
@@ -1583,8 +1590,7 @@ export class AgentRuntime {
 
     for (const action of actions) {
       if (action.kind === "tool") {
-        if (toolsAllowed) toolBatch.push(action);
-        else this.recordDisabledToolCall(session, turn, assistantMessage, step, action.toolCallId ?? action.tool, action.tool, action.args);
+        toolBatch.push(action);
         continue;
       }
       if (await flushToolBatch()) return { cancelled: true, shouldContinue };
@@ -1694,10 +1700,6 @@ export class AgentRuntime {
               } catch (error) {
                 sawParseError = true;
                 this.recordToolParseError(session, turn, assistantMessage, step, toolCallId ?? toolName, toolName, error instanceof Error ? error.message : String(error), event.arguments);
-                continue;
-              }
-              if (!userAuthored) {
-                this.recordDisabledToolCall(session, turn, assistantMessage, step, toolCallId ?? toolName, toolName, args);
                 continue;
               }
               const action: ToolPlannerAction = { kind: "tool", tool: toolName, args, rationale: "", ...(toolCallId ? { toolCallId } : {}) };
@@ -1928,10 +1930,6 @@ export class AgentRuntime {
   }
 
   private async applyRespond(session: Session, turn: Turn, assistantMessage: Message, plannerName: string, text: string, truncated: boolean, recoverable: boolean, responses: string[], autoContinue: { streak: number }): Promise<boolean> {
-    if (this.isRedundantAgentTaskResponse(session.id, turn.id, text)) {
-      this.discardStreamingText(turn.id);
-      return false;
-    }
     responses.push(text);
     const streamed = this.streamingParts.get(turn.id);
     if (streamed?.textPartId) {
@@ -1943,29 +1941,10 @@ export class AgentRuntime {
     }
     this.event(session.id, "text", { role: "assistant", text, planner: plannerName, truncated, recoverable });
     if (truncated || recoverable) {
-      if (autoContinue.streak < MAX_RECOVERABLE_AUTO_CONTINUE) {
-        autoContinue.streak += 1;
-        return true;
-      }
-      const reason = truncated
-        ? `kept getting cut off by its token limit ${MAX_RECOVERABLE_AUTO_CONTINUE} times in a row. Consider raising maxOutputTokens in ~/.local/pajarori/farai/config.toml or asking a smaller follow-up question`
-        : `kept failing to produce a usable response ${MAX_RECOVERABLE_AUTO_CONTINUE} times in a row`;
-      const notice = `(Model ${reason} — stopping auto-continue.)`;
-      responses.push(notice);
-      this.persistTextPart(session.id, turn.id, assistantMessage.id, notice);
-      this.event(session.id, "text", { role: "assistant", text: notice, planner: plannerName });
+      autoContinue.streak += 1;
+      return true;
     }
     return false;
-  }
-
-  private isRedundantAgentTaskResponse(sessionId: string, turnId: string, text: string): boolean {
-    const candidate = comparableProse(text);
-    if (candidate.length < 40) return false;
-    const outputs = this.store.listMessages(sessionId, 200)
-      .flatMap((message) => message.parts)
-      .filter((part) => part.turnId === turnId && part.type === "tool_result")
-      .flatMap((part) => agentTaskOutput(part.payload));
-    return outputs.some((output) => substantiallySameProse(candidate, comparableProse(output)));
   }
 
   private recordToolParseError(session: Session, turn: Turn, assistantMessage: Message, step: number, toolCallId: string, tool: string, error: string, rawArguments: string): void {
@@ -1973,15 +1952,6 @@ export class AgentRuntime {
     this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "tool_call", payload: { record: { id: toolCallId, tool, args: {} } } });
     this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "tool_result", payload: { toolCallId, tool, result: text } });
     const payload = { turnId: turn.id, step, tool, error: text, recoverable: true };
-    this.event(session.id, "planner_error", payload);
-    this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "planner_error", payload });
-  }
-
-  private recordDisabledToolCall(session: Session, turn: Turn, assistantMessage: Message, step: number, toolCallId: string, tool: string, args: unknown): void {
-    const text = `Tool ${tool} was not executed because this is a bounded text-only completion turn.`;
-    this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "tool_call", payload: { record: { id: toolCallId, tool, args } } });
-    this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "tool_result", payload: { toolCallId, tool, result: text } });
-    const payload = { turnId: turn.id, step, tool, error: text, recoverable: false };
     this.event(session.id, "planner_error", payload);
     this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "planner_error", payload });
   }
@@ -2139,28 +2109,6 @@ export class AgentRuntime {
       this.event(session.id, "planner_error", payload);
       this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "planner_error", payload });
       return { shouldContinue: !sawResponse };
-    }
-    if (action.tool === "subdomain_enum") {
-      const duplicate = this.store.listToolCalls(session.id, 200).find((call) => (
-        call.turnId === turn.id
-        && call.tool === action.tool
-        && (call.status === "done" || call.status === "error")
-        && stableValue(call.args) === stableValue(action.args)
-      ));
-      if (duplicate) {
-        const text = `Equivalent ${action.tool} already finished in this turn as ${duplicate.id}; reuse its source statuses and names instead of retrying.`;
-        this.event(session.id, "planner_error", {
-          turnId: turn.id,
-          step,
-          tool: action.tool,
-          error: text,
-          recoverable: true,
-          policy: "duplicate_terminal_tool",
-          duplicateSuppressed: true,
-          duplicateToolCallId: duplicate.id
-        });
-        return { shouldContinue: true };
-      }
     }
     const validationError = validateToolArgs(tool.inputSchema, action.args);
     if (validationError) {
@@ -2576,18 +2524,17 @@ export class AgentRuntime {
       return await this.workspaceBindingGate.run(
         `session-workspace:${session.id}`,
         !workspaceTransition,
-        async (bindingLease) => {
+        async () => {
           session = this.store.loadSession(session.id);
           tool = toolForExecution(session, toolName);
           schedulingTool = toolSchedulingDefinition(tool, args, session);
           return await this.toolExecutionGate.run(
             toolConcurrencyKey(schedulingTool, session, session.workspace),
             schedulingTool.parallel,
-            async (gateLease) => {
-              gateLease.mirrorTo(bindingLease);
+            async () => {
               gateSignal.throwIfAborted();
               if (owner && this.store.loadTurn(owner.turn.id).status === "cancelled") throw new Error("turn cancelled before tool start");
-              return await this.runToolUnderGate(session, tool, args, owner, providerToolCallId, gateLease);
+              return await this.runToolUnderGate(session, tool, args, owner, providerToolCallId);
             },
             gateSignal
           );
@@ -2595,9 +2542,6 @@ export class AgentRuntime {
         gateSignal
       );
     } catch (error) {
-      if (error instanceof ToolScopeQuarantinedError) {
-        return this.recordRejectedToolCall(session, tool, args, error.message, { quarantined: true, reason: "concurrency_scope_quarantined" }, owner, providerToolCallId);
-      }
       const ownerCancelled = owner ? this.store.loadTurn(owner.turn.id).status === "cancelled" : false;
       if (gateSignal.aborted || ownerCancelled) {
         const message = gateSignal.reason ? String(gateSignal.reason) : "turn cancelled before tool start";
@@ -2635,8 +2579,7 @@ export class AgentRuntime {
     tool: ToolDefinition,
     args: unknown,
     owner?: { turn: Turn; assistantMessage: Message },
-    providerToolCallId?: string,
-    gateLease?: ToolGateLease
+    providerToolCallId?: string
   ): Promise<ToolCallRecord> {
     const toolCall = this.toolCalls.begin({
       sessionId: session.id,
@@ -2645,7 +2588,7 @@ export class AgentRuntime {
       ...(owner ? { owner: { turnId: owner.turn.id, messageId: owner.assistantMessage.id } } : {}),
       ...(providerToolCallId ? { providerToolCallId } : {})
     });
-    await this.executeToolUnderGate(session, toolCall.id, owner, gateLease);
+    await this.executeToolUnderGate(session, toolCall.id, owner);
     return this.store.loadToolCall(toolCall.id);
   }
 
@@ -2672,18 +2615,17 @@ export class AgentRuntime {
       return await this.workspaceBindingGate.run(
         `session-workspace:${session.id}`,
         !workspaceTransition,
-        async (bindingLease) => {
+        async () => {
           session = this.store.loadSession(session.id);
           tool = toolForExecution(session, toolCall.tool);
           schedulingTool = toolSchedulingDefinition(tool, toolCall.args, session);
           return await this.toolExecutionGate.run(
             toolConcurrencyKey(schedulingTool, session, session.workspace),
             schedulingTool.parallel,
-            async (gateLease) => {
-              gateLease.mirrorTo(bindingLease);
+            async () => {
               gateSignal.throwIfAborted();
               if (turnId && this.store.loadTurn(turnId).status === "cancelled") throw new Error("turn cancelled before tool start");
-              return await this.executeToolUnderGate(session, toolCallId, owner, gateLease);
+              return await this.executeToolUnderGate(session, toolCallId, owner);
             },
             gateSignal
           );
@@ -2691,13 +2633,6 @@ export class AgentRuntime {
         gateSignal
       );
     } catch (error) {
-      if (error instanceof ToolScopeQuarantinedError) {
-        const rejected = this.store.loadToolCall(toolCallId);
-        if (rejected.status === "pending") {
-          return this.toolCalls.settleError(rejected, error.message, { quarantined: true, reason: "concurrency_scope_quarantined" });
-        }
-        return rejected;
-      }
       if (!gateSignal.aborted && (!turnId || this.store.loadTurn(turnId).status !== "cancelled")) throw error;
       const cancelled = this.store.loadToolCall(toolCallId);
       if (cancelled.status === "pending") {
@@ -2717,8 +2652,7 @@ export class AgentRuntime {
   private async executeToolUnderGate(
     session: Session,
     toolCallId: string,
-    owner?: { turn: Turn; assistantMessage: Message },
-    gateLease = new ToolGateLease()
+    owner?: { turn: Turn; assistantMessage: Message }
   ): Promise<ToolCallRecord> {
     let toolCall = this.store.loadToolCall(toolCallId);
     if (toolCall.status !== "pending") return toolCall;
@@ -2925,8 +2859,7 @@ export class AgentRuntime {
         let nestedResult: ToolResult;
         try {
           nestedResult = await nestedDeadline.run(
-            () => target.run(args, { ...nestedContext, signal: nestedDeadline.signal, timeoutMs: toolOperationTimeout(target.timeoutMs) }),
-            gateLease
+            () => target.run(args, { ...nestedContext, signal: nestedDeadline.signal, timeoutMs: toolOperationTimeout(target.timeoutMs) })
           );
           lease.assertActive();
           await this.fireHooks(session, "tool.post", canonicalName, {
@@ -2970,21 +2903,12 @@ export class AgentRuntime {
       },
       delegateSession: async ({ title, prompt, lane, tools, model, mode = "attached", sessionId: resumeSessionId, linkToolCall = true }) => {
         lease.assertActive();
-        let depth = 0;
-        let parentId = session.parentId;
-        while (parentId) {
-          depth += 1;
-          parentId = this.store.loadSession(parentId).parentId;
-          if (depth > 4) break;
-        }
-        if (depth >= 1) throw new Error("nested campaign delegation is disabled; child workers are leaf agents");
-        if (resumeSessionId && (lane || tools || model)) throw new Error("resumed subagents preserve their original lane, model, and tool scope");
         const previousJob = resumeSessionId
           ? this.store.listJobs(session.id, 10_000).find((job) => job.kind === "agent" && job.childSessionId === resumeSessionId)
           : undefined;
         const effectiveLane = lane ?? previousJob?.lane;
         const laneDef = effectiveLane ? resolveLane(this.workspace, effectiveLane) : undefined;
-        if (!resumeSessionId && effectiveLane && !laneDef) throw new Error(`unknown subagent lane: ${effectiveLane}`);
+        if (effectiveLane && !laneDef) throw new Error(`unknown subagent lane: ${effectiveLane}`);
         let child: Session;
         let scopedTools: string[] | undefined;
         let editsSharedWorkspace: boolean;
@@ -2998,9 +2922,14 @@ export class AgentRuntime {
             && ["created", "starting", "running", "cancelling"].includes(job.status)
           ));
           if (active || this.hasRunningTurn(child.id)) throw new Error(`subagent session ${child.id} is already running`);
-          scopedTools = child.toolScope;
+          const requestedTools = tools ?? laneDef?.tools;
+          scopedTools = requestedTools
+            ? resolveSubagentToolScope({ parent: session, availableTools: listToolsForSession(session), requestedTools })
+            : child.toolScope;
           editsSharedWorkspace = hasSharedWorkspaceEdits(scopedTools);
-          if (mode === "detached" && editsSharedWorkspace) throw new Error("detached subagents cannot hold shared workspace edit tools; use an attached code worker or a read-only lane");
+          const childModel = model ?? laneDef?.model;
+          if (childModel && childModel !== child.model) child = this.updateSession(child.id, { model: childModel });
+          if (requestedTools && scopedTools?.length) child = this.updateSession(child.id, { toolScope: scopedTools });
         } else {
           const requestedTools = tools ?? laneDef?.tools;
           scopedTools = resolveSubagentToolScope({
@@ -3009,7 +2938,6 @@ export class AgentRuntime {
             ...(requestedTools ? { requestedTools } : {})
           });
           editsSharedWorkspace = hasSharedWorkspaceEdits(scopedTools);
-          if (mode === "detached" && editsSharedWorkspace) throw new Error("detached subagents cannot hold shared workspace edit tools; use an attached code worker or a read-only lane");
           const childModel = model ?? laneDef?.model;
           child = await this.store.forkSession(session.id, title);
           this.recordSession(child);
@@ -3084,8 +3012,10 @@ export class AgentRuntime {
               this.jobs.completeAgent(job.id, response, mode === "detached");
               return response;
             };
-            const gated = () => this.subagentGate.run(execute, agentController.signal);
-            return editsSharedWorkspace
+            const gated = () => session.parentId
+              ? execute()
+              : this.subagentGate.run(execute, agentController.signal);
+            return editsSharedWorkspace && !session.parentId
               ? await this.subagentWorkspaceMutationGate.run(gated, agentController.signal)
               : await gated();
           } catch (error) {
@@ -3122,24 +3052,10 @@ export class AgentRuntime {
       if (list.length === 0) this.turnControllers.delete(turnId);
     };
     let result: ToolResult;
-    const duplicate = findEquivalentBackgroundJob(
-      activeBackgroundJobs(this.store.listToolCalls(session.id, 200)),
-      toolCall.tool,
-      toolCall.args
-    );
     await this.fireHooks(session, "tool.pre", toolCall.tool, { tool: toolCall.tool, toolCallId: toolCall.id, args: toolCall.args });
     try {
       lease.assertActive();
-      result = duplicate && sessionManager.isTracked(duplicate.processId)
-        ? {
-            ok: true,
-            summary: `Equivalent background job already running: processId=${duplicate.processId}`,
-            output: `Reusing ${duplicate.toolCallId}. Poll ${duplicate.processId} with session_poll instead of starting it again.`,
-            status: "running_background",
-            processId: duplicate.processId,
-            metadata: { reusedBackgroundToolCallId: duplicate.toolCallId }
-          }
-        : await deadline.run(() => tool.run(toolCall.args, context), gateLease);
+      result = await deadline.run(() => tool.run(toolCall.args, context));
     } catch (error) {
       settleLiveOutput();
       releaseController();
@@ -3714,38 +3630,6 @@ function sameProviderToolCatalog(left: ProviderToolDef[], right: ProviderToolDef
 function completedToolCallStatus(result: ToolResult): ToolCallRecord["status"] {
   if (result.status === "running_background") return "running_background";
   return result.ok ? "done" : "error";
-}
-
-function agentTaskOutput(payload: unknown): string[] {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
-  const record = payload as Record<string, unknown>;
-  if (!["agent_task", "agent_spawn", "agent_followup"].includes(String(record.tool))) return [];
-  const toolResult = record.toolResult;
-  if (!toolResult || typeof toolResult !== "object" || Array.isArray(toolResult)) return [];
-  const output = (toolResult as Record<string, unknown>).output;
-  return typeof output === "string" && output.trim() ? [output] : [];
-}
-
-function comparableProse(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[`*_>#|()[\]{}]/g, " ")
-    .replace(/[^a-z0-9./:_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function substantiallySameProse(left: string, right: string): boolean {
-  if (right.length < 40) return false;
-  const shorter = Math.min(left.length, right.length);
-  const longer = Math.max(left.length, right.length);
-  if ((left.includes(right) || right.includes(left)) && shorter / longer >= 0.72) return true;
-  const leftWords = new Set(left.split(" ").filter((word) => word.length > 2));
-  const rightWords = new Set(right.split(" ").filter((word) => word.length > 2));
-  if (leftWords.size < 8 || rightWords.size < 8) return false;
-  let shared = 0;
-  for (const word of leftWords) if (rightWords.has(word)) shared += 1;
-  return shared / leftWords.size >= 0.88 && shared / rightWords.size >= 0.88;
 }
 
 function recoveredJobSummary(job: BackgroundJob): string {

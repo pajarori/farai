@@ -84,7 +84,8 @@ export function KeyboardController(): JSX.Element {
       historySearchActive: Boolean(tui.store.ui.historySearch),
       queuedCount: tui.store.snapshot.queuedPrompts.length,
       activeMainTab: tui.store.ui.activeMainTab,
-      ...(pendingRequest && requestState && pendingQuestion ? {
+      pendingUserInput: Boolean(pendingRequest),
+      ...(pendingRequest && requestState && pendingQuestion && !requestState.dismissed ? {
         requestUserInput: {
           textMode: requestState.textModeQuestionId === pendingQuestion.id,
           canExitTextMode: Boolean(pendingQuestion.choices?.length),
@@ -175,6 +176,13 @@ export function KeyboardController(): JSX.Element {
         await tui.answerUserInputQuestion(current.question.id, draft);
         return;
       }
+      case "requestUserInput.dismiss":
+        tui.actions.requestUserInputDismissedSet(true);
+        composer.focus();
+        return;
+      case "requestUserInput.show":
+        tui.actions.requestUserInputDismissedSet(false);
+        return;
       case "requestUserInput.cancel":
         await tui.cancelUserInput();
         return;

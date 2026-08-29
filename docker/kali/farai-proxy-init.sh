@@ -38,6 +38,4 @@ iptables -t nat -A "$chain" -d 127.0.0.0/8 -j RETURN
 iptables -t nat -A "$chain" -m owner --uid-owner "$proxy_user" -j RETURN
 iptables -t nat -A "$chain" -p tcp -m multiport --dports "$tcp_ports" -j REDIRECT --to-ports "$redsocks_port"
 iptables -t nat -C OUTPUT -p tcp -j "$chain" 2>/dev/null || iptables -t nat -A OUTPUT -p tcp -j "$chain"
-iptables -C OUTPUT -p udp --dport 443 -j REJECT 2>/dev/null || iptables -A OUTPUT -p udp --dport 443 -j REJECT
-
 echo "farai-proxy-init: transparent capture active on tcp $tcp_ports via 127.0.0.1:$proxy_port"

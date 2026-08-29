@@ -27,9 +27,7 @@ export function safeWorkspacePath(workspace: string, path: string, intent: "read
     return resolved;
   }
   const normalized = rel.split(/[\\/]+/).join("/");
-  if (normalized === ".git" || normalized.startsWith(".git/")) throw new Error("path is protected: .git");
   if (normalized === ".farai" || normalized.startsWith(".farai/")) throw new Error("path is protected: .farai");
-  if (intent === "write" && normalized === ".gitignore") throw new Error("path is protected: .gitignore");
   return resolved;
 }
 
@@ -40,9 +38,7 @@ export function safeExistingWorkspacePath(workspace: string, path: string, inten
   const rel = relative(root, resolved);
   if (rel.startsWith("..") || rel === "") throw new Error(`path escapes workspace${path.startsWith("/") ? ESCAPE_HINT : ""}`);
   const normalized = rel.split(/[\\/]+/).join("/");
-  if (normalized === ".git" || normalized.startsWith(".git/")) throw new Error("path is protected: .git");
   if (normalized === ".farai" || normalized.startsWith(".farai/")) throw new Error("path is protected: .farai");
-  if (intent === "write" && normalized === ".gitignore") throw new Error("path is protected: .gitignore");
   return resolved;
 }
 

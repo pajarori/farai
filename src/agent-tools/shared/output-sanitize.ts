@@ -4,12 +4,45 @@ export function sanitizeToolOutput(value: string): string {
   if (!value) return value;
   const http = splitHttpResponse(value);
   if (http && isBinaryLike(http.body)) {
-    return `${sanitizeText(http.head).trimEnd()}\n\n[binary body suppressed: ${byteLength(http.body)} bytes]`;
+    return `${sanitizeText(http.head).trimEnd()}\n\n${binaryPreview(http.body, "binary body")}`;
   }
   if (isBinaryLike(value)) {
-    return `[binary output suppressed: ${byteLength(value)} bytes]\nUse a file-oriented command such as file, unzip -l, strings, or hexdump -C to inspect it.`;
+    return binaryPreview(value, "binary-like output");
   }
   return sanitizeText(value);
+}
+
+function binaryPreview(value: string, label: string): string {
+  const bytes = Buffer.from(value, "utf8");
+  const strings = printableStrings(bytes).slice(0, 24);
+  const hex = [...bytes.subarray(0, 192)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .reduce<string[]>((lines, byte, index) => {
+      const line = Math.floor(index / 16);
+      lines[line] = `${lines[line] ?? ""}${lines[line] ? " " : ""}${byte}`;
+      return lines;
+    }, []);
+  return [
+    `[${label}: ${bytes.byteLength} bytes; showing readable strings and a hex preview]`,
+    ...(strings.length ? [strings.join("\n")] : []),
+    ...(hex.length ? [hex.join("\n")] : [])
+  ].join("\n");
+}
+
+function printableStrings(bytes: Buffer): string[] {
+  const result: string[] = [];
+  let current = "";
+  const flush = () => {
+    if (current.length >= 4) result.push(current);
+    current = "";
+  };
+  for (const byte of bytes) {
+    if (byte === 0x09 || byte === 0x20 || (byte >= 0x21 && byte <= 0x7e)) current += String.fromCharCode(byte);
+    else if (byte === 0x0a || byte === 0x0d) flush();
+    else flush();
+  }
+  flush();
+  return result;
 }
 
 export function isBinaryLike(value: string): boolean {

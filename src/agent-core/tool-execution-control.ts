@@ -9,13 +9,6 @@ export class ToolDeadlineError extends Error {
   }
 }
 
-export class ToolScopeQuarantinedError extends Error {
-  constructor(readonly scope: string, readonly cause: Error) {
-    super(`Tool concurrency scope ${scope} is quarantined after: ${cause.message}`);
-    this.name = "ToolScopeQuarantinedError";
-  }
-}
-
 export class ToolExecutionLease {
   private active = true;
   private reason = "tool execution finished";
@@ -31,24 +24,6 @@ export class ToolExecutionLease {
   revoke(reason: string): void {
     this.active = false;
     this.reason = reason;
-  }
-}
-
-export class ToolGateLease {
-  private readonly quarantines: Array<{ running: Promise<unknown>; error: Error }> = [];
-  private readonly mirrors = new Set<ToolGateLease>();
-
-  mirrorTo(target: ToolGateLease): void {
-    if (target !== this) this.mirrors.add(target);
-  }
-
-  quarantineUntil(running: Promise<unknown>, error: Error): void {
-    this.quarantines.push({ running, error });
-    for (const target of this.mirrors) target.quarantineUntil(running, error);
-  }
-
-  takeQuarantines(): Array<{ running: Promise<unknown>; error: Error }> {
-    return this.quarantines.splice(0);
   }
 }
 
@@ -69,19 +44,15 @@ export class ToolExecutionDeadline {
     else if (parentSignal && this.abortFromParent) parentSignal.addEventListener("abort", this.abortFromParent, { once: true });
   }
 
-  async run<T>(work: () => Promise<T>, gateLease: ToolGateLease): Promise<T> {
+  async run<T>(work: () => Promise<T>): Promise<T> {
     this.signal.throwIfAborted();
-    this.timer ??= setTimeout(() => {
-      if (!this.signal.aborted) this.controller.abort(new ToolDeadlineError(this.tool, this.timeoutMs));
-    }, this.timeoutMs);
-    this.signal.throwIfAborted();
-    const running = Promise.resolve().then(work);
-    try {
-      return await abortablePromise(running, this.signal);
-    } catch (error) {
-      if (this.signal.aborted) gateLease.quarantineUntil(running, abortReason(this.signal));
-      throw error;
+    if (Number.isFinite(this.timeoutMs)) {
+      this.timer ??= setTimeout(() => {
+        if (!this.signal.aborted) this.controller.abort(new ToolDeadlineError(this.tool, this.timeoutMs));
+      }, this.timeoutMs);
     }
+    this.signal.throwIfAborted();
+    return await abortablePromise(Promise.resolve().then(work), this.signal);
   }
 
   dispose(): void {
@@ -95,8 +66,6 @@ type ToolGateState = {
   activeReaders: number;
   activeWriter: boolean;
   queue: ToolGateWaiter[];
-  quarantines: Set<Promise<unknown>>;
-  quarantineError?: Error;
 };
 
 type ToolGateWaiter = {
@@ -116,14 +85,12 @@ export class ToolExecutionGate {
     return new Promise((resolve) => this.idleResolvers.add(resolve));
   }
 
-  async run<T>(key: string, parallel: boolean, fn: (lease: ToolGateLease) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async run<T>(key: string, parallel: boolean, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const release = await this.acquire(key, parallel ? "read" : "write", signal);
-    const lease = new ToolGateLease();
     try {
       signal?.throwIfAborted();
-      return await fn(lease);
+      return await fn();
     } finally {
-      this.quarantine(key, lease.takeQuarantines());
       release();
     }
   }
@@ -134,12 +101,8 @@ export class ToolExecutionGate {
         reject(signal.reason ?? new Error("tool gate acquisition cancelled"));
         return;
       }
-      const state = this.states.get(key) ?? { activeReaders: 0, activeWriter: false, queue: [], quarantines: new Set<Promise<unknown>>() };
+      const state = this.states.get(key) ?? { activeReaders: 0, activeWriter: false, queue: [] };
       this.states.set(key, state);
-      if (state.quarantineError) {
-        reject(state.quarantineError);
-        return;
-      }
       const waiter: ToolGateWaiter = { mode, resolve, reject, ...(signal ? { signal } : {}) };
       if (signal) {
         waiter.onAbort = () => {
@@ -159,7 +122,7 @@ export class ToolExecutionGate {
   }
 
   private drain(key: string, state: ToolGateState): void {
-    if (state.activeWriter || state.quarantineError) return;
+    if (state.activeWriter) return;
     const first = state.queue[0];
     if (!first) return;
     if (first.mode === "write") {
@@ -185,7 +148,7 @@ export class ToolExecutionGate {
   }
 
   private cleanup(key: string, state: ToolGateState): void {
-    if (state.activeReaders === 0 && !state.activeWriter && state.queue.length === 0 && state.quarantines.size === 0 && this.states.get(key) === state) {
+    if (state.activeReaders === 0 && !state.activeWriter && state.queue.length === 0 && this.states.get(key) === state) {
       this.states.delete(key);
       if (this.states.size === 0) {
         for (const resolve of this.idleResolvers) resolve();
@@ -203,29 +166,6 @@ export class ToolExecutionGate {
     if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
     delete waiter.onAbort;
   }
-
-  private quarantine(key: string, entries: Array<{ running: Promise<unknown>; error: Error }>): void {
-    if (entries.length === 0) return;
-    const state = this.states.get(key);
-    if (!state) return;
-    state.quarantineError ??= new ToolScopeQuarantinedError(key, entries[0]!.error);
-    for (const waiter of state.queue.splice(0)) {
-      this.detach(waiter);
-      waiter.reject(state.quarantineError);
-    }
-    for (const entry of entries) {
-      let tracked: Promise<unknown>;
-      tracked = entry.running.catch(() => undefined).finally(() => {
-        state.quarantines.delete(tracked);
-        if (state.quarantines.size === 0) {
-          delete state.quarantineError;
-          this.drain(key, state);
-          this.cleanup(key, state);
-        }
-      });
-      state.quarantines.add(tracked);
-    }
-  }
 }
 
 export function leasedToolCapability<T extends object>(target: T, lease: ToolExecutionLease): T {
@@ -242,12 +182,14 @@ export function leasedToolCapability<T extends object>(target: T, lease: ToolExe
 }
 
 export function normalizeToolTimeout(timeoutMs: number): number {
+  if (timeoutMs === Number.POSITIVE_INFINITY) return timeoutMs;
   if (!Number.isFinite(timeoutMs)) return 120_000;
   return Math.max(1, Math.floor(timeoutMs));
 }
 
 export function toolOperationTimeout(timeoutMs: number): number {
   const deadline = normalizeToolTimeout(timeoutMs);
+  if (!Number.isFinite(deadline)) return deadline;
   const handoffGrace = Math.min(5_000, Math.max(50, Math.floor(deadline * 0.05)));
   return Math.max(1, deadline - handoffGrace);
 }

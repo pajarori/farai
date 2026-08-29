@@ -14,11 +14,12 @@ export const agentTaskTool: ToolDefinition = {
       lane: { type: "string" },
       tools: { type: "array", minItems: 1, items: { type: "string" } },
       mode: { type: "string", enum: ["attached", "detached"] },
+      model: { type: "string" },
       sessionId: { type: "string" }
     }
   },
   mutates: true,
-  timeoutMs: 900_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: (result) => result.summary,
@@ -31,13 +32,12 @@ export const agentTaskTool: ToolDefinition = {
     const mode = args.mode === "detached" ? "detached" : "attached";
     const sessionId = maybeString(args.sessionId);
     const lane = maybeString(args.lane);
+    const model = maybeString(args.model);
     const tools = Array.isArray(args.tools) ? [...new Set(args.tools.map((item) => asString(item, "tools[]").trim()).filter(Boolean))] : undefined;
     if (Array.isArray(args.tools) && !tools?.length) throw new Error("tools must contain at least one non-empty tool name");
-    if (mode === "detached" && !sessionId && !lane && !tools?.length) throw new Error("detached subagents require an explicit lane or tool scope");
-    if (sessionId && (lane || tools)) throw new Error("resumed subagents preserve their original lane and tool scope");
     const resumedTitle = sessionId ? context.store.loadSession?.(sessionId)?.title : undefined;
     const title = normalizeSessionTitle(maybeString(args.title) ?? resumedTitle ?? titleFromPrompt(prompt, lane ? `${lane} task` : "subagent task"));
-    const result = await context.delegateSession({ title, prompt, mode, ...(sessionId ? { sessionId } : {}), ...(lane ? { lane } : {}), ...(tools?.length ? { tools } : {}) });
+    const result = await context.delegateSession({ title, prompt, mode, ...(sessionId ? { sessionId } : {}), ...(lane ? { lane } : {}), ...(tools?.length ? { tools } : {}), ...(model ? { model } : {}) });
     return {
       ok: true,
       summary: mode === "detached" ? `${title} is running in the background` : `${title} returned a result`,

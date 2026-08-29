@@ -846,9 +846,12 @@ export async function loadMergedMcpConfigs(paths: string[]): Promise<ExternalMcp
 }
 
 export function resolveMcpPort(configs: ExternalMcpServer[], portOffset = 0): number {
-  void configs;
-  void portOffset;
-  return DEFAULT_MITMPROXY_PORT;
+  const configured = configs.find((config) => config.mitmproxy)?.mitmproxy?.port;
+  const base = Number.isInteger(configured) ? configured! : DEFAULT_MITMPROXY_PORT;
+  const offset = Number.isFinite(portOffset) ? Math.trunc(portOffset) : 0;
+  const port = base + offset;
+  if (port < 1 || port > 65_535) throw new Error(`resolved MCP proxy port is outside 1-65535: ${port}`);
+  return port;
 }
 
 export function applyMcpPortTemplate(config: ExternalMcpServer, port: number): ExternalMcpServer {

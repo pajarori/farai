@@ -7,50 +7,8 @@ export type CapabilitySelection = {
   reasons: Record<string, string>;
 };
 
-const BRIDGE = new Set(["tool_search", "tool_invoke"]);
-const ALWAYS = new Set([
-  "shell_exec",
-  "fs_read",
-  "fs_grep",
-  "skill_load",
-  "session_rename",
-  "todo_add",
-  "todo_update",
-  "todo_list"
-]);
-const CODING = new Set([
-  "fs_list", "fs_write", "fs_edit", "patch_apply", "notebook_edit", "git_status", "git_diff", "code_write_script", "lsp_inspect", "worktree_enter", "worktree_exit"
-]);
-const RECON = new Set([
-  "port_scan", "nmap_scan", "subdomain_enum", "dir_enum", "exploit_search", "kali_tool_search", "notes_add", "evidence_save"
-]);
-const BROWSER_KERNEL = [
-  "browser_context",
-  "browser_navigate",
-  "browser_snapshot",
-  "browser_find",
-  "browser_click",
-  "browser_fill_form",
-  "browser_type",
-  "browser_press_key",
-  "browser_wait_for",
-  "browser_tabs",
-  "browser_network_requests",
-  "browser_network_request"
-] as const;
-const CAMPAIGN = new Set([
-  "campaign_asset", "campaign_observe", "campaign_hypothesis", "campaign_search",
-  "campaign_next_action", "campaign_test", "campaign_verify", "report_add_finding"
-]);
-const CALLBACK = new Set(["callback_host_info", "callback_listen", "callback_oast", "callback_stop"]);
-const BACKGROUND = new Set(["session_poll", "session_stop", "tool_output_read"]);
-
 function matches(text: string, pattern: RegExp): boolean {
   return pattern.test(text.toLowerCase());
-}
-
-function exactToolMention(text: string, name: string): boolean {
-  return canonicalToolName(text.toLowerCase()).includes(name.toLowerCase());
 }
 
 function containsNetworkTarget(text: string): boolean {
@@ -96,21 +54,6 @@ export function isExplicitRawHttpTask(userText = ""): boolean {
     && /\b(?:http|https|api|request|response|endpoint)\b/.test(text);
 }
 
-function browserKernelOperation(name: string): string | undefined {
-  return BROWSER_KERNEL.find((operation) => name === operation || name.endsWith(`_${operation}`));
-}
-
-function selectBrowserKernel(tools: ToolDefinition[]): ToolDefinition[] {
-  const selected: ToolDefinition[] = [];
-  for (const operation of BROWSER_KERNEL) {
-    const candidates = tools
-      .filter((tool) => browserKernelOperation(tool.name) === operation)
-      .sort((left, right) => Number(right.name === operation) - Number(left.name === operation) || left.name.localeCompare(right.name));
-    if (candidates[0]) selected.push(candidates[0]);
-  }
-  return selected;
-}
-
 export function selectCapabilities(input: {
   session: Session;
   tools: ToolDefinition[];
@@ -121,112 +64,19 @@ export function selectCapabilities(input: {
 }): CapabilitySelection {
   if (input.session.toolScope?.length) {
     const scope = new Set(input.session.toolScope.map(canonicalToolName));
-    const direct = input.tools.filter((tool) => scope.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name));
+    const direct = input.tools.filter((tool) => scope.has(canonicalToolName(tool.name))).sort((a, b) => a.name.localeCompare(b.name));
     return {
       direct,
       deferred: [],
       reasons: Object.fromEntries(direct.map((tool) => [tool.name, "explicit subagent scope"]))
     };
   }
-  const text = input.userText ?? "";
-  const coding = input.session.phase === "code_assist" || matches(text, /\b(code|coding|implement|refactor|bug|fix|test|typescript|javascript|python|golang|rust|file|repository|repo|build|typecheck)\b|\.(ts|tsx|js|jsx|py|go|rs)\b/);
-  const recon = ["recon", "enumeration", "hypothesis", "verification", "exploit_lab", "post_exploit_lab"].includes(input.session.phase)
-    || hasAssessmentIntent(text)
-    || containsNetworkTarget(text)
-    || matches(text, /\b(port|http|https|url|domain|endpoint|directory|nmap)\b/);
-  const callback = matches(text, /\b(reverse shell|callback|listener|lhost|oast|out.of.band|ssrf|xxe)\b/);
-  const campaign = Boolean(input.session.campaignId);
-  const interactiveWeb = isInteractiveWebTask(input.session, text);
-  const rawHttp = isExplicitRawHttpTask(text);
-  const selected = new Set<string>(ALWAYS);
-  const reasons: Record<string, string> = {};
-
-  for (const name of ALWAYS) reasons[name] = "kernel capability";
-  if (!input.session.parentId) {
-    for (const name of ["request_user_input", "agent_spawn"]) {
-      selected.add(name);
-      reasons[name] = "root session delegation";
-    }
-  }
-  if (coding) for (const name of CODING) { selected.add(name); reasons[name] = "coding task"; }
-  if (recon) for (const name of RECON) { selected.add(name); reasons[name] = "recon task"; }
-  if (interactiveWeb) {
-    for (const tool of selectBrowserKernel(input.tools)) {
-      selected.add(tool.name);
-      reasons[tool.name] = "interactive web task";
-    }
-    for (const name of ["proxy_scope", "proxy_flows", "proxy_flow_get", "proxy_sitemap", "proxy_replay", "proxy_intercept", "proxy_clear"]) {
-      selected.add(name);
-      reasons[name] = "managed web proxy";
-    }
-  }
-  if (interactiveWeb || rawHttp) {
-    selected.add("http_request");
-    reasons.http_request = rawHttp ? "explicit HTTP task" : "network assessment task";
-  }
-  if (campaign) for (const name of CAMPAIGN) { selected.add(name); reasons[name] = "active campaign"; }
-  if (campaign && input.session.phase === "verification") {
-    selected.add("campaign_dispatch");
-    reasons["campaign_dispatch"] = "campaign verification";
-  }
-  if (!campaign && recon) {
-    selected.add("campaign_create");
-    reasons["campaign_create"] = "campaign can be initialized for assessment work";
-  }
-  if (callback) for (const name of CALLBACK) { selected.add(name); reasons[name] = "callback or OOB task"; }
-  if (matches(text, /\b(search the web|web search|research|latest|current|internet|online|source|citation|paper|documentation)\b/)) {
-    selected.add("web_search");
-    selected.add("web_fetch");
-    reasons.web_search = "current web research";
-    reasons.web_fetch = "current web research";
-  }
-  if (matches(text, /\b(image|screenshot|photo|diagram|png|jpe?g|gif|webp)\b/)) {
-    selected.add("image_view");
-    reasons.image_view = "image inspection";
-  }
-  if (matches(text, /\bmcp\b.*\b(resource|resources)\b|\b(resource|resources)\b.*\bmcp\b/)) {
-    selected.add("mcp_resource_list");
-    selected.add("mcp_resource_read");
-    reasons.mcp_resource_list = "MCP resources";
-    reasons.mcp_resource_read = "MCP resources";
-  }
-  if (input.hasActiveJobs || input.hasOutputArtifacts) {
-    for (const name of BACKGROUND) { selected.add(name); reasons[name] = "active or retrievable tool output"; }
-  }
-  if (!input.session.parentId && input.hasActiveJobs) {
-    for (const name of ["agent_list", "agent_wait", "agent_message", "agent_followup", "agent_interrupt", "agent_close"]) {
-      selected.add(name);
-      reasons[name] = "active child-agent lifecycle";
-    }
-  }
-
-  for (const tool of input.tools) {
-    if (exactToolMention(text, tool.name)) {
-      selected.add(tool.name);
-      reasons[tool.name] = "explicit tool mention";
-    }
-  }
-
-  if (input.invokedTools?.length) {
-    const invoked = new Set(input.invokedTools.map(canonicalToolName));
-    for (const tool of input.tools) {
-      if (BRIDGE.has(tool.name) || selected.has(tool.name) || !invoked.has(tool.name)) continue;
-      selected.add(tool.name);
-      reasons[tool.name] = "used earlier this session";
-    }
-  }
-
-  const direct = input.tools.filter((tool) => selected.has(tool.name) && !BRIDGE.has(tool.name));
-  const deferred = input.tools.filter((tool) => !selected.has(tool.name) && !BRIDGE.has(tool.name));
-  if (deferred.length > 0) {
-    for (const bridge of input.tools.filter((tool) => BRIDGE.has(tool.name))) {
-      direct.push(bridge);
-      reasons[bridge.name] = `${deferred.length} capabilities deferred`;
-    }
-  }
-  direct.sort((a, b) => a.name.localeCompare(b.name));
-  deferred.sort((a, b) => a.name.localeCompare(b.name));
-  return { direct, deferred, reasons };
+  const direct = [...input.tools].sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    direct,
+    deferred: [],
+    reasons: Object.fromEntries(direct.map((tool) => [tool.name, "available session capability"]))
+  };
 }
 
 export function toolSchemaTokens(tools: ToolDefinition[]): number {

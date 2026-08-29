@@ -1,6 +1,6 @@
 import type { OutputArtifact, ToolAttachment, ToolResult } from "../types";
 import { takeBytes } from "../agent-tools/shared/output-bound";
-import { sanitizeToolOutput } from "../agent-tools/shared/output-sanitize";
+import { isBinaryLike, sanitizeToolOutput } from "../agent-tools/shared/output-sanitize";
 
 export const TOOL_ATTACHMENT_LIMITS = Object.freeze({
   count: 8,
@@ -25,10 +25,19 @@ export function normalizeToolResult(
   if (!normalized.output) return normalized;
   const rawOutput = normalized.output;
   const sanitizedOutput = sanitizeToolOutput(rawOutput);
-  if (Buffer.byteLength(sanitizedOutput, "utf8") <= TOOL_OUTPUT_LIMITS.bytes) {
+  const binaryLike = isBinaryLike(rawOutput);
+  if (!binaryLike && Buffer.byteLength(sanitizedOutput, "utf8") <= TOOL_OUTPUT_LIMITS.bytes) {
     return sanitizedOutput === rawOutput ? normalized : { ...normalized, output: sanitizedOutput };
   }
   const artifact = input.saveOutputArtifact({ sessionId: input.sessionId, toolCallId: input.toolCallId, content: rawOutput });
+  if (binaryLike && Buffer.byteLength(sanitizedOutput, "utf8") <= TOOL_OUTPUT_LIMITS.bytes) {
+    return {
+      ...normalized,
+      output: `${sanitizedOutput}\n\n[full raw output stored as artifact ${artifact.id}; read it with tool_output_read]`,
+      outputArtifactId: artifact.id,
+      metadata: { ...(normalized.metadata ?? {}), outputArtifact: artifact, binaryLike: true }
+    };
+  }
   const head = takeBytes(sanitizedOutput, TOOL_OUTPUT_LIMITS.headBytes, "head");
   const tail = takeBytes(sanitizedOutput, TOOL_OUTPUT_LIMITS.tailBytes, "tail");
   return {

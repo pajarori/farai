@@ -8,6 +8,7 @@ export type RequestUserInputUiState = {
   drafts: Record<string, string>;
   textModeQuestionId: string | undefined;
   submitting: boolean;
+  dismissed: boolean;
 };
 
 export function createRequestUserInputUiState(request: PendingUserInput): RequestUserInputUiState {
@@ -23,7 +24,8 @@ export function createRequestUserInputUiState(request: PendingUserInput): Reques
     answers: {},
     drafts: {},
     textModeQuestionId: first && !first.choices?.length ? first.id : undefined,
-    submitting: false
+    submitting: false,
+    dismissed: false
   };
 }
 

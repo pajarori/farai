@@ -82,6 +82,8 @@ export type RouterAction =
   | { kind: "requestUserInput.textModeEnter" }
   | { kind: "requestUserInput.textModeExit" }
   | { kind: "requestUserInput.commitText" }
+  | { kind: "requestUserInput.dismiss" }
+  | { kind: "requestUserInput.show" }
   | { kind: "requestUserInput.cancel" }
   | { kind: "modelProvider.next"; test?: boolean }
   | { kind: "modelProvider.back" }
@@ -123,6 +125,7 @@ export type RouterContext = {
     optionCount: number;
     submitting: boolean;
   };
+  pendingUserInput?: boolean;
   modelProviderWizard?: {
     field: "id" | "protocol" | "baseUrl" | "apiKey" | "model" | "review";
     busy: boolean;
@@ -237,7 +240,8 @@ function routeModelProviderWizard(key: KeyToken, state: NonNullable<RouterContex
 
 function routeRequestUserInput(key: KeyToken, state: NonNullable<RouterContext["requestUserInput"]>): RouteResult {
   if (state.submitting) return consumed();
-  if (key.ctrl && key.name === "c") return consumed({ kind: "requestUserInput.cancel" });
+  if (key.ctrl && key.name === "c") return consumed({ kind: "requestUserInput.dismiss" });
+  if (key.ctrl && key.name === "x") return consumed({ kind: "requestUserInput.cancel" });
   if ((key.ctrl && key.name === "p") || key.name === "pageup") {
     return consumed({ kind: "requestUserInput.questionMove", delta: -1 });
   }
@@ -246,14 +250,14 @@ function routeRequestUserInput(key: KeyToken, state: NonNullable<RouterContext["
   }
   if (state.textMode) {
     if (key.name === "escape") return consumed({
-      kind: state.canExitTextMode ? "requestUserInput.textModeExit" : "requestUserInput.cancel"
+      kind: state.canExitTextMode ? "requestUserInput.textModeExit" : "requestUserInput.dismiss"
     });
     if (key.name === "tab" && state.canExitTextMode) return consumed({ kind: "requestUserInput.textModeExit" });
     if (key.name === "return") return consumed({ kind: "requestUserInput.commitText" });
     return PASSTHROUGH;
   }
   switch (key.name) {
-    case "escape": return consumed({ kind: "requestUserInput.cancel" });
+    case "escape": return consumed({ kind: "requestUserInput.dismiss" });
     case "up": return consumed({ kind: "requestUserInput.optionMove", delta: -1 });
     case "down": return consumed({ kind: "requestUserInput.optionMove", delta: 1 });
     case "left": return consumed({ kind: "requestUserInput.questionMove", delta: -1 });
@@ -370,6 +374,7 @@ function routeBase(key: KeyToken, ctx: RouterContext): RouteResult {
       case "g": return consumed({ kind: "composer.externalEditor" });
       case "t": return consumed({ kind: "transcript.open" });
       case "o": return consumed({ kind: "composer.copyLast" });
+      case "q": return ctx.pendingUserInput ? consumed({ kind: "requestUserInput.show" }) : PASSTHROUGH;
       case "l": return consumed({ kind: "transcript.clear" });
       default: return PASSTHROUGH;
     }

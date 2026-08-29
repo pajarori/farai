@@ -188,15 +188,15 @@ export function requestStatusDetail(width: number, progress: string, countdown: 
 
 export function requestUserInputHint(width: number, textMode: boolean, hasChoices: boolean): string {
   if (textMode) {
-    if (width >= 76) return `enter continue · ${hasChoices ? "tab choices · " : ""}ctrl+p/n questions · esc ${hasChoices ? "choices" : "cancel"}`;
-    if (width >= 52) return `enter · ctrl+p/n questions · esc ${hasChoices ? "choices" : "cancel"}`;
-    return `enter · esc ${hasChoices ? "choices" : "cancel"}`;
+    if (width >= 76) return `enter continue · ${hasChoices ? "tab choices · " : ""}ctrl+p/n questions · esc ${hasChoices ? "choices" : "chat"} · ctrl+x cancel`;
+    if (width >= 52) return `enter · ctrl+p/n questions · esc ${hasChoices ? "choices" : "chat"}`;
+    return `enter · esc ${hasChoices ? "choices" : "chat"}`;
   }
-  if (width >= 86) return "↑↓ select · 1-9 choose · ←→/ctrl+p/n questions · tab other · esc cancel";
-  if (width >= 58) return "↑↓ select · enter · ←→ questions · tab other · esc cancel";
-  if (width >= 42) return "↑↓ select · enter · tab other · esc cancel";
-  if (width >= 34) return "↑↓ select · enter · esc cancel";
-  return "↑↓ · enter · esc";
+  if (width >= 86) return "↑↓ select · 1-9 choose · ←→/ctrl+p/n questions · tab other · esc chat · ctrl+x cancel";
+  if (width >= 58) return "↑↓ select · enter · ←→ questions · tab other · esc chat";
+  if (width >= 42) return "↑↓ select · enter · tab other · esc chat";
+  if (width >= 34) return "↑↓ select · enter · esc chat";
+  return "↑↓ · enter · esc chat";
 }
 
 function requestOptionRows(question: UserInputQuestion | undefined): RequestOptionRow[] {

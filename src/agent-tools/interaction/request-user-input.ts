@@ -35,7 +35,7 @@ export const requestUserInputTool: ToolDefinition = {
   },
   mutates: false,
   timeoutMs: 86_400_000,
-  parallel: false,
+  parallel: true,
   concurrencyScope: "session",
   renderHuman: (result) => result.output ?? result.summary,
   renderModel: (result) => result.output ?? result.summary,

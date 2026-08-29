@@ -14,11 +14,9 @@ export function containerRelativePath(path: string): string {
   return resolved.startsWith(prefix) ? resolved.slice(prefix.length) : resolved;
 }
 
-function assertNotProtectedPath(path: string, intent: "read" | "write"): void {
+function assertNotProtectedPath(path: string, _intent: "read" | "write"): void {
   const rel = containerRelativePath(path);
-  if (rel === ".git" || rel.startsWith(".git/")) throw new Error("path is protected: .git");
   if (rel === ".farai" || rel.startsWith(".farai/")) throw new Error("path is protected: .farai");
-  if (intent === "write" && rel === ".gitignore") throw new Error("path is protected: .gitignore");
 }
 
 function shQuote(value: string): string {
@@ -101,7 +99,7 @@ export async function containerListFilesRecursive(context: ToolContext, path: st
 import os
 root = ${JSON.stringify(root)}
 limit = ${Math.max(1, Math.floor(limit))}
-exclude = {".git", ".farai", "node_modules"}
+exclude = {".farai", "node_modules"}
 out = []
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = sorted(d for d in dirnames if d not in exclude)
@@ -131,7 +129,7 @@ root = ${JSON.stringify(root)}
 pattern = re.compile(base64.b64decode(${JSON.stringify(Buffer.from(pattern, "utf8").toString("base64"))}).decode())
 include = ${include === undefined ? "None" : JSON.stringify(include)}
 limit = ${Math.max(1, Math.floor(limit))}
-exclude = {".git", ".farai", "node_modules"}
+exclude = {".farai", "node_modules"}
 matches = []
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = sorted(d for d in dirnames if d not in exclude)

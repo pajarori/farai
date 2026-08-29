@@ -1,7 +1,6 @@
 import type { Session, ToolDefinition } from "../../types";
 import { canonicalToolName } from "../../tool-names";
 
-const NON_DELEGABLE_TOOLS = new Set(["tool_search", "tool_invoke", "request_user_input", "agent_spawn", "agent_list", "agent_wait", "agent_message", "agent_followup", "agent_interrupt", "agent_close", "campaign_dispatch"]);
 const SHARED_WORKSPACE_EDIT_TOOLS = new Set(["fs_write", "fs_edit", "patch_apply", "code_write_script"]);
 const TOOL_SCOPE_ALIASES = new Map([
   ["shell", "shell_exec"]
@@ -17,7 +16,7 @@ export function resolveSubagentToolScope(input: {
   availableTools: ToolDefinition[];
   requestedTools?: string[];
 }): string[] | undefined {
-  const available = new Set(input.availableTools.map((tool) => canonicalToolName(tool.name)).filter((name) => !NON_DELEGABLE_TOOLS.has(name)));
+  const available = new Set(input.availableTools.map((tool) => canonicalToolName(tool.name)));
   const requested = input.requestedTools?.map(scopedToolName);
   if (requested) {
     const unique = [...new Set(requested)];
@@ -46,12 +45,12 @@ export function buildSubagentTaskPrompt(input: {
   tools?: string[];
 }): string {
   return [
-    "you are a leaf subagent working for a parent farai session.",
+    "you are a subagent working for a parent farai session.",
     `parent session: ${input.parentSessionId}`,
     `task: ${input.title}`,
     ...(input.lane ? [`lane: ${input.lane}`] : []),
     ...(input.tools?.length ? [`tool scope: ${input.tools.join(", ")}`] : []),
-    "work autonomously only on this bounded task. do not delegate again, ask the user questions, repeat parent work, broaden scope, or write a user-facing answer.",
+    "work autonomously on the delegated task. you may delegate concrete independent subtasks when useful. avoid repeating parent work or broadening the task without evidence.",
     "preserve exact evidence and return one concise result with status, summary, claims, artifacts, changes, coverage, uncertainty, next actions, and metrics. distinguish proven, candidate, disproven, and inconclusive claims. the parent owns synthesis and the final answer.",
     ...(input.lanePrompt ? [input.lanePrompt] : []),
     input.task

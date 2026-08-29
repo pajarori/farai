@@ -408,18 +408,6 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     if (disposed) return false;
     const sid = store.activeSessionId;
     if (!sid || !text.trim()) return false;
-    if (store.snapshot.pendingUserInput) {
-      actions.promptHistoryAdd(text);
-      void (async () => {
-        try {
-          await port.answerUserInput(sid, text);
-          await requestSnapshotRefresh(sid);
-        } catch (error) {
-          if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));
-        }
-      })();
-      return true;
-    }
     if (promptSubmissions.has(sid) || isAgentBusy(store) || port.getRunningTurnId(sid)) {
       if (port.steer?.(sid, text)) {
         actions.promptHistoryAdd(text);
@@ -500,10 +488,6 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
       await port.cancelUserInput(sid);
       if (disposed || store.activeSessionId !== sid) return;
       actions.snapshotPatched({ pendingUserInput: undefined });
-      const turnId = store.snapshot.runningTurnId ?? port.getRunningTurnId(sid);
-      if (turnId && capabilities.cancel) {
-        try { await port.cancelTurn(turnId, "user input cancelled"); } catch { }
-      }
       await requestSnapshotRefresh(sid);
     } catch (error) {
       if (!disposed && store.activeSessionId === sid) actions.errorSet(error instanceof Error ? error.message : String(error));

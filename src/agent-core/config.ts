@@ -233,7 +233,7 @@ function proxyConfig(value: unknown): FaraiProxyConfig | undefined {
 
 export function resolveProxyConfig(config: FaraiConfig): { transparent: boolean; ports: number[] } {
   return {
-    transparent: config.proxy?.transparent !== false,
+    transparent: config.proxy?.transparent === true,
     ports: config.proxy?.ports?.length ? config.proxy.ports : DEFAULT_TRANSPARENT_PROXY_PORTS
   };
 }
@@ -466,10 +466,9 @@ export function defaultMcpServers(): Record<string, Record<string, unknown>> {
 }
 
 const DEFAULT_CONFIG_TEMPLATE = `model = "big-pickle"
-max_turn_seconds = 900
 
 [proxy]
-transparent = true
+transparent = false
 
 [mcp_servers.mitmproxy-mcp]
 command = "mitmproxy-mcp"

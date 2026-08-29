@@ -55,7 +55,8 @@ export function BottomPane(): JSX.Element {
   const proxyTabActive = () => slot() === "proxy_tab";
   const providerWizardActive = () => Boolean(tui.store.ui.modelProviderWizard);
   const providerRemovalActive = () => Boolean(tui.store.ui.modelProviderRemoval);
-  const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput);
+  const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed);
+  const inputRequestPending = () => Boolean(tui.store.snapshot.pendingUserInput);
   const footerHidden = () => Boolean(frame()) || Boolean(centerFrame()) || slashPanelActive() || proxyTabActive() || inputRequestActive() || providerWizardActive() || providerRemovalActive();
   const inlineStatusDetail = () => {
     const detail = tui.store.ui.statusDetail;
@@ -93,7 +94,10 @@ export function BottomPane(): JSX.Element {
       <Show when={!inputRequestActive() && !providerWizardActive() && !providerRemovalActive()}>
         <PendingInputPreview />
       </Show>
-      <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={tui.store.snapshot.pendingUserInput} fallback={
+      <Show when={!inputRequestActive() && inputRequestPending() && !providerWizardActive() && !providerRemovalActive()}>
+        <text fg={COLOR.warning}>{"  question pending · ctrl+q answer · chat input remains available"}</text>
+      </Show>
+      <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={inputRequestActive() ? tui.store.snapshot.pendingUserInput : undefined} fallback={
         <Show when={listFrame()} fallback={
           <Show when={centerFrame()} fallback={
             <Show when={proxyTabActive()} fallback={<Composer />}>

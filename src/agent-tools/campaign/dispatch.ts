@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { resolveLane } from "../../agent-core/subagents/lanes";
-import { hasSharedWorkspaceEdits, resolveSubagentToolScope } from "../../agent-core/subagents/scope";
+import { resolveSubagentToolScope } from "../../agent-core/subagents/scope";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { campaignIdFor, loadCampaign } from "./shared";
 
@@ -9,10 +9,10 @@ type DispatchTask = { title: string; prompt: string; lane?: string; assetIds?: s
 
 export const campaignDispatchTool: ToolDefinition = {
   name: "campaign_dispatch",
-  description: "dispatch up to three bounded child workers with non-overlapping ownership claims. workers return evidence and candidate hypotheses, never confirmed findings. set background=true only when the parent can continue independently.",
-  inputSchema: { type: "object", required: ["tasks"], properties: { campaignId: { type: "string" }, background: { type: "boolean" }, tasks: { type: "array", minItems: 1, maxItems: 3, items: { type: "object", required: ["title", "prompt"], properties: { title: { type: "string" }, prompt: { type: "string" }, lane: { type: "string" }, claim: { type: "string", description: "exclusive source, asset, hypothesis, or workflow slice owned by this worker; required when dispatching multiple workers" }, assetIds: { type: "array", items: { type: "string" } } } } } } },
+  description: "dispatch child workers with non-overlapping ownership claims. workers return evidence and candidate hypotheses, never confirmed findings. set background=true only when the parent can continue independently.",
+  inputSchema: { type: "object", required: ["tasks"], properties: { campaignId: { type: "string" }, background: { type: "boolean" }, tasks: { type: "array", minItems: 1, items: { type: "object", required: ["title", "prompt"], properties: { title: { type: "string" }, prompt: { type: "string" }, lane: { type: "string" }, claim: { type: "string", description: "exclusive source, asset, hypothesis, or workflow slice owned by this worker; required when dispatching multiple workers" }, assetIds: { type: "array", items: { type: "string" } } } } } } },
   mutates: true,
-  timeoutMs: 120_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   concurrencyScope: "session",
   renderHuman: defaultHumanRenderer,
@@ -23,7 +23,6 @@ export const campaignDispatchTool: ToolDefinition = {
     const campaign = loadCampaign(context, campaignId);
     if (!context.delegateSession) throw new Error("delegation is unavailable in this runtime");
     if (!Array.isArray(args.tasks) || args.tasks.length === 0) throw new Error("tasks must contain at least one worker task");
-    if (args.tasks.length > 3) throw new Error("tasks cannot contain more than three worker tasks");
     const background = args.background === true;
     const tasks = args.tasks.map((task) => {
       if (!task || typeof task !== "object") throw new Error("each task must be an object");
@@ -38,7 +37,6 @@ export const campaignDispatchTool: ToolDefinition = {
     });
     if (tasks.some((task) => !task.title || !task.prompt)) throw new Error("task title and prompt must be non-empty");
     if (tasks.length > 1 && tasks.some((task) => !task.claim)) throw new Error("each parallel campaign worker requires an exclusive claim");
-    if (background && tasks.some((task) => !task.lane)) throw new Error("background campaign workers require an explicit lane");
     const claims = tasks.flatMap((task) => task.claim ? [normalizeClaim(task.claim)] : []);
     if (new Set(claims).size !== claims.length) throw new Error("parallel campaign worker claims must be unique");
     if (context.availableTools) {
@@ -46,12 +44,11 @@ export const campaignDispatchTool: ToolDefinition = {
       for (const task of tasks) {
         const lane = task.lane ? resolveLane(context.rootWorkspace ?? context.workspace, task.lane) : undefined;
         if (task.lane && !lane) throw new Error(`unknown subagent lane: ${task.lane}`);
-        const scope = resolveSubagentToolScope({
+        resolveSubagentToolScope({
           parent: context.session,
           availableTools,
           ...(lane?.tools ? { requestedTools: lane.tools } : {})
         });
-        if (background && hasSharedWorkspaceEdits(scope)) throw new Error(`background campaign worker ${task.title} requires a non-editing lane`);
       }
     }
     const results = await Promise.all(tasks.map(async (task) => {

@@ -220,6 +220,7 @@ export type StoreActions = {
   requestUserInputDraftSet: (questionId: string, draft: string) => void;
   requestUserInputAnswerSet: (questionId: string, answer: string) => void;
   requestUserInputSubmittingSet: (submitting: boolean) => void;
+  requestUserInputDismissedSet: (dismissed: boolean) => void;
   updateNoticeSet: (notice: UpdateNotice | undefined) => void;
 };
 
@@ -895,6 +896,17 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         if (!s.ui.requestUserInput) return;
         s.ui.requestUserInput.submitting = submitting;
+      }));
+    },
+    requestUserInputDismissedSet(dismissed: boolean): void {
+      setStore(produce((s) => {
+        if (!s.ui.requestUserInput) return;
+        s.ui.requestUserInput.dismissed = dismissed;
+        if (dismissed) s.ui.requestUserInput.textModeQuestionId = undefined;
+        else {
+          const question = s.snapshot.pendingUserInput?.questions[s.ui.requestUserInput.questionIndex];
+          if (question && !question.choices?.length) s.ui.requestUserInput.textModeQuestionId = question.id;
+        }
       }));
     }
   };
