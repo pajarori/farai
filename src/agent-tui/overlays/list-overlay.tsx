@@ -315,7 +315,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
   const agentCount = () => tui.store.ui.agentThreads.filter((item) => item.role === "subagent").length;
   const doneCount = () => agentCount() - activeCount();
   const expandedRows = () => expandedDetailLines().length > 0 ? expandedDetailLines().length + 2 : 0;
-  const rowViewportHeight = () => visibleRows().length > 0 ? reservedRows() * 2 + expandedRows() : 1;
+  const rowViewportHeight = () => reservedRows() * 2 + expandedRows();
   const renderedHeight = () => 5 + rowViewportHeight();
   const height = () => Math.max(1, Math.min(Math.max(1, props.terminalHeight - 1), renderedHeight()));
   const top = () => Math.max(0, props.terminalHeight - height() - 1);

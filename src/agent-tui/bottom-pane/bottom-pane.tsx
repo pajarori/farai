@@ -55,13 +55,13 @@ export function BottomPane(): JSX.Element {
     hasCenterFrame: Boolean(centerFrame()),
     activeMainTab: tui.store.ui.activeMainTab
   });
-  const proxyTabActive = () => slot() === "proxy_tab";
   const providerWizardActive = () => Boolean(tui.store.ui.modelProviderWizard);
   const providerRemovalActive = () => Boolean(tui.store.ui.modelProviderRemoval);
   const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed);
   const inputRequestPending = () => Boolean(tui.store.snapshot.pendingUserInput);
-  const composerChromeVisible = () => slot() === "composer" && !slashPanelActive() && !inputRequestActive() && !providerWizardActive() && !providerRemovalActive();
-  const footerHidden = () => Boolean(frame()) || Boolean(centerFrame()) || slashPanelActive() || proxyTabActive() || inputRequestActive() || providerWizardActive() || providerRemovalActive();
+  const composerSurfaceVisible = () => slot() === "composer" && !inputRequestActive() && !providerWizardActive() && !providerRemovalActive();
+  const composerChromeVisible = () => composerSurfaceVisible() && !slashPanelActive();
+  const footerHidden = () => Boolean(frame()) || Boolean(centerFrame()) || slashPanelActive() || slot() === "proxy_tab" || inputRequestActive() || providerWizardActive() || providerRemovalActive();
   const statusActivity = () => {
     if (tui.store.ui.compacting) return "compacting context" as const;
     if (isAgentBusy(tui.store)) return "working" as const;
@@ -117,25 +117,24 @@ export function BottomPane(): JSX.Element {
       <Show when={questionNoticeVisible()}>
         <text fg={COLOR.warning}>{questionNotice()}</text>
       </Show>
-      <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={inputRequestActive() ? tui.store.snapshot.pendingUserInput : undefined} fallback={
-        <Show when={listFrame()} fallback={
-          <Show when={centerFrame()} fallback={
-            <Show when={proxyTabActive()} fallback={<Composer />}>
-              <ProxyTabFooter />
+      <Show when={!composerSurfaceVisible()}>
+        <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={inputRequestActive() ? tui.store.snapshot.pendingUserInput : undefined} fallback={
+          <Show when={listFrame()} keyed fallback={
+            <Show when={centerFrame()} fallback={<ProxyTabFooter />}>
+              {(surface) => <CenterSurfaceFooter frame={surface()} />}
             </Show>
           }>
-            {(surface) => <CenterSurfaceFooter frame={surface()} />}
+            {(top) => <ListOverlay frame={top} options={overlayOptions(top, tui, ctx())} docked />}
           </Show>
         }>
-          {(top) => <ListOverlay frame={top()} options={overlayOptions(top(), tui, ctx())} docked />}
+          {(request) => <RequestUserInput request={request()} />}
+        </Show>}>
+          <ModelProviderWizard />
+        </Show>}>
+          <ModelProviderRemoval />
         </Show>
-      }>
-        {(request) => <RequestUserInput request={request()} />}
-      </Show>}>
-        <ModelProviderWizard />
-      </Show>}>
-        <ModelProviderRemoval />
       </Show>
+      <Composer visible={composerSurfaceVisible()} active={composerSurfaceVisible()} />
       <Show when={!footerHidden()}>
         <Footer elapsed={elapsed()} />
       </Show>

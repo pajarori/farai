@@ -15,7 +15,7 @@ export function composerHeightFromVisualLines(visualLines: number): number {
   return Math.min(6, Math.max(1, visualLines));
 }
 
-export function Composer(): JSX.Element {
+export function Composer(props: { visible?: boolean; active?: boolean } = {}): JSX.Element {
   const tui = useTuiStore();
   const composer = useComposerControl();
   const dims = useTerminalDimensions();
@@ -53,6 +53,7 @@ export function Composer(): JSX.Element {
     tui.store.ui.overlayStack.length > 0 || tui.store.ui.centerSurfaceStack.length > 0
   );
   const popupWidth = () => Math.max(1, dims().width);
+  const inputActive = () => props.active ?? (tui.store.ui.overlayStack.length === 0 && tui.store.ui.centerSurfaceStack.length === 0);
   const commandWidth = () => Math.min(
     Math.max(1, popupWidth() - 2),
     Math.min(28, Math.max(8, ...slashOptions().map((option) => terminalWidth(option.title) + 2)))
@@ -71,10 +72,9 @@ export function Composer(): JSX.Element {
   });
 
   createEffect(() => {
-    const blocked = tui.store.ui.overlayStack.length > 0 || tui.store.ui.centerSurfaceStack.length > 0;
     if (!textareaRef) return;
-    if (blocked) textareaRef.blur();
-    else textareaRef.focus();
+    if (inputActive()) textareaRef.focus();
+    else textareaRef.blur();
   });
 
   onMount(() => {
@@ -83,6 +83,7 @@ export function Composer(): JSX.Element {
       try { textareaRef?.setText(draft); } catch {  }
     }
     const onPaste = (event: PasteEvent): void => {
+      if (!inputActive()) return;
       const text = decoder.decode(event.bytes);
       if (text.length < 1_000) return;
       event.preventDefault();
@@ -103,7 +104,7 @@ export function Composer(): JSX.Element {
   });
 
   return (
-    <box style={{ flexShrink: 0, flexDirection: "column", paddingTop: 0 }}>
+    <box visible={props.visible ?? true} style={{ flexShrink: 0, flexDirection: "column", paddingTop: 0 }}>
       <text fg={COLOR.border}>{rule()}</text>
       <box style={{ flexDirection: "row", height: composer.height(), backgroundColor: COLOR.panel }}>
         <text fg={COLOR.dim}>{"› "}</text>

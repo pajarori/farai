@@ -17,6 +17,7 @@ export function AppShell(): JSX.Element {
   const tui = useTuiStore();
   const exit = useExit();
   const dims = useTerminalDimensions();
+  const centerFrame = () => tui.store.ui.centerSurfaceStack.at(-1);
 
   const disposeCommands = registerCommands(defineDefaultCommands({
     palette: () => tui.actions.overlayOpen("palette"),
@@ -68,12 +69,14 @@ export function AppShell(): JSX.Element {
       >
         <MainTabs />
         <box id="main-surface-viewport" style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: "hidden", flexDirection: "column" }}>
-          <Show when={tui.store.ui.centerSurfaceStack.at(-1)} fallback={
-            <Show when={tui.store.ui.activeMainTab === "proxy"} fallback={<Transcript />}>
-              <ProxyLogView />
-            </Show>
-          }>
-            {(surface) => <CenterSurfaceView frame={surface()} />}
+          <box visible={!centerFrame() && tui.store.ui.activeMainTab === "chat"} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
+            <Transcript />
+          </box>
+          <box visible={!centerFrame() && tui.store.ui.activeMainTab === "proxy"} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
+            <ProxyLogView />
+          </box>
+          <Show when={centerFrame()} keyed>
+            {(surface) => <CenterSurfaceView frame={surface} />}
           </Show>
         </box>
         <BottomPane />
