@@ -32,6 +32,7 @@ export type FooterItem = {
 };
 
 export type BottomPaneSlot = "list_overlay" | "center_surface" | "proxy_tab" | "composer";
+export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "request_user_input";
 
 export function activityStatusVisible(activeMainTab: "chat" | "proxy"): boolean {
   return activeMainTab === "chat";
@@ -46,6 +47,25 @@ export function bottomPaneSlot(input: {
   if (input.hasCenterFrame) return "center_surface";
   if (input.activeMainTab === "proxy") return "proxy_tab";
   return "composer";
+}
+
+export function bottomPaneSurface(input: {
+  hasModelProviderRemoval: boolean;
+  hasModelProviderWizard: boolean;
+  hasRequestUserInput: boolean;
+  hasListFrame: boolean;
+  hasCenterFrame: boolean;
+  activeMainTab: "chat" | "proxy";
+}): BottomPaneSurface {
+  if (input.hasModelProviderRemoval) return "model_provider_removal";
+  if (input.hasModelProviderWizard) return "model_provider_wizard";
+  if (input.hasRequestUserInput) return "request_user_input";
+  return bottomPaneSlot(input);
+}
+
+export function bottomPaneOverlayHeightLimit(terminalHeight: number): number {
+  const height = Math.max(1, Math.floor(terminalHeight));
+  return height >= 10 ? Math.max(1, height - 3) : Math.max(1, height - 2);
 }
 
 export function instructionalFooterLines(state: FooterState): string[] {

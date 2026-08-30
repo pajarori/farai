@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { containerApplySimplePatch, containerReadFile, resolveContainerPath } from "./container-fs";
+import { containerApplySimplePatch, containerReadFile, containerWorkspace, resolveContainerPath } from "./container-fs";
 import { appendDiagnosticReports } from "../../agent-lsp";
 
 export const patchApplyTool: ToolDefinition = {
@@ -19,11 +19,12 @@ export const patchApplyTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
+    const workspace = containerWorkspace(context);
     const applied = await containerApplySimplePatch(context, asString(args.patch, "patch"));
     if (context.fileState) {
       for (const entry of applied) {
         const rel = entry.slice(2).trim();
-        if (rel) context.fileState.invalidate(context.session.id, resolveContainerPath(rel));
+        if (rel) context.fileState.invalidate(context.session.id, resolveContainerPath(rel, workspace));
       }
     }
     const edited = applied.filter((entry) => entry.startsWith("A ") || entry.startsWith("M ")).slice(0, 8);

@@ -28,6 +28,7 @@ export type BackendSessionResult = {
 
 export interface ExecutionBackend {
   readonly kind: string;
+  readonly workspacePath?: string;
   runOnce(command: string, opts: { timeoutMs: number; signal?: AbortSignal }): Promise<BackendExecResult>;
   startSession(command: string, opts: { yieldMs: number; signal?: AbortSignal; kind?: SessionKind; pty?: boolean }): Promise<BackendSessionResult>;
   pollSession(sessionId: string, opts: { input?: string; yieldMs: number }): Promise<BackendSessionResult>;

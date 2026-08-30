@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { localFaraiDir } from "./agent-core/config";
 import type { Session } from "./types";
@@ -16,6 +16,10 @@ export function recordSessionLocation(session: Session): void {
     updatedAt: session.updatedAt
   };
   writeFileSync(join(directory, `${session.id}.json`), `${JSON.stringify(entry)}\n`);
+}
+
+export function removeSessionLocation(sessionId: string): void {
+  rmSync(join(catalogDirectory(), `${sessionId}.json`), { force: true });
 }
 
 export function resolveSessionLocation(query: string): SessionCatalogEntry | undefined {

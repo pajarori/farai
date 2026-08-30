@@ -6,13 +6,14 @@ import { FaraiSpinner } from "../../common/spinner";
 
 type PlanRowProps = {
   row: Extract<TimelineRow, { kind: "plan" }>;
+  animated?: boolean | undefined;
 };
 
 export function PlanRow(props: PlanRowProps): JSX.Element {
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
       <Show when={props.row.streaming} fallback={<text fg={COLOR.text}>{`• ${props.row.title}`}</text>}>
-        <FaraiSpinner label={props.row.title} color={COLOR.accent} />
+        <FaraiSpinner label={props.row.title} color={COLOR.accent} animated={props.animated} />
       </Show>
       <Show when={props.row.explanation}>
         {(explanation) => <text fg={COLOR.dim}>{`  └ ${explanation()}`}</text>}

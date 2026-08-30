@@ -1,5 +1,4 @@
 import { Show, createMemo, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import { useTuiStore } from "../context/store";
 import { useComposerControl } from "../context/composer";
 import { useTuiRuntime } from "../context/runtime";
@@ -10,6 +9,7 @@ import { displayModelSelection } from "../../agent-core/model-catalog";
 import { loadConfig } from "../../agent-core/config";
 import { DEFAULT_CONTEXT_WINDOW } from "../../agent-core/default-model";
 import { isAgentBusy } from "../store";
+import { useTuiDimensions } from "../context/terminal";
 
 type FooterProps = {
   elapsed: number;
@@ -23,7 +23,7 @@ export function Footer(props: FooterProps): JSX.Element {
   const tui = useTuiStore();
   const runtime = useTuiRuntime();
   const composer = useComposerControl();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const session = () => tui.store.snapshot.session;
   const modelLabel = createMemo(() => displayModel(session()?.model, runtime.workspace));
   const configuredModel = createMemo(() => {

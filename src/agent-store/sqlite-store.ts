@@ -237,6 +237,26 @@ export class SqliteStore {
     return Boolean(row);
   }
 
+  discardEmptyRootSession(sessionId: string): boolean {
+    const db = this.database();
+    let discarded = false;
+    db.transaction(() => {
+      const session = db.query("select id, parent_id from sessions where id = $session")
+        .get({ $session: sessionId }) as Row | null;
+      if (!session || session.parent_id !== null) return;
+      const child = db.query("select 1 from sessions where parent_id = $session limit 1")
+        .get({ $session: sessionId }) as Row | null;
+      if (child) return;
+      const resumable = db.query(`select 1 from sessions s where s.id = $session and ${RESUMABLE_SESSION_PREDICATE}`)
+        .get({ $session: sessionId }) as Row | null;
+      if (resumable) return;
+      db.query("delete from events where session_id = $session").run({ $session: sessionId });
+      const result = db.query("delete from sessions where id = $session").run({ $session: sessionId });
+      discarded = result.changes === 1;
+    })();
+    return discarded;
+  }
+
   updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">>): Session {
     const current = this.loadSession(sessionId);
     const next: Session = {

@@ -10,7 +10,6 @@ export type FaraiConfig = {
   apiKeyEnv?: string;
   contextWindow?: number;
   maxOutputTokens?: number;
-  maxConcurrentContainers?: number;
   maxConcurrentSubagents?: number;
   maxSteps?: number;
   maxTurnSeconds?: number;
@@ -157,7 +156,6 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
     ...(typeof raw.env_key === "string" ? { apiKeyEnv: raw.env_key } : typeof raw.apiKeyEnv === "string" ? { apiKeyEnv: raw.apiKeyEnv } : {}),
     ...(positiveNumber(raw.context_window ?? raw.contextWindow) ? { contextWindow: positiveNumber(raw.context_window ?? raw.contextWindow)! } : {}),
     ...(positiveNumber(raw.max_output_tokens ?? raw.maxOutputTokens) ? { maxOutputTokens: positiveNumber(raw.max_output_tokens ?? raw.maxOutputTokens)! } : {}),
-    ...(positiveNumber(raw.max_concurrent_containers ?? raw.maxConcurrentContainers) ? { maxConcurrentContainers: positiveNumber(raw.max_concurrent_containers ?? raw.maxConcurrentContainers)! } : {}),
     ...(positiveNumber(raw.max_concurrent_subagents ?? raw.maxConcurrentSubagents) ? { maxConcurrentSubagents: Math.floor(positiveNumber(raw.max_concurrent_subagents ?? raw.maxConcurrentSubagents)!) } : {}),
     ...(positiveNumber(raw.max_steps ?? raw.maxSteps) ? { maxSteps: positiveNumber(raw.max_steps ?? raw.maxSteps)! } : {}),
     ...(positiveNumber(raw.max_turn_seconds ?? raw.maxTurnSeconds) ? { maxTurnSeconds: positiveNumber(raw.max_turn_seconds ?? raw.maxTurnSeconds)! } : {}),
@@ -347,7 +345,6 @@ export function serializeConfigToml(config: FaraiConfig): string {
   if (config.maxSteps) lines.push(`max_steps = ${config.maxSteps}`);
   if (config.maxTurnSeconds) lines.push(`max_turn_seconds = ${config.maxTurnSeconds}`);
   if (config.maxCostUsd) lines.push(`max_cost_usd = ${config.maxCostUsd}`);
-  if (config.maxConcurrentContainers) lines.push(`max_concurrent_containers = ${config.maxConcurrentContainers}`);
   if (config.maxConcurrentSubagents) lines.push(`max_concurrent_subagents = ${config.maxConcurrentSubagents}`);
   if (config.baseUrl) lines.push(`base_url = ${tomlString(config.baseUrl)}`);
   if (config.apiKeyEnv) lines.push(`env_key = ${tomlString(config.apiKeyEnv)}`);

@@ -1,8 +1,8 @@
 import { For, Show, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import type { TimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
 import { COLOR } from "../../theme";
+import { useTuiDimensions } from "../../context/terminal";
 import { useTuiStore } from "../../context/store";
 import { syntax } from "../../syntax";
 import { ExpandedPanel } from "./expanded-panel";
@@ -24,7 +24,7 @@ type FindingRowProps = {
 
 export function ArtifactRow(props: ArtifactRowProps): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const widths = () => artifactLineWidths(dims().width, props.row.title, props.row.detail);
   const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));

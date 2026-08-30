@@ -191,6 +191,7 @@ function consumed(...actions: RouterAction[]): RouteResult {
 }
 
 export function slashActive(ctx: RouterContext): boolean {
+  if (ctx.activeMainTab === "proxy") return false;
   return slashPopupVisible(
     ctx.composerText,
     ctx.slashSuppressed,

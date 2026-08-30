@@ -1,5 +1,4 @@
 import { Show, onCleanup, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import { useTuiStore } from "../context/store";
 import { useExit } from "../context/exit";
 import { ComposerProvider } from "../context/composer";
@@ -12,12 +11,15 @@ import { BottomPane } from "../bottom-pane/bottom-pane";
 import { CenterSurfaceView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
+import { useTuiDimensions } from "../context/terminal";
 
 export function AppShell(): JSX.Element {
   const tui = useTuiStore();
   const exit = useExit();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const centerFrame = () => tui.store.ui.centerSurfaceStack.at(-1);
+  const chatActive = () => !centerFrame() && tui.store.ui.activeMainTab === "chat";
+  const proxyActive = () => !centerFrame() && tui.store.ui.activeMainTab === "proxy";
 
   const disposeCommands = registerCommands(defineDefaultCommands({
     palette: () => tui.actions.overlayOpen("palette"),
@@ -69,11 +71,11 @@ export function AppShell(): JSX.Element {
       >
         <MainTabs />
         <box id="main-surface-viewport" style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: "hidden", flexDirection: "column" }}>
-          <box visible={!centerFrame() && tui.store.ui.activeMainTab === "chat"} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
-            <Transcript />
+          <box id="chat-surface" visible={chatActive()} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
+            <Transcript active={chatActive()} />
           </box>
-          <box visible={!centerFrame() && tui.store.ui.activeMainTab === "proxy"} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
-            <ProxyLogView />
+          <box id="proxy-surface" visible={proxyActive()} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
+            <ProxyLogView active={proxyActive()} />
           </box>
           <Show when={centerFrame()} keyed>
             {(surface) => <CenterSurfaceView frame={surface} />}
@@ -87,25 +89,27 @@ export function AppShell(): JSX.Element {
 
 function MainTabs(): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const active = () => tui.store.ui.activeMainTab;
   const proxyCount = () => tui.store.ui.proxyFlows.length;
   const labels = () => mainTabLabels(dims().width, proxyCount());
-  const modalActive = () => Boolean(
-    tui.store.ui.modelProviderWizard
+  const tabSwitchBlocked = () => Boolean(
+    tui.store.ui.overlayStack.length
+    || tui.store.ui.centerSurfaceStack.length
+    || tui.store.ui.modelProviderWizard
     || tui.store.ui.modelProviderRemoval
     || (tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed)
   );
   const openChat = () => {
-    if (!modalActive()) tui.actions.mainTabSet("chat");
+    if (!tabSwitchBlocked()) tui.actions.mainTabSet("chat");
   };
   const openProxy = () => {
-    if (modalActive()) return;
+    if (tabSwitchBlocked()) return;
     tui.actions.mainTabSet("proxy");
     void tui.refreshProxyFlows();
   };
   return (
-    <box style={{ height: 1, flexShrink: 0, flexDirection: "row", paddingLeft: 1, paddingRight: 1 }}>
+    <box id="main-tabs" style={{ height: 2, flexShrink: 0, flexDirection: "row" }}>
       <text selectable={false} fg={active() === "chat" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openChat(); }}>{labels().chat}</text>
       <text fg={COLOR.dim}>{labels().gap}</text>
       <text selectable={false} fg={active() === "proxy" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openProxy(); }}>{labels().proxy}</text>

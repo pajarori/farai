@@ -1,5 +1,4 @@
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
-import { useTerminalDimensions } from "@opentui/solid";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack, type JSX } from "solid-js";
 import { DEFAULT_MITMPROXY_PORT } from "../../agent-tools/mcp-adapter";
 import type { ProxyFlowDetail, ProxyFlowSummary } from "../../agent-tools/services/mitmproxy/flows";
@@ -11,6 +10,7 @@ import { ProxyFlowSplitView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
 import { fitTerminal, fitTerminalPair, truncateTerminal } from "../terminal-text";
+import { useTuiDimensions } from "../context/terminal";
 
 export function proxyListHeightFromDrag(startHeight: number, startY: number, pointerY: number): number {
   return startHeight + pointerY - startY;
@@ -20,10 +20,10 @@ export function clampProxyListHeight(height: number, terminalHeight: number): nu
   return Math.max(5, Math.min(Math.max(5, terminalHeight - 14), height));
 }
 
-export function ProxyLogView(): JSX.Element {
+export function ProxyLogView(props: { active?: boolean } = {}): JSX.Element {
   const tui = useTuiStore();
   const { port } = useTuiRuntime();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   let scrollRef!: ScrollBoxRenderable;
   const [detail, setDetail] = createSignal<ProxyFlowDetail | undefined>();
   const [detailLoading, setDetailLoading] = createSignal(false);
@@ -39,6 +39,7 @@ export function ProxyLogView(): JSX.Element {
   let detailLoadingTimer: ReturnType<typeof setTimeout> | undefined;
   const detailCache = new Map<string, ProxyFlowDetail>();
   const detailRequests = new Map<string, Promise<ProxyFlowDetail>>();
+  const active = () => props.active ?? true;
   const mitmServices = createMemo(() => tui.store.ui.services.filter((service) => service.kind === "mitmproxy" || service.kind === "mitmproxy-mcp"));
   const rows = createMemo(() => proxyFlowsForFilter(tui.store.ui.proxyFlows, tui.store.ui.proxyFilter));
   const selectedFlow = createMemo(() => rows()[tui.store.ui.proxySelectedIndex]);
@@ -65,7 +66,7 @@ export function ProxyLogView(): JSX.Element {
   const defaultListHeight = () => Math.max(7, Math.min(14, Math.floor(dims().height * 0.34)));
   const listHeight = () => clampProxyListHeight(listHeightOverride() ?? defaultListHeight(), dims().height);
   const compactHeight = () => dims().height < 20;
-  const tableWidth = () => Math.max(1, dims().width - 4);
+  const tableWidth = () => Math.max(1, dims().width);
   const beginListResize = (event: MouseEvent): void => {
     if (event.button !== 0) return;
     dividerDragStart = { pointerY: event.y, listHeight: listHeight() };
@@ -102,15 +103,24 @@ export function ProxyLogView(): JSX.Element {
   });
 
   createEffect(() => {
-    const signature = selectedSignature();
-    const compact = compactHeight();
+    const surfaceActive = active();
     const requestId = ++detailRequestId;
-    const flow = untrack(selectedFlow);
     if (detailLoadingTimer) {
       clearTimeout(detailLoadingTimer);
       detailLoadingTimer = undefined;
     }
-    if (compact || !flow) {
+    if (!surfaceActive) {
+      setDetailLoading(false);
+      return;
+    }
+    const signature = selectedSignature();
+    const compact = compactHeight();
+    const flow = untrack(selectedFlow);
+    if (compact) {
+      setDetailLoading(false);
+      return;
+    }
+    if (!flow) {
       setDetail(undefined);
       setDetailError(undefined);
       setDetailLoading(false);
@@ -168,6 +178,7 @@ export function ProxyLogView(): JSX.Element {
   });
 
   createEffect(() => {
+    if (!active()) return;
     const id = selectedId();
     if (!id) return;
     const requestId = ++scrollRequestId;
@@ -175,6 +186,14 @@ export function ProxyLogView(): JSX.Element {
       if (disposed || requestId !== scrollRequestId || !scrollRef) return;
       try { scrollRef.scrollChildIntoView(id); } catch {}
     });
+  });
+
+  createEffect(() => {
+    if (active()) return;
+    dividerGestureGeneration += 1;
+    dividerDragStart = undefined;
+    suppressProxyRowMouseUp = false;
+    setDividerDragging(false);
   });
 
   const detailStatus = () => fitTerminalPair(
@@ -192,10 +211,10 @@ export function ProxyLogView(): JSX.Element {
         flexShrink: 1,
         minHeight: 0,
         flexDirection: "column",
-        paddingTop: compactHeight() ? 0 : 1,
+        paddingTop: 0,
         paddingBottom: compactHeight() ? 0 : 1,
-        paddingLeft: 2,
-        paddingRight: 2
+        paddingLeft: 0,
+        paddingRight: 0
       }}
       onMouseDrag={resizeList}
       onMouseDragEnd={finishListResize}
@@ -243,7 +262,10 @@ export function ProxyLogView(): JSX.Element {
           </Show>
         </scrollbox>
       </box>
-      <Show when={!compactHeight()}>
+      <box
+        visible={!compactHeight()}
+        style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}
+      >
         <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between", marginTop: 1 }}>
           <text fg={COLOR.dim}>{detailStatus().left}</text>
           <text fg={detailLoading() ? COLOR.accent : detailError() ? COLOR.error : COLOR.dim}>{detailStatus().right}</text>
@@ -252,28 +274,40 @@ export function ProxyLogView(): JSX.Element {
           style={{ height: 1, flexShrink: 0, alignItems: "center", justifyContent: "flex-start" }}
           onMouseDown={beginListResize}
         >
-          <text selectable={false} fg={dividerDragging() ? COLOR.accent : COLOR.border}>{"─".repeat(Math.max(1, dims().width - 4))}</text>
+          <text selectable={false} fg={dividerDragging() ? COLOR.accent : COLOR.border}>{"─".repeat(Math.max(1, dims().width))}</text>
         </box>
         <box style={{ flexGrow: 1, minHeight: 0, flexDirection: "column", paddingTop: 1 }}>
-          <Show when={detail()} fallback={
+          <Show when={detail()?.id} keyed fallback={
             <box style={{ flexDirection: "column" }}>
               <text fg={COLOR.dim}>{"select a flow to inspect protocol-aware details"}</text>
             </box>
           }>
-            {(flow) => (
-              <box style={{ flexGrow: 1, minHeight: 0, flexDirection: "column" }}>
-                <Show when={isSummaryOnly(flow())}>
-                  <box style={{ height: 1, flexShrink: 0, marginBottom: 1 }}>
-                    <text fg={COLOR.warning}>{"full body unavailable; showing captured metadata"}</text>
-                  </box>
-                </Show>
-                <ProxyFlowSplitView flow={flow()} compact />
-              </box>
-            )}
+            {(flowId) => <ProxyInlineDetail flowId={flowId} detail={detail} />}
           </Show>
         </box>
-      </Show>
+      </box>
     </box>
+  );
+}
+
+function ProxyInlineDetail(props: { flowId: string; detail: () => ProxyFlowDetail | undefined }): JSX.Element {
+  const flow = () => {
+    const current = props.detail();
+    return current?.id === props.flowId ? current : undefined;
+  };
+  return (
+    <Show when={flow()}>
+      {(current) => (
+        <box style={{ flexGrow: 1, minHeight: 0, flexDirection: "column" }}>
+          <Show when={isSummaryOnly(current())}>
+            <box style={{ height: 1, flexShrink: 0, marginBottom: 1 }}>
+              <text fg={COLOR.warning}>{"full body unavailable; showing captured metadata"}</text>
+            </box>
+          </Show>
+          <ProxyFlowSplitView flow={current()} compact />
+        </box>
+      )}
+    </Show>
   );
 }
 

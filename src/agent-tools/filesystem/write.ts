@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { containerPathKind, containerRelativePath, containerStatMtime, containerWriteFile, resolveContainerPath } from "./container-fs";
+import { containerPathKind, containerRelativePath, containerStatMtime, containerWorkspace, containerWriteFile, resolveContainerPath } from "./container-fs";
 import { appendDiagnosticReport } from "../../agent-lsp";
 
 export const fsWriteTool: ToolDefinition = {
@@ -20,18 +20,19 @@ export const fsWriteTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const path = asString(args.path, "path");
+    const workspace = containerWorkspace(context);
     const existed = (await containerPathKind(context, path)) === "file";
     const content = asString(args.content, "content");
     await containerWriteFile(context, path, content);
     if (context.fileState) {
       const mtime = await containerStatMtime(context, path);
-      context.fileState.set(context.session.id, { path: resolveContainerPath(path), content, mtime: mtime ?? Date.now() });
+      context.fileState.set(context.session.id, { path: resolveContainerPath(path, workspace), content, mtime: mtime ?? Date.now() });
     }
     const diagnostic = await context.lsp?.diagnose({ path, content }).catch(() => undefined);
     return {
       ok: true,
-      summary: `${existed ? "wrote" : "created"} ${containerRelativePath(path)}`,
-      output: appendDiagnosticReport(containerRelativePath(path), diagnostic) ?? containerRelativePath(path)
+      summary: `${existed ? "wrote" : "created"} ${containerRelativePath(path, workspace)}`,
+      output: appendDiagnosticReport(containerRelativePath(path, workspace), diagnostic) ?? containerRelativePath(path, workspace)
     };
   }
 };

@@ -1,10 +1,10 @@
 import { For, Index, Show, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import type { ExplorationItem, TimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
 import { inferFiletype } from "../../filetype";
 import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
+import { useTuiDimensions } from "../../context/terminal";
 import { parseDirectoryResults, parseNmap, splitHttpResponse, unifiedEditDiff } from "../../tool-renderers";
 import { useTuiStore } from "../../context/store";
 import { args, firstResultLine, tailLines } from "./text-utils";
@@ -24,10 +24,12 @@ const TOOL_OUTPUT_PREVIEW_LINES = 5;
 
 type ToolRowProps = {
   row: Extract<TimelineRow, { kind: "tool" }>;
+  animated?: boolean | undefined;
 };
 
 type ExplorationRowProps = {
   row: Extract<TimelineRow, { kind: "exploration" }>;
+  animated?: boolean | undefined;
 };
 
 type ExplorationItemRowProps = {
@@ -48,7 +50,7 @@ type ToolResultProps = ToolInputProps & {
 
 export function ToolRow(props: ToolRowProps): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const contentWidth = () => Math.max(1, dims().width - 6);
   const input = () => args(props.row.args);
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
@@ -78,11 +80,11 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
   const visibleOutputLines = () => active()
     ? tailLines(visibleOutput(), 3)
     : previewOutputLines(visibleOutput(), TOOL_OUTPUT_PREVIEW_LINES);
-  if (["agent_task", "agent_spawn", "agent_followup"].includes(props.row.tool)) return <AgentTaskRow row={props.row} />;
+  if (["agent_task", "agent_spawn", "agent_followup"].includes(props.row.tool)) return <AgentTaskRow row={props.row} animated={props.animated} />;
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
       <box style={{ flexDirection: "row" }} {...toggleClick}>
-        <TranscriptMarker color={headerColor()} spinning={active()} />
+        <TranscriptMarker color={headerColor()} spinning={active()} animated={props.animated} />
         <text fg={headerColor()}>{headerLabel()}</text>
       </box>
 
@@ -128,7 +130,7 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
 
 function AgentTaskRow(props: ToolRowProps): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const input = () => args(props.row.args);
   const metadata = () => props.row.toolResult?.metadata ?? {};
   const activity = () => props.row.jobId ? tui.store.snapshot.subagents.find((item) => item.id === props.row.jobId) : undefined;
@@ -162,7 +164,7 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
       }}
     >
       <box style={{ flexDirection: "row" }} {...toggleClick}>
-        <TranscriptMarker color={delegationColor(status())} glyph={delegationGlyph(status())} spinning={active()} />
+        <TranscriptMarker color={delegationColor(status())} glyph={delegationGlyph(status())} spinning={active()} animated={props.animated} />
         <text fg={delegationColor(status())}>{headline().left}</text>
         <Show when={headline().right}><text fg={delegationColor(status())}>{`  ${headline().right}`}</text></Show>
       </box>
@@ -237,14 +239,14 @@ function agentDuration(startedAt: string | undefined, completedAt: string | unde
 
 export function ExplorationRow(props: ExplorationRowProps): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const active = () => isActiveToolStatus(props.row.status);
   const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
       <box style={{ flexDirection: "row" }} {...toggleClick}>
-        <TranscriptMarker color={active() ? COLOR.accent : COLOR.text} spinning={active()} />
+        <TranscriptMarker color={active() ? COLOR.accent : COLOR.text} spinning={active()} animated={props.animated} />
         <text fg={active() ? COLOR.accent : COLOR.text}>{active() ? "exploring" : "explored"}</text>
       </box>
       <box style={{ flexDirection: "column", paddingLeft: 2 }}>

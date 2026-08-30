@@ -195,8 +195,8 @@ export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace:
       }
     },
     cleanup: [
-      ["rm", "-f", names.agent],
-      ["rm", "-f", names.target],
+      ["rm", "-f", "-v", names.agent],
+      ["rm", "-f", "-v", names.target],
       ["network", "rm", names.network]
     ]
   };

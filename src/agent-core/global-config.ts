@@ -8,7 +8,6 @@ export type FaraiGlobalConfig = {
   apiKeyEnv?: string;
   contextWindow?: number;
   maxOutputTokens?: number;
-  maxConcurrentContainers?: number;
   maxConcurrentSubagents?: number;
   maxSteps?: number;
   maxTurnSeconds?: number;
@@ -38,7 +37,6 @@ export function loadGlobalConfig(): FaraiGlobalConfig {
     ...(config.apiKeyEnv ? { apiKeyEnv: config.apiKeyEnv } : {}),
     ...(config.contextWindow ? { contextWindow: config.contextWindow } : {}),
     ...(config.maxOutputTokens ? { maxOutputTokens: config.maxOutputTokens } : {}),
-    ...(config.maxConcurrentContainers ? { maxConcurrentContainers: config.maxConcurrentContainers } : {}),
     ...(config.maxConcurrentSubagents ? { maxConcurrentSubagents: config.maxConcurrentSubagents } : {}),
     ...(config.maxSteps ? { maxSteps: config.maxSteps } : {}),
     ...(config.maxTurnSeconds ? { maxTurnSeconds: config.maxTurnSeconds } : {})

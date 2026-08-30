@@ -7,24 +7,24 @@ const SYMBOL_KINDS = [
   "key", "null", "enum-member", "struct", "event", "operator", "type-parameter"
 ];
 
-export function normalizeInspectEntries(operation: LspInspectOperation, raw: unknown, currentPath?: string): LspInspectEntry[] {
+export function normalizeInspectEntries(operation: LspInspectOperation, raw: unknown, currentPath?: string, containerWorkspace = "/workspace"): LspInspectEntry[] {
   if (operation === "hover") {
     const detail = hoverText(raw);
     return detail ? [{ ...(currentPath ? { path: currentPath } : {}), detail }] : [];
   }
-  if (operation === "document_symbols") return documentSymbols(raw, currentPath);
-  if (operation === "workspace_symbols") return workspaceSymbols(raw);
+  if (operation === "document_symbols") return documentSymbols(raw, currentPath, containerWorkspace);
+  if (operation === "workspace_symbols") return workspaceSymbols(raw, containerWorkspace);
   const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
-  return values.flatMap((value) => locationEntry(value) ?? []);
+  return values.flatMap((value) => locationEntry(value, containerWorkspace) ?? []);
 }
 
-function documentSymbols(raw: unknown, currentPath?: string): LspInspectEntry[] {
+function documentSymbols(raw: unknown, currentPath?: string, containerWorkspace = "/workspace"): LspInspectEntry[] {
   if (!Array.isArray(raw)) return [];
   const entries: LspInspectEntry[] = [];
   const visit = (value: unknown): void => {
     if (!isRecord(value) || typeof value.name !== "string") return;
     if (isRecord(value.location)) {
-      const location = locationEntry(value.location);
+      const location = locationEntry(value.location, containerWorkspace);
       const kind = symbolKind(value.kind);
       if (location) entries.push({ ...location, name: value.name, ...(kind ? { kind } : {}), ...(typeof value.containerName === "string" ? { detail: value.containerName } : {}) });
       return;
@@ -44,12 +44,12 @@ function documentSymbols(raw: unknown, currentPath?: string): LspInspectEntry[] 
   return entries;
 }
 
-function workspaceSymbols(raw: unknown): LspInspectEntry[] {
+function workspaceSymbols(raw: unknown, containerWorkspace = "/workspace"): LspInspectEntry[] {
   if (!Array.isArray(raw)) return [];
   const entries: LspInspectEntry[] = [];
   for (const value of raw) {
     if (!isRecord(value) || typeof value.name !== "string" || !isRecord(value.location)) continue;
-    const location = locationEntry(value.location);
+    const location = locationEntry(value.location, containerWorkspace);
     if (!location) continue;
     const kind = symbolKind(value.kind);
     entries.push({
@@ -62,7 +62,7 @@ function workspaceSymbols(raw: unknown): LspInspectEntry[] {
   return entries;
 }
 
-function locationEntry(value: unknown): LspInspectEntry | undefined {
+function locationEntry(value: unknown, containerWorkspace = "/workspace"): LspInspectEntry | undefined {
   if (!isRecord(value)) return undefined;
   const uri = typeof value.uri === "string" ? value.uri : typeof value.targetUri === "string" ? value.targetUri : undefined;
   const range = isRange(value.range)
@@ -73,16 +73,16 @@ function locationEntry(value: unknown): LspInspectEntry | undefined {
         ? value.targetRange
         : undefined;
   if (!uri || !range) return undefined;
-  const path = relativeWorkspacePath(uri);
+  const path = relativeWorkspacePath(uri, containerWorkspace);
   if (!path) return undefined;
   return { path, ...rangeFields(range) };
 }
 
-function relativeWorkspacePath(uri: string): string | undefined {
+function relativeWorkspacePath(uri: string, containerWorkspace: string): string | undefined {
   try {
     const path = uri.startsWith("file:") ? fileURLToPath(uri) : uri;
-    if (path === "/workspace") return ".";
-    return path.startsWith("/workspace/") ? path.slice("/workspace/".length) : undefined;
+    if (path === containerWorkspace) return ".";
+    return path.startsWith(`${containerWorkspace}/`) ? path.slice(`${containerWorkspace}/`.length) : undefined;
   } catch {
     return undefined;
   }

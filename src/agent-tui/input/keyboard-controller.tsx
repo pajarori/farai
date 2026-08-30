@@ -1,5 +1,5 @@
 import type { KeyEvent } from "@opentui/core";
-import { useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/solid";
+import { useKeyboard, useRenderer, useSelectionHandler } from "@opentui/solid";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,7 @@ import { isAgentBusy, isAgentCancelable, proxyFlowsForFilter } from "../store";
 import { ctrlCDecision } from "./interrupt";
 import { requestOptionCount, requestOptionIndex, requestQuestion } from "../request-user-input-state";
 import { modelProviderProtocolMove, modelProviderWizardFieldMove } from "../model-provider-state";
+import { useTuiDimensions } from "../context/terminal";
 
 const QUIT_CONFIRMATION_MS = 1_500;
 
@@ -31,7 +32,7 @@ export function KeyboardController(): JSX.Element {
   const exit = useExit();
   const { port, capabilities } = useTuiRuntime();
   const renderer = useRenderer();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   let historyNavIndex = -1;
   let historyNavOriginalDraft = "";
   let quitArmedUntil = 0;

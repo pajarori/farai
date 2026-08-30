@@ -5,6 +5,7 @@ import { FaraiSpinner } from "../../common/spinner";
 
 type ProgressRowProps = {
   row: Extract<TimelineRow, { kind: "progress" }>;
+  animated?: boolean | undefined;
 };
 
 type PhaseRowProps = {
@@ -15,7 +16,7 @@ export function ProgressRow(props: ProgressRowProps): JSX.Element {
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
       <Show when={props.row.status === "running"} fallback={<text fg={COLOR.dim}>{`• ${props.row.title}${props.row.detail ? ` · ${props.row.detail}` : ""}`}</text>}>
-        <FaraiSpinner label={`${props.row.title}${props.row.detail ? ` · ${props.row.detail}` : ""}`} color={COLOR.dim} />
+        <FaraiSpinner label={`${props.row.title}${props.row.detail ? ` · ${props.row.detail}` : ""}`} color={COLOR.dim} animated={props.animated} />
       </Show>
     </box>
   );

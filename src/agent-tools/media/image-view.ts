@@ -32,7 +32,7 @@ export const imageViewTool: ToolDefinition = {
     const mediaType = detectImage(data);
     if (!mediaType) throw new Error("unsupported image format; use PNG, JPEG, GIF, or WebP");
     const workspaceRelative = relative(context.workspace, path).split(/[\\/]+/).join("/");
-    const backendPath = context.executionBackend?.kind === "host" ? path : `/workspace/${workspaceRelative}`;
+    const backendPath = context.executionBackend?.kind === "host" ? path : `${context.executionBackend?.workspacePath ?? "/workspace"}/${workspaceRelative}`;
     const command = `identify -format '%m %wx%h' -- ${quote(backendPath)} 2>/dev/null; printf '\n'; tesseract ${quote(backendPath)} stdout 2>/dev/null | head -200`;
     const inspected = await backend(context).exec(command, 25_000, context.signal, 30_000);
     const [identity = "", ...ocrLines] = inspected.stdout.split("\n");

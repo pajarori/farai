@@ -33,18 +33,20 @@ export class LspManager {
   private readonly config: ResolvedLspConfig;
   private readonly entries = new Map<string, ClientEntry>();
   private readonly spawnProcess: LspProcessSpawner;
+  private readonly backendFactory: (sessionId: string, workspace: string) => KaliContainerBackend;
 
   constructor(
     private readonly defaultWorkspace: string,
     config?: FaraiLspConfig,
-    options: { spawnProcess?: LspProcessSpawner } = {}
+    options: { spawnProcess?: LspProcessSpawner; backendFactory?: (sessionId: string, workspace: string) => KaliContainerBackend } = {}
   ) {
     this.config = resolveLspConfig(config);
+    this.backendFactory = options.backendFactory ?? ((sessionId, workspace) => new KaliContainerBackend({
+      workspace,
+      containerName: containerNameForSession(sessionId)
+    }));
     this.spawnProcess = options.spawnProcess ?? (async (input) => {
-      const backend = new KaliContainerBackend({
-        workspace: input.workspace,
-        containerName: containerNameForSession(input.sessionId)
-      });
+      const backend = this.backendFactory(input.sessionId, input.workspace);
       return backend.spawnStdio(input.command, { cwd: input.projectRoot, env: input.env });
     });
   }
@@ -71,7 +73,8 @@ export class LspManager {
 
   private async diagnose(sessionId: string, workspace: string, path: string, content: string) {
     if (!this.config.enabled) return undefined;
-    const resolved = resolveLspFile(workspace, path);
+    const workspacePath = this.backendFactory(sessionId, workspace).workspacePath;
+    const resolved = resolveLspFile(workspace, path, workspacePath);
     if (!resolved || !this.config.servers[resolved.definition.id].enabled) return undefined;
     const entry = this.entryFor(sessionId, workspace, resolved.definition, resolved.projectRoot);
     const deadline = Date.now() + this.config.waitTimeoutMs;
@@ -83,7 +86,7 @@ export class LspManager {
       const errors = diagnostics.filter((diagnostic) => diagnostic.severity === 1);
       return {
         server: resolved.definition.id,
-        path: resolved.containerPath.slice("/workspace/".length),
+        path: resolved.containerPath.slice(`${workspacePath}/`.length),
         diagnostics: errors.slice(0, 20),
         ...(errors.length > 20 ? { truncated: true } : {})
       };
@@ -95,7 +98,8 @@ export class LspManager {
   private async inspect(sessionId: string, workspace: string, input: LspInspectInput): Promise<LspInspectResult> {
     if (!this.config.enabled) throw new Error("LSP is disabled");
     if (!input.path) throw new Error(`${input.operation} requires path`);
-    const resolved = resolveLspFile(workspace, input.path);
+    const workspacePath = this.backendFactory(sessionId, workspace).workspacePath;
+    const resolved = resolveLspFile(workspace, input.path, workspacePath);
     if (!resolved) throw new Error(`No built-in LSP server supports ${input.path}`);
     if (!this.config.servers[resolved.definition.id].enabled) throw new Error(`LSP server ${resolved.definition.id} is disabled`);
     const entry = this.entryFor(sessionId, workspace, resolved.definition, resolved.projectRoot);
@@ -105,11 +109,11 @@ export class LspManager {
       path: resolved.containerPath,
       languageId: resolved.definition.languageId(resolved.containerPath)
     }, timeoutMs));
-    const relativePath = resolved.containerPath.slice("/workspace/".length);
-    const entries = normalizeInspectEntries(input.operation, raw, relativePath);
+    const relativePath = resolved.containerPath.slice(`${workspacePath}/`.length);
+    const entries = normalizeInspectEntries(input.operation, raw, relativePath, workspacePath);
     return {
       server: resolved.definition.id,
-      projectRoot: resolved.projectRoot === "/workspace" ? "." : resolved.projectRoot.slice("/workspace/".length),
+      projectRoot: resolved.projectRoot === workspacePath ? "." : resolved.projectRoot.slice(`${workspacePath}/`.length),
       operation: input.operation,
       entries: entries.slice(0, 100),
       ...(entries.length > 100 ? { truncated: true } : {})

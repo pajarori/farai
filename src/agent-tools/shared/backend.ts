@@ -8,9 +8,16 @@ export type ToolExecutionBackend = ExecutionBackend & {
 
 export function backend(context: ToolContext): ToolExecutionBackend {
   if (context.executionBackend) return context.executionBackend;
+  let root = context.session;
+  const visited = new Set<string>();
+  while (root.parentId && context.store.loadSession && !visited.has(root.id)) {
+    visited.add(root.id);
+    root = context.store.loadSession(root.parentId);
+  }
   return new KaliContainerBackend({
     workspace: context.workspace,
-    containerName: containerNameForSession(context.session.id),
+    rootWorkspace: context.rootWorkspace ?? root.workspace,
+    containerName: containerNameForSession(root.id),
     ...(context.signal ? { signal: context.signal } : {}),
     ...(context.timeoutMs ? { timeoutMs: context.timeoutMs } : {}),
     ...(context.onOutputChunk ? { onOutputChunk: context.onOutputChunk } : {})

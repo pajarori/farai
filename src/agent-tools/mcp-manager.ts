@@ -1,5 +1,6 @@
 import type { Session, ToolContext, ToolDefinition, ToolResult } from "../types";
 import { containerNameForSession, KaliContainerBackend } from "../agent-container/kali";
+import type { ContainerLifecyclePort } from "../agent-container/lifecycle";
 import { DEFAULT_MITMPROXY_PORT, McpStdioClient, loadExternalMcpConfig, mcpServersFromConfig, type ExternalMcpServer, type McpResourceDescriptor, type McpResourceTemplateDescriptor, type McpToolDescriptor } from "./mcp-adapter";
 import { configPath, loadConfig, resolveProxyConfig } from "../agent-core/config";
 import { defaultHumanRenderer, defaultModelRenderer } from "./shared/renderers";
@@ -15,6 +16,9 @@ export type McpRefreshInput = {
   force?: boolean;
   includeResources?: boolean;
   onStartupEvent?: (event: McpStartupEvent) => void;
+  rootSessionId?: string;
+  rootWorkspace?: string;
+  containerLifecycle?: ContainerLifecyclePort;
 };
 
 export type McpStartupStatus =
@@ -95,6 +99,7 @@ export class McpServerManager {
   private readonly failedRefreshes = new Map<string, { sessionId: string; attempts: number; nextRetryAt: number }>();
   private readonly lastConfigPathByScope = new Map<string, string>();
   private readonly refreshEpochs = new Map<string, number>();
+  private readonly containerBindings = new Map<string, Pick<McpRefreshInput, "rootSessionId" | "rootWorkspace" | "containerLifecycle">>();
   private nextRefreshEpoch = 0;
 
   constructor(private readonly options: { reservedServers?: readonly string[]; reserveServer?: (config: ExternalMcpServer) => boolean } = {}) {}
@@ -139,6 +144,7 @@ export class McpServerManager {
     this.lastConfigPathByScope.clear();
     this.completedRefreshes.clear();
     this.failedRefreshes.clear();
+    this.containerBindings.clear();
     await Promise.allSettled(servers.map((server) => server.client.stop()));
   }
 
@@ -164,6 +170,7 @@ export class McpServerManager {
     this.originalsByScope.delete(sessionId);
     this.statusesByScope.delete(sessionId);
     this.lastConfigPathByScope.delete(sessionId);
+    this.containerBindings.delete(sessionId);
     await Promise.allSettled(servers.map((server) => server.client.stop()));
   }
 
@@ -192,11 +199,12 @@ export class McpServerManager {
   }
 
   async refresh(input: McpRefreshInput): Promise<ToolDefinition[]> {
-    const plan = this.prepareRefreshPlan(input);
+    const effective = this.withContainerBinding(input);
+    const plan = this.prepareRefreshPlan(effective);
     this.applyStatusPlaceholders(plan);
 
     if (!input.force && this.completedRefreshes.has(plan.signature)) {
-      if (this.refreshPlanHealthy(input, plan)) return this.listTools(plan.scope);
+      if (this.refreshPlanHealthy(effective, plan)) return this.listTools(plan.scope);
       this.completedRefreshes.delete(plan.signature);
     }
 
@@ -215,7 +223,7 @@ export class McpServerManager {
       epoch,
       task: Promise.resolve([])
     };
-    const task = this.runRefreshPlan(input, plan, epoch)
+    const task = this.runRefreshPlan(effective, plan, epoch)
       .catch((error) => {
         if (!this.isRefreshCurrent(plan.scope, epoch)) return [];
         input.onStartupEvent?.({
@@ -235,6 +243,19 @@ export class McpServerManager {
     this.backgroundRefreshes.set(plan.signature, entry);
     if (input.background) return this.listTools(plan.scope);
     return await task;
+  }
+
+  private withContainerBinding(input: McpRefreshInput): McpRefreshInput {
+    const scope = mcpScope(input.session);
+    const previous = this.containerBindings.get(scope);
+    const binding = {
+      ...(previous ?? {}),
+      ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
+      ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+      ...(input.containerLifecycle ? { containerLifecycle: input.containerLifecycle } : {})
+    };
+    if (Object.keys(binding).length) this.containerBindings.set(scope, binding);
+    return { ...input, ...binding };
   }
 
   private prepareRefreshPlan(input: McpRefreshInput): McpRefreshPlan {
@@ -524,6 +545,9 @@ export class McpServerManager {
       ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
       ...(input.session ? { session: input.session } : {}),
       ...(input.portOffset !== undefined ? { portOffset: input.portOffset } : {}),
+      ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
+      ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+      ...(input.containerLifecycle ? { containerLifecycle: input.containerLifecycle } : {}),
       includeResources: false
     }), input.signal);
     const managed = this.servers.get(scopedServerKey(input.session, input.server));
@@ -563,6 +587,9 @@ export class McpServerManager {
       ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
       ...(input.session ? { session: input.session } : {}),
       ...(input.portOffset !== undefined ? { portOffset: input.portOffset } : {}),
+      ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
+      ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+      ...(input.containerLifecycle ? { containerLifecycle: input.containerLifecycle } : {}),
       includeResources: false
     }), input.signal);
     const scopePrefix = `${input.session?.id ?? "host"}:`;
@@ -663,7 +690,14 @@ export class McpServerManager {
     if (!server.config.runInContainer || !input.session) return;
     const proxy = resolveProxyConfig(loadConfig(input.configWorkspace ?? input.workspace));
     if (!proxy.transparent) return;
-    const backend = new KaliContainerBackend({ workspace: input.workspace, containerName: containerNameForSession(input.session.id) });
+    const rootSessionId = input.rootSessionId ?? input.session.id;
+    const backend = new KaliContainerBackend({
+      workspace: input.workspace,
+      rootWorkspace: input.rootWorkspace ?? input.workspace,
+      rootSessionId,
+      containerName: containerNameForSession(rootSessionId),
+      ...(input.containerLifecycle ? { lifecycle: input.containerLifecycle } : {})
+    });
     const result = await backend.enableTransparentProxy({ proxyPort, redirectPorts: proxy.ports });
     if (result.exitCode !== 0) {
       throw new Error(result.stderr.trim() || "could not enable transparent proxy capture in the container");
@@ -937,8 +971,16 @@ export async function prepareMcpServerProcess(input: McpRefreshInput, config: Ex
     };
   }
   if (!input.session) throw new Error(`MCP server ${config.name} requires a session for container execution`);
-  const containerName = containerNameForSession(input.session.id);
-  const result = await new KaliContainerBackend({ workspace: input.workspace, containerName }).startPersistent();
+  const rootSessionId = input.rootSessionId ?? input.session.id;
+  const containerName = containerNameForSession(rootSessionId);
+  const backend = new KaliContainerBackend({
+    workspace: input.workspace,
+    rootWorkspace: input.rootWorkspace ?? input.workspace,
+    rootSessionId,
+    containerName,
+    ...(input.containerLifecycle ? { lifecycle: input.containerLifecycle } : {})
+  });
+  const result = await backend.startPersistent();
   if (result.exitCode !== 0) throw new Error(result.stderr || `Could not start MCP container ${containerName}`);
   return {
     ...config,
@@ -946,6 +988,8 @@ export async function prepareMcpServerProcess(input: McpRefreshInput, config: Ex
     args: [
       "exec",
       "-i",
+      "-w",
+      backend.workspacePath,
       containerName,
       "bash",
       "-lc",

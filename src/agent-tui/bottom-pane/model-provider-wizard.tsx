@@ -1,16 +1,16 @@
 import type { InputRenderable } from "@opentui/core";
 import { For, Show, createEffect, createMemo, onCleanup, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import { useTuiStore } from "../context/store";
 import { modelProviderProtocolLabel, modelProviderWizardStep, modelProviderWizardStepCount } from "../model-provider-state";
 import { COLOR } from "../theme";
 import { truncateLine } from "../renderers";
 import { isPrimaryClick } from "../input/mouse";
 import { fitTerminalPair } from "../terminal-text";
+import { useTuiDimensions } from "../context/terminal";
 
 export function ModelProviderWizard(): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   let inputRef: InputRenderable | undefined;
   let inputField: string | undefined;
   const wizard = () => tui.store.ui.modelProviderWizard!;
@@ -57,10 +57,7 @@ export function ModelProviderWizard(): JSX.Element {
     const field = wizard().field;
     const active = isTextField() && !wizard().busy;
     if (!active) {
-      const stale = inputRef;
-      inputRef = undefined;
-      inputField = undefined;
-      try { stale?.blur(); } catch {
+      try { inputRef?.blur(); } catch {
       }
       return;
     }
@@ -80,12 +77,12 @@ export function ModelProviderWizard(): JSX.Element {
   });
 
   return (
-    <box id="model-provider-wizard" style={{ flexShrink: 0, flexDirection: "column" }}>
+    <box id="model-provider-wizard" style={{ height: 8, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 2, paddingRight: 2 }}>
         <text fg={COLOR.text}>{header().left}</text>
         <text fg={COLOR.dim}>{header().right}</text>
       </box>
-      <box style={{ height: 4, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
+      <box style={{ height: 5, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
         <Show when={wizard().field === "protocol"} fallback={
           <Show when={wizard().field === "review"} fallback={
             <Show when={wizard().field} keyed>{(field) => (
@@ -182,11 +179,11 @@ export function ModelProviderWizard(): JSX.Element {
 
 function ProviderReview(): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const wizard = () => tui.store.ui.modelProviderWizard!;
   const width = () => Math.max(1, dims().width - 2);
   return (
-    <box style={{ flexDirection: "column", paddingLeft: 2 }}>
+    <box style={{ flexDirection: "column", paddingTop: 1, paddingLeft: 2 }}>
       <text fg={COLOR.text}>{truncateLine(wizard().id || "unnamed provider", width())}</text>
       <text fg={COLOR.dim}>{truncateLine(wizard().baseUrl || "base url missing", width())}</text>
       <text fg={COLOR.dim}>{truncateLine(`${modelProviderProtocolLabel(wizard().protocol)} · ${wizard().model || "discover models automatically"}`, width())}</text>

@@ -2,20 +2,26 @@ import type { ToolContext } from "../../types";
 import { backend } from "../shared/backend";
 import { CONTAINER_WORKSPACE_MOUNT } from "../../agent-container/kali";
 
-export function resolveContainerPath(path: string): string {
-  if (path.startsWith("/")) return path;
-  return `${CONTAINER_WORKSPACE_MOUNT}/${path}`.replace(/\/{2,}/g, "/");
+export function containerWorkspace(context: ToolContext): string {
+  return backend(context).workspacePath ?? CONTAINER_WORKSPACE_MOUNT;
 }
 
-export function containerRelativePath(path: string): string {
-  const resolved = resolveContainerPath(path);
-  const prefix = `${CONTAINER_WORKSPACE_MOUNT}/`;
-  if (resolved === CONTAINER_WORKSPACE_MOUNT) return ".";
+export function resolveContainerPath(path: string, workspace = CONTAINER_WORKSPACE_MOUNT): string {
+  if (path === CONTAINER_WORKSPACE_MOUNT) return workspace;
+  if (path.startsWith(`${CONTAINER_WORKSPACE_MOUNT}/`)) return `${workspace}${path.slice(CONTAINER_WORKSPACE_MOUNT.length)}`;
+  if (path.startsWith("/")) return path;
+  return `${workspace}/${path}`.replace(/\/{2,}/g, "/");
+}
+
+export function containerRelativePath(path: string, workspace = CONTAINER_WORKSPACE_MOUNT): string {
+  const resolved = resolveContainerPath(path, workspace);
+  const prefix = `${workspace}/`;
+  if (resolved === workspace) return ".";
   return resolved.startsWith(prefix) ? resolved.slice(prefix.length) : resolved;
 }
 
-function assertNotProtectedPath(path: string, _intent: "read" | "write"): void {
-  const rel = containerRelativePath(path);
+function assertNotProtectedPath(path: string, workspace: string, _intent: "read" | "write"): void {
+  const rel = containerRelativePath(path, workspace);
   if (rel === ".farai" || rel.startsWith(".farai/")) throw new Error("path is protected: .farai");
 }
 
@@ -39,8 +45,9 @@ function base64Heredoc(content: string): string {
 }
 
 export async function containerPathKind(context: ToolContext, path: string): Promise<"dir" | "file" | "missing"> {
-  assertNotProtectedPath(path, "read");
-  const p = resolveContainerPath(path);
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "read");
+  const p = resolveContainerPath(path, workspace);
   const out = await runInContainer(
     context,
     `if [ -d ${shQuote(p)} ]; then echo dir; elif [ -e ${shQuote(p)} ]; then echo file; else echo missing; fi`
@@ -50,13 +57,15 @@ export async function containerPathKind(context: ToolContext, path: string): Pro
 }
 
 export async function containerReadFile(context: ToolContext, path: string): Promise<string> {
-  assertNotProtectedPath(path, "read");
-  return runInContainer(context, `cat -- ${shQuote(resolveContainerPath(path))}`, 10_000, FULL_FILE_MAX_CHARS);
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "read");
+  return runInContainer(context, `cat -- ${shQuote(resolveContainerPath(path, workspace))}`, 10_000, FULL_FILE_MAX_CHARS);
 }
 
 export async function containerStatMtime(context: ToolContext, path: string): Promise<number | undefined> {
-  assertNotProtectedPath(path, "read");
-  const p = resolveContainerPath(path);
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "read");
+  const p = resolveContainerPath(path, workspace);
   try {
     const out = await runInContainer(context, `stat -c %Y -- ${shQuote(p)} 2>/dev/null || stat -f %m -- ${shQuote(p)}`, 5_000);
     const value = Number.parseInt(out.trim(), 10);
@@ -67,9 +76,9 @@ export async function containerStatMtime(context: ToolContext, path: string): Pr
 }
 
 export async function containerListDir(context: ToolContext, path: string): Promise<string[]> {
-  assertNotProtectedPath(path, "read");
-  const target = resolveContainerPath(path);
-  const workspace = CONTAINER_WORKSPACE_MOUNT;
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "read");
+  const target = resolveContainerPath(path, workspace);
   const script = `
 import os
 target = ${JSON.stringify(target)}
@@ -85,8 +94,9 @@ for n in entries:
 }
 
 export async function containerWriteFile(context: ToolContext, path: string, content: string): Promise<void> {
-  assertNotProtectedPath(path, "write");
-  const p = resolveContainerPath(path);
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "write");
+  const p = resolveContainerPath(path, workspace);
   await runInContainer(
     context,
     `mkdir -p -- "$(dirname ${shQuote(p)})" && base64 -d > ${shQuote(p)} << 'FARAI_FS_B64_EOF'\n${base64Heredoc(content)}\nFARAI_FS_B64_EOF`
@@ -94,7 +104,7 @@ export async function containerWriteFile(context: ToolContext, path: string, con
 }
 
 export async function containerListFilesRecursive(context: ToolContext, path: string, limit: number): Promise<string[]> {
-  const root = resolveContainerPath(path);
+  const root = resolveContainerPath(path, containerWorkspace(context));
   const script = `
 import os
 root = ${JSON.stringify(root)}
@@ -122,7 +132,7 @@ export async function containerGrep(
   include: string | undefined,
   limit: number
 ): Promise<string[]> {
-  const root = resolveContainerPath(path);
+  const root = resolveContainerPath(path, containerWorkspace(context));
   const script = `
 import os, re, base64
 root = ${JSON.stringify(root)}
@@ -158,8 +168,9 @@ print("\\n".join(matches))
 }
 
 export async function containerRemove(context: ToolContext, path: string): Promise<void> {
-  assertNotProtectedPath(path, "write");
-  await runInContainer(context, `rm -f -- ${shQuote(resolveContainerPath(path))}`);
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "write");
+  await runInContainer(context, `rm -f -- ${shQuote(resolveContainerPath(path, workspace))}`);
 }
 
 export async function containerApplySimplePatch(context: ToolContext, patch: string): Promise<string[]> {

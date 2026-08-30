@@ -15,6 +15,7 @@ import { selectCapabilities, toolSchemaTokens } from "./capability-admission";
 import { ContextSearchIndex } from "./context-index";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import { renderKaliCommandCatalog } from "./kali-command-catalog";
+import { containerWorkspacePath } from "../agent-container/kali";
 
 export type ContextClass = "kernel" | "instructions" | "working_set" | "retrieved" | "ephemeral" | "history" | "capabilities";
 
@@ -215,7 +216,7 @@ export class ContextEngine {
       class: "kernel",
       title: "Environment",
       source: "runtime",
-      content: `Workspace: ${workspace}\nContainer workspace: /workspace`,
+      content: `Workspace: ${workspace}\nContainer workspace: ${containerWorkspacePath(this.workspace, workspace)}`,
       mandatory: true,
       stable: true,
       priority: 100,
@@ -489,7 +490,7 @@ function renderWorkingFiles(fileState: FileStateStore | undefined, sessionId: st
 }
 
 function workspaceRelative(path: string): string {
-  return path.replace(/^\/workspace\//, "").replace(/^\/+/, "") || path;
+  return path.replace(/^\/workspace\//, "").replace(/^\/worktrees\/[^/]+\//, "").replace(/^\/+/, "") || path;
 }
 
 function retrieveDurableState(store: SqliteStore, index: ContextSearchIndex, session: Session, query: string): string | undefined {

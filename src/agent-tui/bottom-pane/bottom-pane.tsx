@@ -1,5 +1,4 @@
-import { useTerminalDimensions } from "@opentui/solid";
-import { Show, createEffect, createSignal, onCleanup, type JSX } from "solid-js";
+import { Match, Show, Switch, createEffect, createSignal, onCleanup, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { useExit } from "../context/exit";
 import { useComposerControl } from "../context/composer";
@@ -12,18 +11,19 @@ import { overlayOptions } from "../overlay-options";
 import { centerSurfaceFooter } from "../surfaces/center-surface";
 import { isAgentBusy, type CenterSurfaceBusy, type CenterSurfaceFrame } from "../store";
 import { COLOR } from "../theme";
-import { activityStatusVisible, bottomPaneSlot, fitFooterLine } from "./footer-state";
+import { activityStatusVisible, bottomPaneSurface, fitFooterLine } from "./footer-state";
 import { RequestUserInput } from "./request-user-input";
 import { ModelProviderWizard } from "./model-provider-wizard";
 import { ModelProviderRemoval } from "./model-provider-removal";
 import { slashCommandOptions, slashMatches, slashPopupRowLimit, slashPopupVisible } from "../slash-autocomplete";
 import { truncateLine } from "../renderers";
+import { useTuiDimensions } from "../context/terminal";
 
 export function BottomPane(): JSX.Element {
   const tui = useTuiStore();
   const exit = useExit();
   const composer = useComposerControl();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const [elapsed, setElapsed] = createSignal(0);
   let tick: ReturnType<typeof setInterval> | undefined;
   const frame = () => tui.store.ui.overlayStack.at(-1);
@@ -42,6 +42,7 @@ export function BottomPane(): JSX.Element {
   };
   const ctx = () => ({ tui, dialog, exit });
   const slashPanelActive = () => {
+    if (tui.store.ui.activeMainTab !== "chat") return false;
     const text = composer.text();
     return slashPopupVisible(
       text,
@@ -50,7 +51,10 @@ export function BottomPane(): JSX.Element {
       tui.store.ui.overlayStack.length > 0 || tui.store.ui.centerSurfaceStack.length > 0
     );
   };
-  const slot = () => bottomPaneSlot({
+  const surface = () => bottomPaneSurface({
+    hasModelProviderRemoval: providerRemovalActive(),
+    hasModelProviderWizard: providerWizardActive(),
+    hasRequestUserInput: inputRequestActive(),
     hasListFrame: Boolean(listFrame()),
     hasCenterFrame: Boolean(centerFrame()),
     activeMainTab: tui.store.ui.activeMainTab
@@ -59,9 +63,9 @@ export function BottomPane(): JSX.Element {
   const providerRemovalActive = () => Boolean(tui.store.ui.modelProviderRemoval);
   const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed);
   const inputRequestPending = () => Boolean(tui.store.snapshot.pendingUserInput);
-  const composerSurfaceVisible = () => slot() === "composer" && !inputRequestActive() && !providerWizardActive() && !providerRemovalActive();
+  const composerSurfaceVisible = () => surface() === "composer";
   const composerChromeVisible = () => composerSurfaceVisible() && !slashPanelActive();
-  const footerHidden = () => Boolean(frame()) || Boolean(centerFrame()) || slashPanelActive() || slot() === "proxy_tab" || inputRequestActive() || providerWizardActive() || providerRemovalActive();
+  const footerHidden = () => surface() !== "composer" || slashPanelActive();
   const statusActivity = () => {
     if (tui.store.ui.compacting) return "compacting context" as const;
     if (isAgentBusy(tui.store)) return "working" as const;
@@ -101,7 +105,7 @@ export function BottomPane(): JSX.Element {
   onCleanup(() => { if (tick) clearInterval(tick); });
 
   return (
-    <box style={{ flexShrink: 0, flexDirection: "column" }}>
+    <box id="bottom-pane" style={{ flexShrink: 0, flexDirection: "column" }}>
       <Show when={statusVisible()}>
         <StatusIndicator elapsed={elapsed()} activity={statusActivity()} />
       </Show>
@@ -117,23 +121,32 @@ export function BottomPane(): JSX.Element {
       <Show when={questionNoticeVisible()}>
         <text fg={COLOR.warning}>{questionNotice()}</text>
       </Show>
-      <Show when={!composerSurfaceVisible()}>
-        <Show when={tui.store.ui.modelProviderRemoval} fallback={<Show when={tui.store.ui.modelProviderWizard} fallback={<Show when={inputRequestActive() ? tui.store.snapshot.pendingUserInput : undefined} fallback={
-          <Show when={listFrame()} keyed fallback={
-            <Show when={centerFrame()} fallback={<ProxyTabFooter />}>
-              {(surface) => <CenterSurfaceFooter frame={surface()} />}
-            </Show>
-          }>
+      <Switch>
+        <Match when={surface() === "model_provider_removal"}>
+          <ModelProviderRemoval />
+        </Match>
+        <Match when={surface() === "model_provider_wizard"}>
+          <ModelProviderWizard />
+        </Match>
+        <Match when={surface() === "request_user_input"}>
+          <Show when={tui.store.snapshot.pendingUserInput} keyed>
+            {(request) => <RequestUserInput request={request} />}
+          </Show>
+        </Match>
+        <Match when={surface() === "list_overlay"}>
+          <Show when={listFrame()} keyed>
             {(top) => <ListOverlay frame={top} options={overlayOptions(top, tui, ctx())} docked />}
           </Show>
-        }>
-          {(request) => <RequestUserInput request={request()} />}
-        </Show>}>
-          <ModelProviderWizard />
-        </Show>}>
-          <ModelProviderRemoval />
-        </Show>
-      </Show>
+        </Match>
+        <Match when={surface() === "center_surface"}>
+          <Show when={centerFrame()}>
+            {(current) => <CenterSurfaceFooter frame={current()} />}
+          </Show>
+        </Match>
+        <Match when={surface() === "proxy_tab"}>
+          <ProxyTabFooter />
+        </Match>
+      </Switch>
       <Composer visible={composerSurfaceVisible()} active={composerSurfaceVisible()} />
       <Show when={!footerHidden()}>
         <Footer elapsed={elapsed()} />
@@ -144,11 +157,11 @@ export function BottomPane(): JSX.Element {
 
 function ProxyTabFooter(): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const error = () => tui.store.ui.lastError;
   const layout = () => proxyTabFooterLayout(dims().width, tui.store.ui.proxyFilter, error() ?? tui.store.ui.statusDetail);
   return (
-    <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
+    <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
       <text fg={COLOR.dim}>{layout().left}</text>
       <text fg={error() ? COLOR.error : COLOR.dim}>{layout().right}</text>
     </box>
@@ -157,7 +170,7 @@ function ProxyTabFooter(): JSX.Element {
 
 function CenterSurfaceFooter(props: { frame: CenterSurfaceFrame }): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const error = () => tui.store.ui.lastError;
   const layout = () => centerSurfaceFooterLayout(props.frame, dims().width, error(), tui.store.ui.centerSurfaceBusy);
   return (
@@ -179,7 +192,7 @@ export function proxyTabFooterLayout(width: number, filter: string, status?: str
   return fitFooterLine(hint, [
     ...(status ? [{ id: "status", kind: "message" as const, text: status }] : []),
     { id: "proxy", kind: "message", text: `proxy · ${filter}` }
-  ], Math.max(0, width - 2));
+  ], Math.max(0, width));
 }
 
 export function centerSurfaceFooterLayout(

@@ -1,14 +1,14 @@
-import { useTerminalDimensions } from "@opentui/solid";
 import type { JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "../overlays/selection-row";
 import { COLOR } from "../theme";
 import { truncateLine } from "../renderers";
 import { fitTerminalPair } from "../terminal-text";
+import { useTuiDimensions } from "../context/terminal";
 
 export function ModelProviderRemoval(): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const state = () => tui.store.ui.modelProviderRemoval!;
   const provider = () => state().provider;
   const title = () => `remove ${provider().id}`;
@@ -21,22 +21,24 @@ export function ModelProviderRemoval(): JSX.Element {
       : "enter remove · esc cancel";
 
   return (
-    <box id="model-provider-removal" style={{ flexShrink: 0, flexDirection: "column" }}>
+    <box id="model-provider-removal" style={{ height: 8, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 2, paddingRight: 2 }}>
         <text fg={COLOR.text}>{header().left}</text>
         <text fg={COLOR.dim}>{header().right}</text>
       </box>
-      <text fg={COLOR.accent}>{`  ${truncateLine(`remove ${provider().id}?`, Math.max(1, dims().width - 2))}`}</text>
-      <box style={{ flexDirection: "column", marginTop: 1 }}>
-        <SelectionRow
-          title={title()}
-          description="configuration, credential, and invalid model selections"
-          selected
-          disabled={state().busy}
-          width={dims().width}
-          descriptionColumn={descriptionColumn()}
-          titleColor={COLOR.error}
-        />
+      <box style={{ height: 5, flexShrink: 0, flexDirection: "column", paddingTop: 1, overflow: "hidden" }}>
+        <text fg={COLOR.accent}>{`  ${truncateLine(`remove ${provider().id}?`, Math.max(1, dims().width - 2))}`}</text>
+        <box style={{ flexDirection: "column", marginTop: 1 }}>
+          <SelectionRow
+            title={title()}
+            description="configuration, credential, and invalid model selections"
+            selected
+            disabled={state().busy}
+            width={dims().width}
+            descriptionColumn={descriptionColumn()}
+            titleColor={COLOR.error}
+          />
+        </box>
       </box>
       <SelectionMenuHint text={hint()} color={state().error ? COLOR.error : undefined} />
     </box>

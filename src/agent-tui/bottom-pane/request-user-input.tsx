@@ -1,6 +1,5 @@
 import type { InputRenderable } from "@opentui/core";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import type { PendingUserInput, UserInputQuestion } from "../../types";
 import { useTuiStore } from "../context/store";
 import { scrollWindowStart } from "../dialog/list-selection";
@@ -9,6 +8,7 @@ import { requestOptionCount, requestOptionIndex, requestQuestion } from "../requ
 import { COLOR } from "../theme";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "../overlays/selection-row";
 import { fitFooterLine } from "./footer-state";
+import { useTuiDimensions } from "../context/terminal";
 
 type RequestOptionRow = {
   index: number;
@@ -19,7 +19,7 @@ type RequestOptionRow = {
 
 export function RequestUserInput(props: { request: PendingUserInput }): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const [now, setNow] = createSignal(Date.now());
   let inputRef: InputRenderable | undefined;
   let focusGeneration = 0;
@@ -64,7 +64,7 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
   const hint = () => requestUserInputHint(dims().width, textMode(), Boolean(question()?.choices?.length));
 
   createEffect(() => {
-    const active = textMode();
+    const active = textMode() && !state()?.submitting;
     const generation = ++focusGeneration;
     queueMicrotask(() => {
       if (disposed || generation !== focusGeneration) return;

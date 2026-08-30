@@ -10,6 +10,8 @@ import { DEFAULT_SESSION_TITLE } from "../session-title";
 import { resolveSessionLocation } from "../session-catalog";
 import { prepareUpdateCheck } from "./update-check";
 import { COLOR } from "./theme";
+import { FARAI_BANNER } from "../branding";
+import type { UsageSummary } from "../types";
 
 export { createRuntimePort };
 export type { TuiInput, TuiRuntimePort, TuiCapabilities };
@@ -72,8 +74,17 @@ export async function runOpenTui(input: TuiInput): Promise<void> {
       let resumeHint: string | undefined;
       try {
         const session = await resolveResumeSession(input.runtime, activeSessionId);
-        const resumable = (await input.runtime.listSessions()).some((candidate) => candidate.id === session.id);
-        if (resumable) resumeHint = formatResumeHint(session.id, session.title);
+        const discarded = await input.runtime.discardSessionIfEmpty(session.id);
+        if (!discarded) {
+          let usage: UsageSummary | undefined;
+          try { usage = await input.runtime.loadUsageSummary(session.id); } catch {  }
+          const resumable = (await input.runtime.listSessions()).some((candidate) => candidate.id === session.id);
+          if (resumable) resumeHint = formatResumeHint(session.id, session.title, {
+            styled: terminalStylingEnabled(),
+            width: process.stdout.columns,
+            usage
+          });
+        }
       } catch {  }
       try { await input.runtime.dispose(); } catch {  }
       managedRenderer.disposeResize();
@@ -173,8 +184,42 @@ export async function ensureSession(input: TuiInput): Promise<string> {
   return created.id;
 }
 
-export function formatResumeHint(sessionId: string, _title?: string): string {
-  return ["", "to continue this session, run:", `  farai resume ${shellQuote(sessionId)}`].join("\n");
+export function formatResumeHint(
+  sessionId: string,
+  _title?: string,
+  options: { styled?: boolean; width?: number; usage?: UsageSummary | undefined } = {}
+): string {
+  const banner = exitBanner(options.width);
+  const brand = options.styled ? `\x1b[2m${banner}\x1b[22m` : banner;
+  const saved = options.styled ? "\x1b[2msession saved\x1b[22m" : "session saved";
+  const usage = options.usage ? formatTokenUsage(options.usage) : undefined;
+  return ["", brand, "", saved, `  farai resume ${shellQuote(sessionId)}`, "", usage, ""].filter((line) => line !== undefined).join("\n");
+}
+
+export function formatTokenUsage(usage: UsageSummary): string | undefined {
+  const cached = Math.max(0, Math.round(usage.cachedInputTokens));
+  const cacheWrite = Math.max(0, Math.round(usage.cacheWriteInputTokens));
+  const input = Math.max(0, Math.round(usage.inputTokens) - cached - cacheWrite);
+  const output = Math.max(0, Math.round(usage.outputTokens));
+  if (usage.requests <= 0 && input === 0 && cached === 0 && cacheWrite === 0 && output === 0) return undefined;
+  const cache = [
+    cached > 0 ? `${formatTokenCount(cached)} cached` : undefined,
+    cacheWrite > 0 ? `${formatTokenCount(cacheWrite)} cache write` : undefined
+  ].filter(Boolean).join(", ");
+  return `token usage: total=${formatTokenCount(input + output)} input=${formatTokenCount(input)}${cache ? ` (+ ${cache})` : ""} output=${formatTokenCount(output)}`;
+}
+
+function formatTokenCount(value: number): string {
+  return Math.max(0, Math.round(value)).toLocaleString("en-US");
+}
+
+function exitBanner(width: number | undefined): string {
+  if (!width || Math.max(...FARAI_BANNER.split("\n").map((line) => line.length)) <= width) return FARAI_BANNER;
+  return "farai";
+}
+
+function terminalStylingEnabled(): boolean {
+  return Boolean(process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== "dumb");
 }
 
 function shellQuote(value: string): string {

@@ -1,4 +1,3 @@
-import { useTerminalDimensions } from "@opentui/solid";
 import { createContext, createEffect, createMemo, onCleanup, useContext, type JSX } from "solid-js";
 import type { FaraiTuiStore, StoreActions } from "../store";
 import { createFaraiStore, isAgentBusy } from "../store";
@@ -11,6 +10,7 @@ import type { UserInputAnswer } from "../../types";
 import type { PreparedUpdateCheck } from "../update-check";
 import { createTranscriptStreamEngine, type TranscriptStreamEngine } from "../transcript/stream-engine";
 import { createTranscriptProjection } from "../transcript/projection";
+import { TerminalDimensionsProvider, useTuiDimensions } from "./terminal";
 
 export function proxyRefreshQuery(): ProxyFlowQuery {
   return { limit: 300 };
@@ -57,7 +57,7 @@ type TuiStoreProviderProps = {
 
 export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   const { port, workspace, capabilities } = useTuiRuntime();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const { store, setStore: _set, actions } = createFaraiStore(workspace);
   const transcript = createTranscriptStreamEngine();
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -647,7 +647,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   });
 
   createEffect(() => {
-    if (store.ui.activeMainTab !== "proxy") return;
+    if (store.ui.activeMainTab !== "proxy" || store.ui.centerSurfaceStack.length > 0) return;
     let disposed = false;
     const tick = async () => {
       if (disposed) return;
@@ -705,7 +705,11 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     setStatusDetail
   };
 
-  return <StoreContext.Provider value={value}>{props.children}</StoreContext.Provider>;
+  return (
+    <TerminalDimensionsProvider value={dims}>
+      <StoreContext.Provider value={value}>{props.children}</StoreContext.Provider>
+    </TerminalDimensionsProvider>
+  );
 }
 
 function sortProxyFlowsNewestFirst(flows: ProxyFlowSummary[]): ProxyFlowSummary[] {

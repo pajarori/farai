@@ -66,15 +66,15 @@ export const LSP_SERVER_DEFINITIONS: Readonly<Record<LspServerId, LspServerDefin
   Object.fromEntries(definitions.map((definition) => [definition.id, definition])) as Record<LspServerId, LspServerDefinition>
 );
 
-export function resolveLspFile(workspace: string, path: string): {
+export function resolveLspFile(workspace: string, path: string, containerWorkspace = CONTAINER_WORKSPACE_MOUNT): {
   definition: LspServerDefinition;
   hostPath: string;
   containerPath: string;
   projectRoot: string;
 } | undefined {
-  const containerPath = posix.normalize(path.startsWith("/") ? path : `${CONTAINER_WORKSPACE_MOUNT}/${path}`);
-  if (containerPath !== CONTAINER_WORKSPACE_MOUNT && !containerPath.startsWith(`${CONTAINER_WORKSPACE_MOUNT}/`)) return undefined;
-  const rel = posix.relative(CONTAINER_WORKSPACE_MOUNT, containerPath);
+  const containerPath = posix.normalize(path.startsWith("/") ? path : `${containerWorkspace}/${path}`);
+  if (containerPath !== containerWorkspace && !containerPath.startsWith(`${containerWorkspace}/`)) return undefined;
+  const rel = posix.relative(containerWorkspace, containerPath);
   const hostPath = resolve(workspace, rel);
   const workspaceRoot = resolve(workspace);
   if (hostPath !== workspaceRoot && !hostPath.startsWith(`${workspaceRoot}${sep}`)) return undefined;
@@ -83,6 +83,6 @@ export function resolveLspFile(workspace: string, path: string): {
   if (!definition) return undefined;
   const hostProjectRoot = definition.projectRoot(workspaceRoot, hostPath);
   const rootRel = relative(workspaceRoot, hostProjectRoot).split(sep).join("/");
-  const projectRoot = rootRel ? `${CONTAINER_WORKSPACE_MOUNT}/${rootRel}` : CONTAINER_WORKSPACE_MOUNT;
+  const projectRoot = rootRel ? `${containerWorkspace}/${rootRel}` : containerWorkspace;
   return { definition, hostPath, containerPath, projectRoot };
 }

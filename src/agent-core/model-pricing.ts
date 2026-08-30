@@ -8,6 +8,26 @@ export type UsageTokenCounts = {
   cacheWriteInputTokens?: number;
 };
 
+export type NormalizedUsageTokenCounts = {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+};
+
+export function normalizeUsageTokenCounts(usage: UsageTokenCounts, protocol: ProviderProtocol): NormalizedUsageTokenCounts {
+  const input = nonNegative(usage.inputTokens ?? 0);
+  const output = nonNegative(usage.outputTokens ?? 0);
+  const cached = nonNegative(usage.cachedInputTokens ?? 0);
+  const cacheWrite = nonNegative(usage.cacheWriteInputTokens ?? 0);
+  return {
+    inputTokens: protocol === "anthropic-messages" ? input + cached + cacheWrite : input,
+    outputTokens: output,
+    cachedInputTokens: cached,
+    cacheWriteInputTokens: cacheWrite
+  };
+}
+
 export function calculateUsageCost(usage: UsageTokenCounts, pricing: ModelPricingSnapshot, protocol: ProviderProtocol): number {
   const input = nonNegative(usage.inputTokens ?? 0);
   const output = nonNegative(usage.outputTokens ?? 0);

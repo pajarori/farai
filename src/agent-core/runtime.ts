@@ -9,6 +9,7 @@ import { stopBrowserContextsForSession } from "../agent-tools/browser/context-ma
 import { renderCtfNotes } from "../agent-report/markdown";
 import { serviceRegistry } from "../agent-tools/services/registry";
 import { containerNameForSession, KaliContainerBackend, type ContainerStatus } from "../agent-container/kali";
+import { DockerContainerLifecycle, type ContainerLifecyclePort } from "../agent-container/lifecycle";
 import type { ToolExecutionBackend } from "../agent-tools/shared/backend";
 import { id, nowIso } from "../utils";
 import { takeBytes } from "../agent-tools/shared/output-bound";
@@ -49,8 +50,8 @@ import { classifyModelRetry, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from 
 import { isInternalMetaReasoning, normalizeReasoningSummary } from "./reasoning-summary";
 import { KnowledgeStore } from "../agent-knowledge/store";
 import { knowledgeDbPath } from "../agent-knowledge/paths";
-import { calculateUsageCost, estimateMaximumRequestCost, type UsageTokenCounts } from "./model-pricing";
-import { recordSessionLocation } from "../session-catalog";
+import { calculateUsageCost, estimateMaximumRequestCost, normalizeUsageTokenCounts, type UsageTokenCounts } from "./model-pricing";
+import { recordSessionLocation, removeSessionLocation } from "../session-catalog";
 import { SessionUserInputCoordinator } from "./session-user-input";
 import {
   abortablePromise,
@@ -183,6 +184,7 @@ export type AgentRuntimeOptions = {
   executionBackend?: ToolExecutionBackend;
   registerSessionCatalog?: boolean;
   containerBackendFactory?: (workspace: string, sessionId: string, timeoutMs?: number) => RuntimeContainerBackend;
+  containerLifecycle?: ContainerLifecyclePort;
 };
 type PromptOptions = { signal?: AbortSignal };
 
@@ -230,6 +232,7 @@ export class AgentRuntime {
   private readonly hooksEnabled: boolean;
   private readonly mcpEnabled: boolean;
   private readonly executionBackend: ToolExecutionBackend | undefined;
+  private readonly containerLifecycle: ContainerLifecyclePort | undefined;
   private readonly containerBackendFactory: (workspace: string, sessionId: string, timeoutMs?: number) => RuntimeContainerBackend;
   private readonly registerSessionCatalog: boolean;
   private knowledgeStore: KnowledgeStore | null | undefined;
@@ -249,14 +252,22 @@ export class AgentRuntime {
     this.hooksEnabled = options.enableHooks !== false;
     this.mcpEnabled = options.enableMcp !== false;
     this.executionBackend = options.executionBackend;
-    this.containerBackendFactory = options.containerBackendFactory ?? ((containerWorkspace, sessionId, timeoutMs) => new KaliContainerBackend({
+    this.containerLifecycle = options.containerLifecycle ?? (options.executionBackend || options.containerBackendFactory ? undefined : new DockerContainerLifecycle(this.runtimeId));
+    this.containerBackendFactory = options.containerBackendFactory ?? ((containerWorkspace, rootSessionId, timeoutMs) => new KaliContainerBackend({
       workspace: containerWorkspace,
-      containerName: containerNameForSession(sessionId),
+      rootWorkspace: this.workspace,
+      rootSessionId,
+      containerName: containerNameForSession(rootSessionId),
+      ...(this.containerLifecycle ? { lifecycle: this.containerLifecycle } : {}),
       ...(timeoutMs ? { timeoutMs } : {})
     }));
     this.registerSessionCatalog = options.registerSessionCatalog !== false;
     this.contextEngine = new ContextEngine(workspace, this.store, this.fileState, () => this.knowledge(), options.enableSkills !== false, options.enableProjectInstructions !== false);
-    this.lsp = new LspManager(workspace, config.lsp);
+    this.lsp = new LspManager(workspace, config.lsp, {
+      backendFactory: (sessionId, sessionWorkspace) => this.executionBackend instanceof KaliContainerBackend
+        ? this.executionBackend
+        : this.containerBackend(sessionWorkspace, sessionId) as KaliContainerBackend
+    });
     this.subagentGate = new SubagentGate(options.maxConcurrentSubagents ?? config.maxConcurrentSubagents ?? 4);
     this.maxSteps = resolveMaxSteps(options.maxSteps ?? config.maxSteps);
     this.maxTurnMs = resolveMaxTurnMs(options.maxTurnSeconds ?? config.maxTurnSeconds);
@@ -345,10 +356,12 @@ export class AgentRuntime {
             serviceRegistry.unregisterSession(session.id);
           }
         }
+        await this.containerLifecycle?.suspendAll();
       } catch (error) {
         shutdownError = error;
       } finally {
         this.stopRuntimeLease();
+        this.containerLifecycle?.dispose();
         this.knowledgeStore?.close();
         this.knowledgeStore = null;
         this.store.close();
@@ -394,10 +407,13 @@ export class AgentRuntime {
 
   private startRuntimeLease(): void {
     this.store.renewRuntimeLease(this.runtimeId, RUNTIME_LEASE_MS);
+    this.containerLifecycle?.renew();
     if (this.runtimeHeartbeat) return;
     this.runtimeHeartbeat = setInterval(() => {
       if (this.shuttingDown || !this.store.isOpen()) return;
       try { this.store.renewRuntimeLease(this.runtimeId, RUNTIME_LEASE_MS); } catch {
+      }
+      try { this.containerLifecycle?.renew(); } catch {
       }
     }, RUNTIME_HEARTBEAT_MS);
     if (typeof this.runtimeHeartbeat === "object" && "unref" in this.runtimeHeartbeat) this.runtimeHeartbeat.unref();
@@ -420,6 +436,7 @@ export class AgentRuntime {
     this.recoveryPromise = (async () => {
       await this.store.ensure();
       this.startRuntimeLease();
+      void this.containerLifecycle?.reconcile().catch(() => undefined);
       const activeRuntimeIds = new Set(this.store.listActiveRuntimeIds());
       this.store.reclaimMailboxClaims([...activeRuntimeIds]);
       const sessions = this.store.listSessions(10_000, { includeArchived: true });
@@ -617,10 +634,14 @@ export class AgentRuntime {
     return {
       mcp: async (hook, payload) => {
         const session = this.store.loadSession(payload.sessionId);
+        const rootSessionId = this.rootSessionId(session);
         const result = await callMcpServerTool({
           workspace: session.workspace,
           configWorkspace: this.workspace,
           session,
+          rootSessionId,
+          rootWorkspace: this.workspace,
+          ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
           server: hook.mcp!.server,
           tool: hook.mcp!.tool,
           args: payload
@@ -979,9 +1000,16 @@ export class AgentRuntime {
     await this.lsp.shutdownSession(sessionId).catch(() => {});
     await stopBrowserContextsForSession(sessionId).catch(() => {});
     await stopMcpToolsForSession(sessionId).catch(() => {});
-    await this.containerBackend(session.workspace, sessionId)
-      .stopPersistent()
-      .catch(() => {});
+    if (this.rootSessionId(session) === session.id) {
+      for (const member of this.sessionTree(session.id).filter((candidate) => candidate.id !== session.id)) {
+        await this.lsp.shutdownSession(member.id).catch(() => {});
+        await stopBrowserContextsForSession(member.id).catch(() => {});
+        await stopMcpToolsForSession(member.id).catch(() => {});
+      }
+      await this.containerBackend(session.workspace, sessionId)
+        .stopPersistent()
+        .catch(() => {});
+    }
     return session;
   }
 
@@ -994,8 +1022,29 @@ export class AgentRuntime {
     return this.withSessionLock(sessionId, async () => this.clearSessionState(sessionId));
   }
 
+  async discardSessionIfEmpty(sessionId: string): Promise<boolean> {
+    const session = this.store.loadSession(sessionId);
+    const rootSessionId = this.rootSessionId(session);
+    if (rootSessionId !== session.id) return false;
+    return this.withSessionLock(rootSessionId, async () => {
+      if (this.store.isSessionResumable(rootSessionId)) return false;
+      if (this.sessionTree(rootSessionId).length !== 1) return false;
+      await this.lsp.shutdownSession(rootSessionId).catch(() => {});
+      await stopBrowserContextsForSession(rootSessionId).catch(() => {});
+      await stopMcpToolsForSession(rootSessionId).catch(() => {});
+      serviceRegistry.unregisterSession(rootSessionId);
+      await this.containerBackend(session.workspace, rootSessionId).stopPersistent().catch(() => undefined);
+      const discarded = this.store.discardEmptyRootSession(rootSessionId);
+      if (discarded && this.registerSessionCatalog) {
+        try { removeSessionLocation(rootSessionId); } catch {  }
+      }
+      return discarded;
+    });
+  }
+
   async abortSessionTree(sessionId: string, reason = "run deadline exceeded", options: { stopContainers?: boolean } = {}): Promise<void> {
     const sessions = this.sessionTree(sessionId).reverse();
+    const stoppedContainers = new Set<string>();
     for (const session of sessions) {
       this.cancelCompaction(session.id);
       for (const turn of this.store.listTurns(session.id, 10_000)) {
@@ -1008,9 +1057,13 @@ export class AgentRuntime {
       await stopMcpToolsForSession(session.id).catch(() => {});
       serviceRegistry.unregisterSession(session.id);
       if (options.stopContainers !== false) {
-        await this.containerBackend(session.workspace, session.id)
-          .stopPersistent()
-          .catch(() => {});
+        const rootSessionId = this.rootSessionId(session);
+        if (!stoppedContainers.has(rootSessionId)) {
+          stoppedContainers.add(rootSessionId);
+          await this.containerBackend(session.workspace, session.id)
+            .stopPersistent()
+            .catch(() => {});
+        }
       }
     }
   }
@@ -1078,10 +1131,14 @@ export class AgentRuntime {
 
   async refreshMcp(session: Session): Promise<void> {
     if (!this.mcpEnabled) return;
+    const rootSessionId = this.rootSessionId(session);
     await refreshMcpTools({
       workspace: session.workspace,
       configWorkspace: this.workspace,
       session,
+      rootSessionId,
+      rootWorkspace: this.workspace,
+      ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
       background: true,
       includeResources: false,
       onStartupEvent: (event) => this.event(session.id, event.type, event)
@@ -1089,9 +1146,13 @@ export class AgentRuntime {
   }
 
   async stopContainer(sessionId: string): Promise<void> {
-    await stopBrowserContextsForSession(sessionId).catch(() => {});
-    await stopMcpToolsForSession(sessionId).catch(() => {});
-    const result = await this.containerBackend(this.store.loadSession(sessionId).workspace, sessionId).stopPersistent();
+    const session = this.store.loadSession(sessionId);
+    for (const member of this.sessionFamily(sessionId)) {
+      await this.lsp.shutdownSession(member.id).catch(() => {});
+      await stopBrowserContextsForSession(member.id).catch(() => {});
+      await stopMcpToolsForSession(member.id).catch(() => {});
+    }
+    const result = await this.containerBackend(session.workspace, sessionId).stopPersistent();
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not stop Kali container");
   }
 
@@ -1106,21 +1167,12 @@ export class AgentRuntime {
     throw new Error(`workspace transition requires all background work to finish or be stopped first: ${labels.join(", ")}`);
   }
 
-  private async stopWorkspaceBoundServices(sessionId: string, workspace: string, includeContainer: boolean): Promise<void> {
+  private async stopWorkspaceBoundServices(sessionId: string): Promise<void> {
     const operations: Array<{ name: string; run: () => Promise<unknown> }> = [
       { name: "browser contexts", run: () => stopBrowserContextsForSession(sessionId) },
       { name: "MCP servers", run: () => stopMcpToolsForSession(sessionId) },
       { name: "LSP servers", run: () => this.lsp.shutdownSession(sessionId) }
     ];
-    if (includeContainer) {
-      operations.push({
-        name: "Kali container",
-        run: async () => {
-          const result = await this.containerBackend(workspace, sessionId, 5_000).stopPersistent();
-          if (result.exitCode !== 0 || result.timedOut) throw new Error(result.stderr || "container stop was not confirmed");
-        }
-      });
-    }
     const results = await Promise.all(operations.map(async (operation) => {
       try {
         await withDeadlineMs(operation.run(), 7_500, `${operation.name} shutdown`);
@@ -1134,7 +1186,8 @@ export class AgentRuntime {
   }
 
   private containerBackend(workspace: string, sessionId: string, timeoutMs?: number): RuntimeContainerBackend {
-    return this.containerBackendFactory(workspace, sessionId, timeoutMs);
+    const rootSessionId = this.rootSessionId(this.store.loadSession(sessionId));
+    return this.containerBackendFactory(workspace, rootSessionId, timeoutMs);
   }
 
   exportReport(sessionId: string, options: { write?: boolean } = {}): { markdown: string; path?: string } {
@@ -1577,15 +1630,16 @@ export class AgentRuntime {
   private persistModelUsage(provider: ChatProvider, session: Session, turn: Turn, usage: UsageTokenCounts | undefined, latencyMs: number): void {
     if (!usage) return;
     const cost = provider.pricing ? calculateUsageCost(usage, provider.pricing, provider.protocol) : 0;
+    const normalized = normalizeUsageTokenCounts(usage, provider.protocol);
     this.store.saveUsage({
       sessionId: session.id,
       turnId: turn.id,
       provider: provider.name,
       model: provider.model ?? session.model ?? provider.name,
-      inputTokens: usage.inputTokens ?? 0,
-      outputTokens: usage.outputTokens ?? 0,
-      ...(usage.cachedInputTokens !== undefined ? { cachedInputTokens: usage.cachedInputTokens } : {}),
-      ...(usage.cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens: usage.cacheWriteInputTokens } : {}),
+      inputTokens: normalized.inputTokens,
+      outputTokens: normalized.outputTokens,
+      cachedInputTokens: normalized.cachedInputTokens,
+      cacheWriteInputTokens: normalized.cacheWriteInputTokens,
       ...(provider.pricing ? { pricing: provider.pricing } : {}),
       cost,
       latencyMs
@@ -2795,7 +2849,7 @@ export class AgentRuntime {
       store: leasedToolCapability(this.store as unknown as ToolContext["store"], lease),
       signal: deadline.signal,
       timeoutMs: toolOperationTimeout(tool.timeoutMs),
-      ...(this.executionBackend ? { executionBackend: this.executionBackend } : {}),
+      executionBackend: this.executionBackend ?? this.containerBackend(session.workspace, session.id) as unknown as ToolExecutionBackend,
       availableTools: () => {
         lease.assertActive();
         return listToolsForSession(session).filter((item) => item.name !== "tool_search" && item.name !== "tool_invoke");
@@ -2874,7 +2928,7 @@ export class AgentRuntime {
             const familyIds = new Set(this.sessionFamily(session.id).map((candidate) => candidate.id));
             const owners = this.store.listSessions(100_000, { includeArchived: true }).filter((candidate) => !familyIds.has(candidate.id) && candidate.workspace === path);
             if (owners.length) throw new Error(`worktree is already active in session ${owners.map((owner) => owner.id).join(", ")}`);
-            await this.stopWorkspaceBoundServices(session.id, session.workspace, false);
+            await this.stopWorkspaceBoundServices(session.id);
             this.updateSession(session.id, { workspace: path });
             this.fileState.clear(session.id);
             return { path, ref: registered.ref, ...(registered.branch ? { branch: registered.branch } : {}), created: false };
@@ -2883,7 +2937,7 @@ export class AgentRuntime {
           const addArgs = branch
             ? ["worktree", "add", "-b", branch, path, baseRef]
             : ["worktree", "add", "--detach", path, baseRef];
-          await this.stopWorkspaceBoundServices(session.id, session.workspace, false);
+          await this.stopWorkspaceBoundServices(session.id);
           await runHostGit(this.workspace, addArgs);
           this.updateSession(session.id, { workspace: path });
           this.fileState.clear(session.id);
@@ -2911,7 +2965,7 @@ export class AgentRuntime {
           const affected = remove
             ? this.sessionFamily(session.id).filter((candidate) => candidate.workspace === current.workspace)
             : [current];
-          await Promise.all(affected.map((member) => this.stopWorkspaceBoundServices(member.id, current.workspace, remove)));
+          await Promise.all(affected.map((member) => this.stopWorkspaceBoundServices(member.id)));
           if (remove) {
             const dirtyAfterCleanup = await runHostGit(current.workspace, ["status", "--porcelain=v1", "--untracked-files=all"]);
             if (dirtyAfterCleanup.trim()) throw new Error("workspace services changed the worktree during shutdown; removal was refused");
@@ -3372,10 +3426,14 @@ export class AgentRuntime {
       return calls.map((call) => `${call.id}\t${call.tool}\t${call.status}`).join("\n");
     }
     if (command === "/mcp") {
+      const rootSessionId = this.rootSessionId(session);
       await refreshMcpTools({
         workspace: session.workspace,
         configWorkspace: this.workspace,
         session,
+        rootSessionId,
+        rootWorkspace: this.workspace,
+        ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
         background: true,
         force: true,
         includeResources: false,

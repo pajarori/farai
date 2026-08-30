@@ -1,5 +1,4 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { useTerminalDimensions } from "@opentui/solid";
 import { For, Show, createEffect, createMemo, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { formatPayload, truncateLine, type TimelineRow } from "../renderers";
@@ -7,15 +6,22 @@ import { formatCompactSummary } from "../../agent-core/loop/compaction";
 import { COLOR } from "../theme";
 import { FaraiRow } from "./cells";
 import { FARAI_BANNER_LINES } from "../../branding";
+import { useTuiDimensions } from "../context/terminal";
 
-export function Transcript(): JSX.Element {
+export function Transcript(props: { active?: boolean } = {}): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   let scrollRef!: ScrollBoxRenderable;
   const navigation = createMessageNavigationState(tui.store.ui.messageNavigation.sequence);
   const rowCache = new Map<string, TimelineRow>();
+  const textCache = new Map<string, string>();
+  const reasoningCache = new Map<string, string>();
+  let renderedTranscriptRows: TimelineRow[] = [];
+  let renderedRawRows: string[] = [];
+  let renderedRawOutput = false;
 
   const transcriptRows = createMemo(() => {
+    if (props.active === false) return renderedTranscriptRows;
     const boundary = tui.store.snapshot.compactionBoundary;
     const summary = boundary ? formatCompactSummary(boundary.summary) : "";
     const compactRow: TimelineRow[] = boundary ? [{
@@ -26,7 +32,8 @@ export function Transcript(): JSX.Element {
         : "",
       ...(summary ? { summary } : {})
     }] : [];
-    return [...compactRow, ...tui.timelineRows()];
+    renderedTranscriptRows = [...compactRow, ...tui.timelineRows()];
+    return renderedTranscriptRows;
   });
   const indexedRows = createMemo(() => {
     const ids: string[] = [];
@@ -43,23 +50,40 @@ export function Transcript(): JSX.Element {
       if (stable === row) rowCache.set(row.id, row);
       byId.set(row.id, stable);
     }
-    for (const id of rowCache.keys()) if (!projectedById.has(id)) rowCache.delete(id);
+    for (const id of rowCache.keys()) {
+      if (projectedById.has(id)) continue;
+      rowCache.delete(id);
+      textCache.delete(id);
+      reasoningCache.delete(id);
+    }
     return { ids, byId };
   });
-  const rawRows = createMemo(() => tui.store.snapshot.messages.flatMap((message) => (
-    message.parts.map((part) => {
-      const streamText = tui.transcript.state.text[part.id]?.content;
-      const streamReasoning = tui.transcript.state.reasoning[part.id]?.content;
-      const payload = streamText !== undefined
-        ? { text: streamText }
-        : streamReasoning !== undefined
-          ? { rationale: streamReasoning }
-          : part.payload;
-      return `${message.role}.${part.type} ${formatPayload(payload, 16_000)}`;
-    })
-  )));
+  const rawRows = createMemo(() => {
+    if (props.active === false) return renderedRawRows;
+    renderedRawRows = tui.store.snapshot.messages.flatMap((message) => (
+      message.parts.map((part) => {
+        const streamText = tui.transcript.state.text[part.id]?.content;
+        const streamReasoning = tui.transcript.state.reasoning[part.id]?.content;
+        const payload = streamText !== undefined
+          ? { text: streamText }
+          : streamReasoning !== undefined
+            ? { rationale: streamReasoning }
+            : part.payload;
+        return `${message.role}.${part.type} ${formatPayload(payload, 16_000)}`;
+      })
+    ));
+    return renderedRawRows;
+  });
+  const rawOutput = () => {
+    if (props.active === false) return renderedRawOutput;
+    renderedRawOutput = tui.store.ui.rawOutput;
+    return renderedRawOutput;
+  };
+  const streamedText = (id: string) => visibleStreamValue(props.active, () => tui.transcript.state.text[id]?.content, textCache, id);
+  const streamedReasoning = (id: string) => visibleStreamValue(props.active, () => tui.transcript.state.reasoning[id]?.content, reasoningCache, id);
 
   createEffect(() => {
+    if (props.active === false) return;
     const request = tui.store.ui.messageNavigation;
     const userIds = transcriptRows().filter((row) => row.kind === "user").map((row) => row.id);
     const targetId = resolveMessageNavigationTarget(navigation, tui.store.activeSessionId, request, userIds);
@@ -79,7 +103,7 @@ export function Transcript(): JSX.Element {
       <Show
         when={indexedRows().ids.length > 0}
         fallback={
-          <box style={{ flexDirection: "column", marginTop: 1, paddingLeft: 1, paddingRight: 1 }}>
+          <box style={{ flexDirection: "column", paddingRight: 1 }}>
             <box style={{ flexDirection: "column", marginBottom: 1 }}>
               <For each={FARAI_BANNER_LINES}>{(line) => (
                 <text fg={COLOR.dim}>{truncateLine(line, Math.max(1, dims().width - 4))}</text>
@@ -90,17 +114,18 @@ export function Transcript(): JSX.Element {
           </box>
         }
       >
-        <Show when={tui.store.ui.rawOutput} fallback={
+        <Show when={rawOutput()} fallback={
           <For each={indexedRows().ids}>{(id) => (
             <TranscriptRow
               row={indexedRows().byId.get(id)!}
-              streamedText={tui.transcript.state.text[id]?.content}
-              streamedReasoning={tui.transcript.state.reasoning[id]?.content}
+              streamedText={streamedText(id)}
+              streamedReasoning={streamedReasoning(id)}
+              animated={props.active !== false}
             />
           )}</For>
         }>
           <For each={rawRows()}>{(row) => (
-            <box style={{ flexDirection: "column", marginBottom: 1, paddingLeft: 1, paddingRight: 1 }}>
+            <box style={{ flexDirection: "column", marginBottom: 1, paddingRight: 1 }}>
               <For each={row.split("\n")}>{(line) => <text fg={COLOR.dim}>{truncateLine(line, Math.max(1, dims().width - 4))}</text>}</For>
             </box>
           )}</For>
@@ -108,6 +133,19 @@ export function Transcript(): JSX.Element {
       </Show>
     </scrollbox>
   );
+}
+
+function visibleStreamValue(
+  active: boolean | undefined,
+  read: () => string | undefined,
+  cache: Map<string, string>,
+  id: string
+): string | undefined {
+  if (active === false) return cache.get(id);
+  const value = read();
+  if (value === undefined) cache.delete(id);
+  else cache.set(id, value);
+  return value;
 }
 
 export type MessageNavigationState = {
@@ -182,21 +220,20 @@ type TranscriptRowProps = {
   row: TimelineRow;
   streamedText?: string | undefined;
   streamedReasoning?: string | undefined;
+  animated?: boolean | undefined;
 };
 
 function TranscriptRow(props: TranscriptRowProps): JSX.Element {
-  const isUser = props.row.kind === "user";
   return (
     <box
       id={props.row.id}
       style={{
         flexDirection: "column",
         flexShrink: 0,
-        paddingLeft: isUser ? 0 : 1,
-        paddingRight: isUser ? 0 : 1
+        paddingRight: props.row.kind === "user" ? 0 : 1
       }}
     >
-      <FaraiRow row={props.row} streamedText={props.streamedText} streamedReasoning={props.streamedReasoning} />
+      <FaraiRow row={props.row} streamedText={props.streamedText} streamedReasoning={props.streamedReasoning} animated={props.animated} />
     </box>
   );
 }

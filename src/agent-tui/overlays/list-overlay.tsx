@@ -1,5 +1,4 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import type { DialogOption, FuzzyMatch } from "../dialog/fuzzy";
 import { filterOptions, groupByCategory } from "../dialog/fuzzy";
 import { displayRows, scrollWindowStart, selectableIndex, selectedOptionId } from "../dialog/list-selection";
@@ -12,6 +11,8 @@ import { useTuiStore } from "../context/store";
 import { createPrimaryClickGesture, isPrimaryClick } from "../input/mouse";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "./selection-row";
 import { fitTerminalPair, terminalWidth } from "../terminal-text";
+import { useTuiDimensions } from "../context/terminal";
+import { bottomPaneOverlayHeightLimit } from "../bottom-pane/footer-state";
 
 type ListOverlayProps = {
   frame: OverlayFrame;
@@ -21,7 +22,7 @@ type ListOverlayProps = {
 
 export function ListOverlay(props: ListOverlayProps): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const matches = createMemo(() => filterOptions(props.options, props.frame.query));
   const selectableCount = createMemo(() => matches().filter((match) => !match.option.disabled).length);
   const selectedIndex = createMemo(() => selectableIndex(matches(), props.frame.index));
@@ -38,7 +39,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
     const start = scrollWindowStart(all.length, cap, selectedIndex);
     return all.slice(start, start + cap);
   });
-  const standardHeight = () => Math.max(1, Math.min(dims().height - 1, maxRows() + 5));
+  const standardHeight = () => Math.max(1, Math.min(bottomPaneOverlayHeightLimit(dims().height), maxRows() + 5));
   const left = () => 0;
   const standardTop = () => Math.max(0, dims().height - standardHeight() - 1);
   const descCol = () => descriptionColumn(allRows(), width());
@@ -317,7 +318,7 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
   const expandedRows = () => expandedDetailLines().length > 0 ? expandedDetailLines().length + 2 : 0;
   const rowViewportHeight = () => reservedRows() * 2 + expandedRows();
   const renderedHeight = () => 5 + rowViewportHeight();
-  const height = () => Math.max(1, Math.min(Math.max(1, props.terminalHeight - 1), renderedHeight()));
+  const height = () => Math.max(1, Math.min(bottomPaneOverlayHeightLimit(props.terminalHeight), renderedHeight()));
   const top = () => Math.max(0, props.terminalHeight - height() - 1);
 
   createEffect(() => {
@@ -403,15 +404,15 @@ function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
 }
 
 function agentOverlayMaxItems(terminalHeight: number, expandedRows: number): number {
-  return Math.min(8, Math.max(1, Math.floor((terminalHeight - 6 - expandedRows) / 2)));
+  return Math.min(8, Math.max(1, Math.floor((bottomPaneOverlayHeightLimit(terminalHeight) - 5 - expandedRows) / 2)));
 }
 
 function mcpOverlayMaxItems(terminalHeight: number): number {
-  return Math.min(8, Math.max(1, Math.floor((terminalHeight - 6) / 2)));
+  return Math.min(8, Math.max(1, Math.floor((bottomPaneOverlayHeightLimit(terminalHeight) - 5) / 2)));
 }
 
 function mcpOverlayHeight(terminalHeight: number, itemLimit: number): number {
-  return Math.min(Math.max(1, terminalHeight - 1), 5 + itemLimit * 2);
+  return Math.min(bottomPaneOverlayHeightLimit(terminalHeight), 5 + itemLimit * 2);
 }
 
 function agentDetailLines(item: AgentThreadSummary): string[] {
@@ -424,7 +425,7 @@ function agentDetailLines(item: AgentThreadSummary): string[] {
 }
 
 function visibleAgentDetailLines(item: AgentThreadSummary, terminalHeight: number): string[] {
-  return agentDetailLines(item).slice(0, Math.max(0, terminalHeight - 10));
+  return agentDetailLines(item).slice(0, Math.max(0, bottomPaneOverlayHeightLimit(terminalHeight) - 9));
 }
 
 function agentStatus(item: AgentThreadSummary): string {
@@ -485,7 +486,7 @@ function overlayMaxRows(kind: string, terminalHeight: number): number {
       cap = 8;
       break;
   }
-  return Math.min(cap, Math.max(1, terminalHeight - 6));
+  return Math.min(cap, Math.max(1, bottomPaneOverlayHeightLimit(terminalHeight) - 5));
 }
 
 function descriptionColumn(rows: OverlayRow[], width: number): number {

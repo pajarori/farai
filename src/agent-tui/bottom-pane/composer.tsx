@@ -1,6 +1,6 @@
 import type { PasteEvent, TextareaRenderable } from "@opentui/core";
 import { For, Show, createEffect, createMemo, onCleanup, onMount, type JSX } from "solid-js";
-import { useRenderer, useTerminalDimensions } from "@opentui/solid";
+import { useRenderer } from "@opentui/solid";
 import { useTuiStore } from "../context/store";
 import { useComposerControl } from "../context/composer";
 import { COLOR } from "../theme";
@@ -10,6 +10,7 @@ import { truncateLine } from "../renderers";
 import type { DialogOption } from "../dialog/fuzzy";
 import { isPrimaryClick } from "../input/mouse";
 import { fitTerminal, terminalWidth } from "../terminal-text";
+import { useTuiDimensions } from "../context/terminal";
 
 export function composerHeightFromVisualLines(visualLines: number): number {
   return Math.min(6, Math.max(1, visualLines));
@@ -18,15 +19,19 @@ export function composerHeightFromVisualLines(visualLines: number): number {
 export function Composer(props: { visible?: boolean; active?: boolean } = {}): JSX.Element {
   const tui = useTuiStore();
   const composer = useComposerControl();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const renderer = useRenderer();
   let textareaRef!: TextareaRenderable;
   let composerHeightRefreshPending = false;
   let disposed = false;
   const decoder = new TextDecoder();
+  const surfaceVisible = () => props.visible ?? true;
+  const inputActive = () => surfaceVisible() && (props.active ?? (
+    tui.store.ui.overlayStack.length === 0 && tui.store.ui.centerSurfaceStack.length === 0
+  ));
 
   const syncComposerHeight = (): void => {
-    if (!textareaRef) return;
+    if (!textareaRef || !surfaceVisible()) return;
     const visualLines = textareaRef.editorView.getTotalVirtualLineCount();
     composer.setHeight(composerHeightFromVisualLines(visualLines));
   };
@@ -51,9 +56,8 @@ export function Composer(props: { visible?: boolean; active?: boolean } = {}): J
     tui.store.ui.slashSuppressedText === composer.text(),
     slashMatches().length,
     tui.store.ui.overlayStack.length > 0 || tui.store.ui.centerSurfaceStack.length > 0
-  );
+  ) && inputActive();
   const popupWidth = () => Math.max(1, dims().width);
-  const inputActive = () => props.active ?? (tui.store.ui.overlayStack.length === 0 && tui.store.ui.centerSurfaceStack.length === 0);
   const commandWidth = () => Math.min(
     Math.max(1, popupWidth() - 2),
     Math.min(28, Math.max(8, ...slashOptions().map((option) => terminalWidth(option.title) + 2)))
@@ -63,7 +67,7 @@ export function Composer(props: { visible?: boolean; active?: boolean } = {}): J
 
   createEffect(() => {
     dims().width;
-    scheduleComposerHeightRefresh();
+    if (surfaceVisible()) scheduleComposerHeightRefresh();
   });
 
   createEffect(() => {
@@ -104,7 +108,7 @@ export function Composer(props: { visible?: boolean; active?: boolean } = {}): J
   });
 
   return (
-    <box visible={props.visible ?? true} style={{ flexShrink: 0, flexDirection: "column", paddingTop: 0 }}>
+    <box id="composer-surface" visible={surfaceVisible()} style={{ flexShrink: 0, flexDirection: "column", paddingTop: 0 }}>
       <text fg={COLOR.border}>{rule()}</text>
       <box style={{ flexDirection: "row", height: composer.height(), backgroundColor: COLOR.panel }}>
         <text fg={COLOR.dim}>{"› "}</text>

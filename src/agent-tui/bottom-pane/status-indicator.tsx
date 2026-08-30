@@ -1,7 +1,7 @@
-import { useTerminalDimensions } from "@opentui/solid";
 import type { JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { truncateLine } from "../renderers";
+import { useTuiDimensions } from "../context/terminal";
 import { COLOR } from "../theme";
 import { fmtElapsed } from "./time";
 import { isFooterStatusDetail } from "./footer-state";
@@ -13,7 +13,7 @@ type StatusIndicatorProps = {
 
 export function StatusIndicator(props: StatusIndicatorProps): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const detail = () => {
     const value = tui.store.ui.statusDetail;
     return value && value !== "working" && value !== props.activity && !isFooterStatusDetail(value) ? ` • ${value}` : "";

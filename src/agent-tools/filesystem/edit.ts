@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { containerReadFile, containerRelativePath, containerStatMtime, containerWriteFile, resolveContainerPath } from "./container-fs";
+import { containerReadFile, containerRelativePath, containerStatMtime, containerWorkspace, containerWriteFile, resolveContainerPath } from "./container-fs";
 import { occurrences, previewEdit } from "./shared";
 import { appendDiagnosticReport } from "../../agent-lsp";
 
@@ -21,6 +21,7 @@ export const fsEditTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const path = asString(args.path, "path");
+    const workspace = containerWorkspace(context);
     const oldString = asString(args.oldString, "oldString");
     const newString = asString(args.newString, "newString");
     if (oldString === newString) throw new Error("oldString and newString must differ");
@@ -32,12 +33,12 @@ export const fsEditTool: ToolDefinition = {
     await containerWriteFile(context, path, next);
     if (context.fileState) {
       const mtime = await containerStatMtime(context, path);
-      context.fileState.set(context.session.id, { path: resolveContainerPath(path), content: next, mtime: mtime ?? Date.now() });
+      context.fileState.set(context.session.id, { path: resolveContainerPath(path, workspace), content: next, mtime: mtime ?? Date.now() });
     }
     const diagnostic = await context.lsp?.diagnose({ path, content: next }).catch(() => undefined);
     return {
       ok: true,
-      summary: `edited ${containerRelativePath(path)} replacements=${args.replaceAll === true ? count : 1}`,
+      summary: `edited ${containerRelativePath(path, workspace)} replacements=${args.replaceAll === true ? count : 1}`,
       output: appendDiagnosticReport(previewEdit(oldString, newString), diagnostic) ?? previewEdit(oldString, newString)
     };
   }

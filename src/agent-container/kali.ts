@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { spawn as spawnPty } from "bun-pty";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { truncate } from "../utils";
 import type { BackendExecResult, BackendSessionResult, ExecutionBackend, SessionKind } from "../agent-tools/backends/types";
 import { SpawnSessionStore, allOutput, combinedOutput, killEntry, toBackendSession, touch, waitForExit, waitForExitOrYield, writeInput } from "../agent-tools/backends/spawn-session";
@@ -16,10 +17,16 @@ import {
   waitForPtyExitOrYield,
   writePtyInput
 } from "../agent-tools/backends/pty-session";
-import { loadGlobalConfig } from "../agent-core/global-config";
 import { KALI_TOOL_MANIFEST } from "./kali-tool-manifest";
+import {
+  managedContainerLabels,
+  managedContainerLabelsMatch,
+  type ContainerLifecyclePort,
+  type ManagedContainerIdentity
+} from "./lifecycle";
 
 export const CONTAINER_WORKSPACE_MOUNT = "/workspace";
+export const CONTAINER_WORKTREES_MOUNT = "/worktrees";
 
 export type ContainerExecResult = {
   exitCode: number | null;
@@ -37,9 +44,12 @@ export type ContainerStatus = {
   imageContractCurrent: boolean;
   dockerContext?: string;
   persistentName: string;
+  persistentExists?: boolean;
+  persistentState?: string;
   persistentRunning: boolean;
   persistentImageId?: string;
   persistentImageCurrent: boolean;
+  persistentIdentityCurrent?: boolean;
 };
 
 export type OutputChunkListener = (chunk: string, stream: "stdout" | "stderr") => void;
@@ -52,6 +62,9 @@ export type KaliBackendOptions = {
   processRunner?: ProcessRunner;
   signal?: AbortSignal;
   onOutputChunk?: OutputChunkListener;
+  rootSessionId?: string;
+  rootWorkspace?: string;
+  lifecycle?: ContainerLifecyclePort;
 };
 
 export type ProcessRunner = (command: string, args: string[]) => Promise<ContainerExecResult>;
@@ -64,7 +77,6 @@ export type TransparentProxyOptions = {
 const kaliSessions = new SpawnSessionStore();
 const kaliPtySessions = new PtySessionStore();
 const containerStartLocks = new Map<string, Promise<ContainerExecResult>>();
-const containerWorkspaces = new Map<string, string>();
 let globalContainerStartChain: Promise<unknown> = Promise.resolve();
 
 function withGlobalContainerStartLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -77,7 +89,6 @@ export const CONTAINER_PREFIX = "farai-kali-";
 export const KALI_IMAGE_CONTRACT = KALI_TOOL_MANIFEST.contract;
 export const DEFAULT_KALI_IMAGE = "farai-kali:latest";
 export const KALI_IMAGE_CONTRACT_LABEL = "org.farai.kali.contract";
-const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
 
 type ResolvedImage = {
   exists: boolean;
@@ -89,9 +100,14 @@ export function containerNameForSession(sessionId: string): string {
   return `${CONTAINER_PREFIX}${sessionId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
 }
 
-export function resolveMaxConcurrentContainers(): number {
-  const config = loadGlobalConfig();
-  return config.maxConcurrentContainers ?? (config.maxConcurrentSubagents ?? DEFAULT_MAX_CONCURRENT_SUBAGENTS) + 1;
+export function containerWorkspacePath(rootWorkspace: string, workspace: string): string {
+  const root = resolve(rootWorkspace);
+  const current = resolve(workspace);
+  if (current === root) return CONTAINER_WORKSPACE_MOUNT;
+  const worktreesRoot = join(root, ".farai", "worktrees");
+  const rel = relative(worktreesRoot, current);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`workspace is outside the root session family: ${workspace}`);
+  return `${CONTAINER_WORKTREES_MOUNT}/${rel.split("\\").join("/")}`;
 }
 
 export class KaliContainerBackend implements ExecutionBackend {
@@ -99,19 +115,32 @@ export class KaliContainerBackend implements ExecutionBackend {
   readonly image: string;
   readonly containerName: string;
   readonly workspace: string;
+  readonly rootWorkspace: string;
+  readonly workspacePath: string;
   readonly timeoutMs: number;
   private readonly processRunner: ProcessRunner;
   private readonly signal: AbortSignal | undefined;
   private readonly onOutputChunk: OutputChunkListener | undefined;
+  private readonly lifecycle: ContainerLifecyclePort | undefined;
+  private readonly identity: ManagedContainerIdentity | undefined;
 
   constructor(options: KaliBackendOptions) {
     this.image = options.image ?? DEFAULT_KALI_IMAGE;
     this.containerName = options.containerName ?? "farai-kali";
-    this.workspace = options.workspace;
+    this.workspace = resolve(options.workspace);
+    this.rootWorkspace = resolve(options.rootWorkspace ?? options.workspace);
+    this.workspacePath = containerWorkspacePath(this.rootWorkspace, this.workspace);
     this.timeoutMs = options.timeoutMs ?? 120_000;
     this.processRunner = options.processRunner ?? ((command, args) => runProcess(command, args, Math.min(this.timeoutMs, 15_000)));
     this.signal = options.signal;
     this.onOutputChunk = options.onOutputChunk;
+    this.lifecycle = options.lifecycle;
+    this.identity = options.rootSessionId ? {
+      containerName: this.containerName,
+      rootSessionId: options.rootSessionId,
+      workspace: this.rootWorkspace,
+      imageContract: KALI_IMAGE_CONTRACT
+    } : undefined;
   }
 
   buildImageCommand(): string[] {
@@ -130,19 +159,17 @@ export class KaliContainerBackend implements ExecutionBackend {
   async status(): Promise<ContainerStatus> {
     const image = await this.resolveImage();
     const dockerContext = (await this.processRunner("docker", ["context", "show"])).stdout.trim();
-    const persistentRunning = (await this.processRunner(
-      "docker",
-      ["inspect", "-f", "{{.State.Running}}", this.containerName]
-    )).stdout.trim() === "true";
-    const persistentImageId = persistentRunning
-      ? (await this.processRunner("docker", ["inspect", "-f", "{{.Image}}", this.containerName])).stdout.trim()
-      : "";
+    const inspected = await this.inspectPersistent();
+    const persistentExists = Boolean(inspected);
+    const persistentRunning = inspected?.state === "running";
+    const persistentImageId = inspected?.imageId ?? "";
     const persistentImageCurrent = Boolean(
-      persistentRunning
+      persistentExists
       && image.id
       && persistentImageId
       && imageIdsMatch(image.id, persistentImageId)
     );
+    const persistentIdentityCurrent = Boolean(this.identity && managedContainerLabelsMatch(inspected?.labels, this.identity));
     return {
       image: this.image,
       imageExists: image.exists,
@@ -151,10 +178,35 @@ export class KaliContainerBackend implements ExecutionBackend {
       imageContractCurrent: image.contract === KALI_IMAGE_CONTRACT,
       ...(dockerContext ? { dockerContext } : {}),
       persistentName: this.containerName,
+      persistentExists,
+      ...(inspected?.state ? { persistentState: inspected.state } : {}),
       persistentRunning,
       ...(persistentImageId ? { persistentImageId } : {}),
-      persistentImageCurrent
+      persistentImageCurrent,
+      persistentIdentityCurrent
     };
+  }
+
+  private async inspectPersistent(): Promise<{ state: string; imageId?: string; labels?: Record<string, string> } | undefined> {
+    const inspected = await this.processRunner("docker", [
+      "inspect",
+      "-f",
+      "{{.State.Status}}\t{{.Image}}\t{{json .Config.Labels}}",
+      this.containerName
+    ]);
+    if (inspected.exitCode !== 0) return undefined;
+    const [state = "unknown", imageId = "", labelsJson = ""] = inspected.stdout.trim().split("\t", 3);
+    try {
+      return {
+        state: state || "unknown",
+        ...(imageId ? { imageId } : {}),
+        ...(labelsJson && labelsJson !== "null"
+          ? { labels: JSON.parse(labelsJson) as Record<string, string> }
+          : {})
+      };
+    } catch {
+      return { state: state || "unknown", ...(imageId ? { imageId } : {}) };
+    }
   }
 
   async resolveImage(): Promise<ResolvedImage> {
@@ -195,51 +247,69 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   private async startPersistentUnlocked(): Promise<ContainerExecResult> {
-    const status = await this.status();
-    if (!status.imageExists) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `kali image ${this.image} is missing; run \`farai setup --no-kb\``,
-        durationMs: 0,
-        timedOut: false
-      };
+    if (this.identity && this.lifecycle) await this.lifecycle.acquire(this.identity);
+    try {
+      const status = await this.status();
+      if (!status.imageExists) {
+        if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: `kali image ${this.image} is missing; run \`farai setup --no-kb\``,
+          durationMs: 0,
+          timedOut: false
+        };
+      }
+      if (!status.imageContractCurrent) {
+        if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: `kali image ${this.image} does not satisfy the farai kali capability contract; run \`farai setup --no-kb\``,
+          durationMs: 0,
+          timedOut: false
+        };
+      }
+      if (status.persistentRunning && status.persistentImageCurrent && (!this.identity || status.persistentIdentityCurrent)) {
+        return { exitCode: 0, stdout: "already running", stderr: "", durationMs: 0, timedOut: false };
+      }
+      if (status.persistentExists && !status.persistentRunning && status.persistentImageCurrent && (!this.identity || status.persistentIdentityCurrent)) {
+        const started = Date.now();
+        const result = await this.processRunner("docker", ["start", this.containerName]);
+        if (result.exitCode !== 0 && this.identity && this.lifecycle) this.lifecycle.release(this.identity);
+        return { ...result, durationMs: Date.now() - started, timedOut: false };
+      }
+      return await withGlobalContainerStartLock(async () => {
+        await this.processRunner("docker", ["rm", "-f", "-v", this.containerName]);
+        const worktrees = join(this.rootWorkspace, ".farai", "worktrees");
+        mkdirSync(worktrees, { recursive: true });
+        const started = Date.now();
+        const result = await this.processRunner("docker", [
+          "run",
+          "-d",
+          "--name",
+          this.containerName,
+          "--workdir",
+          CONTAINER_WORKSPACE_MOUNT,
+          "--volume",
+          `${this.rootWorkspace}:${CONTAINER_WORKSPACE_MOUNT}`,
+          "--volume",
+          `${CONTAINER_WORKSPACE_MOUNT}/.farai`,
+          "--volume",
+          `${worktrees}:${CONTAINER_WORKTREES_MOUNT}`,
+          ...(this.identity ? managedContainerLabels(this.identity) : []),
+          ...kaliDockerSecurityArgs(),
+          this.image,
+          "sleep",
+          "infinity"
+        ]);
+        if (result.exitCode !== 0 && this.identity && this.lifecycle) this.lifecycle.release(this.identity);
+        return { ...result, durationMs: Date.now() - started, timedOut: false };
+      });
+    } catch (error) {
+      if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
+      throw error;
     }
-    if (!status.imageContractCurrent) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `kali image ${this.image} does not satisfy the farai kali capability contract; run \`farai setup --no-kb\``,
-        durationMs: 0,
-        timedOut: false
-      };
-    }
-    if (status.persistentRunning && status.persistentImageCurrent && containerWorkspaces.get(this.containerName) === this.workspace) {
-      return { exitCode: 0, stdout: "already running", stderr: "", durationMs: 0, timedOut: false };
-    }
-    return await withGlobalContainerStartLock(async () => {
-      await this.enforceContainerCap();
-      await this.processRunner("docker", ["rm", "-f", this.containerName]);
-      const started = Date.now();
-      const result = await this.processRunner("docker", [
-        "run",
-        "-d",
-        "--name",
-        this.containerName,
-        "--workdir",
-        CONTAINER_WORKSPACE_MOUNT,
-        "--volume",
-        `${this.workspace}:${CONTAINER_WORKSPACE_MOUNT}`,
-        "--volume",
-        `${CONTAINER_WORKSPACE_MOUNT}/.farai`,
-        ...kaliDockerSecurityArgs(),
-        this.image,
-        "sleep",
-        "infinity"
-      ]);
-      if (result.exitCode === 0) containerWorkspaces.set(this.containerName, this.workspace);
-      return { ...result, durationMs: Date.now() - started, timedOut: false };
-    });
   }
 
   async enableTransparentProxy(options: TransparentProxyOptions): Promise<ContainerExecResult> {
@@ -260,13 +330,11 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   async stopPersistent(): Promise<ContainerExecResult> {
+    if (this.identity && this.lifecycle) return await this.lifecycle.remove(this.identity);
     const started = Date.now();
-    const result = await this.processRunner("docker", ["rm", "-f", this.containerName]);
-    if (result.exitCode === 0 || containerDoesNotExist(result)) {
-      containerWorkspaces.delete(this.containerName);
-      if (result.exitCode !== 0) {
-        return { ...result, exitCode: 0, stdout: result.stdout || "already stopped", durationMs: Date.now() - started, timedOut: false };
-      }
+    const result = await this.processRunner("docker", ["rm", "-f", "-v", this.containerName]);
+    if (result.exitCode !== 0 && containerDoesNotExist(result)) {
+      return { ...result, exitCode: 0, stdout: result.stdout || "already stopped", durationMs: Date.now() - started, timedOut: false };
     }
     return { ...result, durationMs: Date.now() - started, timedOut: false };
   }
@@ -369,26 +437,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     return this.exec(command, opts.timeoutMs, opts.signal);
   }
 
-  private async enforceContainerCap(): Promise<void> {
-    const cap = resolveMaxConcurrentContainers();
-    const listed = await this.processRunner("docker", ["ps", "--filter", `name=${CONTAINER_PREFIX}`, "--format", "{{.Names}}"]);
-    const names = listed.stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .filter((name) => name !== this.containerName);
-    if (names.length < cap) return;
-
-    const oldestFirst = [...names].reverse();
-    const toEvict = oldestFirst.slice(0, names.length - cap + 1);
-    for (const name of toEvict) {
-      await this.processRunner("docker", ["rm", "-f", name]);
-    }
-  }
-
   private async ensurePersistentRunning(): Promise<void> {
-    const status = await this.status();
-    if (status.persistentRunning && status.persistentImageCurrent) return;
     const result = await this.startPersistent();
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not start Kali container for background execution");
   }
@@ -398,7 +447,7 @@ export class KaliContainerBackend implements ExecutionBackend {
 
     if (opts.pty) {
 
-      const proc = spawnPty("docker", ["exec", "-it", this.containerName, "bash", "-l"], {
+      const proc = spawnPty("docker", ["exec", "-it", "-w", this.workspacePath, this.containerName, "bash", "-l"], {
         name: "xterm-256color",
         cols: 120,
         rows: 30,
@@ -415,7 +464,7 @@ export class KaliContainerBackend implements ExecutionBackend {
       return { session: toPtyBackendSession(sessionId, entry), output: drainOutput(entry) };
     }
 
-    const child = spawn("docker", ["exec", "-i", this.containerName, "bash", "-lc", command], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("docker", ["exec", "-i", "-w", this.workspacePath, this.containerName, "bash", "-lc", command], { stdio: ["pipe", "pipe", "pipe"] });
     const abort = () => child.kill("SIGTERM");
     if (opts.signal?.aborted) abort();
     else opts.signal?.addEventListener("abort", abort, { once: true });
@@ -473,14 +522,14 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   private execArgs(command: string): string[] {
-    return ["exec", "-i", this.containerName, "bash", "-lc", command];
+    return ["exec", "-i", "-w", this.workspacePath, this.containerName, "bash", "-lc", command];
   }
 
   private stdioArgs(command: string[], options: { cwd?: string; env?: Record<string, string> }): string[] {
     if (command.length === 0 || command.some((part) => !part)) throw new Error("stdio command must not be empty");
-    const cwd = options.cwd ?? CONTAINER_WORKSPACE_MOUNT;
-    if (cwd !== CONTAINER_WORKSPACE_MOUNT && !cwd.startsWith(`${CONTAINER_WORKSPACE_MOUNT}/`)) {
-      throw new Error("stdio cwd must be inside /workspace");
+    const cwd = options.cwd ?? this.workspacePath;
+    if (cwd !== this.workspacePath && !cwd.startsWith(`${this.workspacePath}/`)) {
+      throw new Error(`stdio cwd must be inside ${this.workspacePath}`);
     }
     const env = Object.entries(options.env ?? {}).flatMap(([key, value]) => {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`invalid environment variable name: ${key}`);

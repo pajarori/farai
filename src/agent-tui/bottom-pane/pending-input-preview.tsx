@@ -1,12 +1,12 @@
-import { useTerminalDimensions } from "@opentui/solid";
 import { For, Show, createMemo, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { truncateLine } from "../renderers";
 import { COLOR } from "../theme";
+import { useTuiDimensions } from "../context/terminal";
 
 export function PendingInputPreview(props: { maxRows?: number }): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const rows = createMemo(() => pendingInputPreviewRows(
     tui.store.snapshot.pendingSteers.map((item) => item.text),
     tui.store.snapshot.queuedPrompts.map((item) => item.text),

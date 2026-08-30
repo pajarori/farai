@@ -13,7 +13,8 @@ import type {
   Finding,
   MemoryItem,
   PendingSteerInput,
-  QueuedUserInput
+  QueuedUserInput,
+  UsageSummary
 } from "../types";
 import type { PendingUserInput, UserInputAnswer } from "../types";
 import type { AgentRuntime } from "../agent-core/runtime";
@@ -25,7 +26,7 @@ import type { ServiceStatus } from "../agent-tools/services/types";
 import { sessionDisplayName } from "../session-title";
 import { serviceRegistry } from "../agent-tools/services/registry";
 import { proxyFlowDetailFromMcpInspect, proxyFlowsFromMcpTrafficSummary, readProxyFlowDetail, readProxyFlows, type ProxyFlowDetail, type ProxyFlowQuery, type ProxyFlowSummary } from "../agent-tools/services/mitmproxy/flows";
-import { callMcpServerTool, listMcpServerStatuses, refreshMcpTools, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
+import { callMcpServerTool, listMcpServerStatuses, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
 import type { ModelChoiceInfo } from "../agent-core/model-choices";
 import { modelChoicesFromCatalog } from "../agent-core/model-choices";
 import { buildModelCatalog } from "../agent-core/model-catalog";
@@ -138,7 +139,9 @@ export interface TuiRuntimePort {
   listSessionItems(): Promise<SessionListItem[]>;
   listAgentThreads(sessionId: string): Promise<AgentThreadSummary[]>;
   loadSession(id: string): Promise<Session>;
+  loadUsageSummary(sessionId: string): Promise<UsageSummary>;
   createSession(): Promise<Session>;
+  discardSessionIfEmpty(id: string): Promise<boolean>;
   updateSession(id: string, patch: SessionPatch): Promise<Session>;
   forkSession(id: string, title?: string): Promise<Session>;
   archiveSession(id: string): Promise<Session>;
@@ -434,11 +437,13 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     },
     async listAgentThreads(sessionId) { return summarizeAgentThreads(store, sessionId); },
     async loadSession(id) { return runtime.loadSession(id); },
+    async loadUsageSummary(sessionId) { return store.usageSummaryTree(sessionId); },
     async createSession() {
       const session = await runtime.createSession();
 
       return session;
     },
+    async discardSessionIfEmpty(id) { return runtime.discardSessionIfEmpty(id); },
     async updateSession(id, patch) { return runtime.updateSession(id, patch); },
     async forkSession(id, title) { return runtime.forkSession(id, title); },
     async archiveSession(id) { return runtime.archiveSession(id); },
@@ -483,7 +488,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       if (activeSessionId) {
         const session = runtime.loadSession(activeSessionId);
         try {
-          await refreshMcpTools({ workspace: session.workspace, configWorkspace: runtime.workspace, session, includeResources: false });
+          await runtime.refreshMcp(session);
           let mcpResult: unknown;
           try {
             mcpResult = await callMcpServerTool({

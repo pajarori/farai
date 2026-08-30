@@ -1,9 +1,9 @@
 import { Show, createMemo, type JSX } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
 import type { TimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
 import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
+import { useTuiDimensions } from "../../context/terminal";
 import { useTuiStore } from "../../context/store";
 import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
@@ -13,11 +13,12 @@ import { parseReasoning } from "../../reasoning";
 type ReasoningRowProps = {
   row: Extract<TimelineRow, { kind: "thinking" }>;
   streamedReasoning?: string | undefined;
+  animated?: boolean | undefined;
 };
 
 export function ReasoningRow(props: ReasoningRowProps): JSX.Element {
   const tui = useTuiStore();
-  const dims = useTerminalDimensions();
+  const dims = useTuiDimensions();
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const content = createMemo(() => props.streamedReasoning === undefined
     ? { title: props.row.title, body: props.row.body }
@@ -27,7 +28,7 @@ export function ReasoningRow(props: ReasoningRowProps): JSX.Element {
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1 }}>
       <box style={{ flexDirection: "row", flexShrink: 0 }} {...toggleClick}>
-        <TranscriptMarker color={COLOR.dim} spinning={props.row.streaming} />
+        <TranscriptMarker color={COLOR.dim} spinning={props.row.streaming} animated={props.animated} />
         <text fg={COLOR.dim}>{label()}</text>
       </box>
       <Show when={expanded() && content().body.trim()}>

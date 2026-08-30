@@ -59,7 +59,7 @@ export const notebookEditTool: ToolDefinition = {
       }
     }
     writeNotebookAtomically(path, `${JSON.stringify(notebook, null, 1)}\n`);
-    context.fileState?.invalidate(context.session.id, `/workspace/${requested.replace(/^\.\//, "")}`);
+    context.fileState?.invalidate(context.session.id, `${context.executionBackend?.workspacePath ?? "/workspace"}/${requested.replace(/^\.\//, "")}`);
     return { ok: true, summary: `${operation} at cell ${index}`, output: `${requested}: ${notebook.cells.length} cells` };
   }
 };

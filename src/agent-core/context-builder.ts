@@ -355,11 +355,14 @@ export function workspaceRelativeReference(workspace: string, value: string): st
   const normalized = normalize(value.trim());
   if (!normalized) return undefined;
   const containerPrefix = `${normalize("/workspace")}/`;
+  const worktreeMatch = normalized.match(/^[/\\]worktrees[/\\][^/\\]+[/\\](.+)$/);
   const absolute = normalized.startsWith(containerPrefix)
     ? normalize(join(workspace, normalized.slice(containerPrefix.length)))
-    : isAbsolute(normalized)
-      ? normalized
-      : normalize(join(workspace, normalized.replace(/^\/+/, "")));
+    : worktreeMatch
+      ? normalize(join(workspace, worktreeMatch[1]!))
+      : isAbsolute(normalized)
+        ? normalized
+        : normalize(join(workspace, normalized.replace(/^\/+/, "")));
   const rel = relative(workspace, absolute);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
   return rel;
