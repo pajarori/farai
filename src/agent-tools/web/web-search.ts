@@ -12,9 +12,9 @@ type ProviderAttempt = { provider: SearchProvider; search: () => Promise<SearchH
 const MAX_SEARCH_RESPONSE_BYTES = 4 * 1024 * 1024;
 const SEARCH_HEADERS = { "user-agent": "Mozilla/5.0 (compatible; Farai/0.1; +https://github.com/pajarori/farai)", accept: "text/html" };
 
-export const webSearchTool: ToolDefinition = {
-  name: "web_search",
-  description: "Search the current public web and return cited titles, URLs, and snippets. Use this for discovery; use web_fetch to read a result.",
+export const internetSearchTool: ToolDefinition = {
+  name: "internet_search",
+  description: "Search the current public internet for a query and return ranked result titles, URLs, snippets, and source attribution. Use this for discovery and time-sensitive research; select a result and call internet_fetch to read it, rather than constructing search-engine result URLs manually.",
   inputSchema: {
     type: "object",
     required: ["query"],

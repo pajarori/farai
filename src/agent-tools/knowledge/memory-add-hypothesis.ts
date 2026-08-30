@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const memoryAddHypothesisTool: ToolDefinition = {
   name: "memory_add_hypothesis",
-  description: "Store a working hypothesis for the current target/session.",
+  description: "Store a keyed working hypothesis and confidence level in the current session memory. Use this for a testable explanation that should guide later investigation; use campaign_hypothesis when operating inside a persistent campaign workflow.",
   inputSchema: {
     type: "object",
     required: ["key", "text"],

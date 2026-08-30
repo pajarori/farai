@@ -5,7 +5,7 @@ import { campaignIdFor, requireCampaignStore } from "./shared";
 
 export const campaignAssetTool: ToolDefinition = {
   name: "campaign_asset",
-  description: "Upsert an asset in the campaign attack-surface graph.",
+  description: "Create or update one canonical asset in the attached campaign's attack-surface graph, including type, parent relationship, technologies, metadata, and confidence. Use stable canonical identifiers so repeated discoveries update the same asset instead of creating duplicates.",
   inputSchema: { type: "object", required: ["canonical", "kind"], properties: { campaignId: { type: "string" }, canonical: { type: "string" }, kind: { type: "string" }, parentId: { type: "string" }, technologies: { type: "array", items: { type: "string" } }, metadata: { type: "object" }, confidence: { type: "number" } } },
   mutates: true,
   timeoutMs: 5_000,

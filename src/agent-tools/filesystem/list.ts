@@ -5,7 +5,7 @@ import { containerListFilesRecursive } from "./container-fs";
 
 export const fsListTool: ToolDefinition = {
   name: "fs_list",
-  description: "List workspace files recursively with optional path and limit. Runs inside the Kali container.",
+  description: "Recursively list file paths beneath a workspace directory, excluding Farai state and dependency trees, with a bounded result count. Use this to discover repository structure; use fs_read to inspect one file or list only one directory level.",
   inputSchema: {
     type: "object",
     properties: { path: { type: "string" }, limit: { type: "number" } }

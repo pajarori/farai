@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const campaignCreateTool: ToolDefinition = {
   name: "campaign_create",
-  description: "Create and attach a pentest or bug bounty campaign.",
+  description: "Create a persistent pentest, bug-bounty, CTF, or lab campaign for the active workspace and attach the current session to it. Use a campaign when assets, observations, hypotheses, experiments, and findings must be shared across sessions.",
   inputSchema: {
     type: "object",
     required: ["name", "kind"],

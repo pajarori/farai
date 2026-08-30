@@ -11,7 +11,7 @@ type Notebook = { cells: NotebookCell[]; metadata?: Record<string, unknown>; nbf
 
 export const notebookEditTool: ToolDefinition = {
   name: "notebook_edit",
-  description: "Insert, replace, or delete a Jupyter notebook cell while preserving notebook and cell metadata.",
+  description: "Insert, replace, or delete one Jupyter notebook cell by zero-based index while preserving notebook structure and existing cell metadata. Use this instead of treating an .ipynb file as plain text; it edits cells but does not execute the notebook.",
   inputSchema: {
     type: "object",
     required: ["path", "operation", "index"],

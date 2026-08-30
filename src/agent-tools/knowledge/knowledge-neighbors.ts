@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const knowledgeNeighborsTool: ToolDefinition = {
   name: "knowledge_neighbors",
-  description: "Traverse authoritative cross-reference edges of a taxonomy node (CVE has_weakness CWE, CAPEC exploits_weakness CWE, CAPEC maps_to_technique ATT&CK, CWE child_of CWE, ATT&CK sub_technique_of / in_tactic). Deterministic and authoritative — prefer this over guessing relationships.",
+  description: "Traverse deterministic incoming or outgoing taxonomy relationships for an exact node id, including CVE-to-CWE, CAPEC-to-CWE, CAPEC-to-ATT&CK, hierarchy, sub-technique, and tactic edges. Resolve uncertain names with knowledge_resolve first instead of guessing graph relationships.",
   inputSchema: {
     type: "object",
     required: ["node_id"],

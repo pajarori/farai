@@ -5,7 +5,7 @@ import { priority } from "./shared";
 
 export const todoAddTool: ToolDefinition = {
   name: "todo_add",
-  description: "Add an actionable todo item for the current session or turn.",
+  description: "Create one concrete, actionable todo for the current session with an optional priority. Use todos to track multi-step work that must persist across turns; do not add vague status notes or duplicate an existing item.",
   inputSchema: {
     type: "object",
     required: ["text"],

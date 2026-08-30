@@ -9,9 +9,9 @@ import { backend } from "../shared/backend";
 
 const MAX_FETCH_BYTES = 8 * 1024 * 1024;
 
-export const webFetchTool: ToolDefinition = {
-  name: "web_fetch",
-  description: "Fetch a URL and extract readable HTML, text, JSON, or PDF content. This is a research reader, not a replacement for exact protocol testing with http_request.",
+export const internetFetchTool: ToolDefinition = {
+  name: "internet_fetch",
+  description: "Retrieve one public URL and extract bounded readable content from HTML, plain text, JSON, or PDF responses. Use this to read research sources found with internet_search; it does not execute page JavaScript, preserve browser state, or replace exact protocol testing with http_request.",
   inputSchema: {
     type: "object",
     required: ["url"],

@@ -18,7 +18,7 @@ function payloadFrom(value: string): string | undefined {
 
 export const callbackOastTool: ToolDefinition = {
   name: "callback_oast",
-  description: "Start a public Interactsh OAST session and return a unique callback payload for blind-vulnerability testing. Poll the returned processId with session_poll.",
+  description: "Start a public Interactsh out-of-band session and return unique callback domains for authorized blind SSRF, XXE, command-injection, or similar interaction tests. Trigger the payload on the target, then poll the returned process with session_poll for DNS or HTTP interactions.",
   inputSchema: { type: "object", properties: { yieldMs: { type: "number" } } },
   mutates: true,
   timeoutMs: 15_000,

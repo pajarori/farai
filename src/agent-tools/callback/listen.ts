@@ -17,7 +17,7 @@ function asPort(value: unknown): number {
 export const callbackListenTool: ToolDefinition = {
   name: "callback_listen",
   description:
-    "Start a raw TCP listener on the HOST machine (not the Kali container) using nc -l <port> — for receiving reverse shells/callbacks when the lab/CTF VPN runs on the host. Call callback_host_info first to pick a real reachable LHOST. Returns a processId pollable with session_poll (send commands via its input once a shell connects) and stoppable with callback_stop or session_stop.",
+    "Start a raw TCP listener on the host machine for reverse shells or callbacks that must traverse the host's lab VPN. Choose LHOST with callback_host_info first; poll the returned process with session_poll, send shell input through that poll tool, and stop it with callback_stop or session_stop.",
   inputSchema: {
     type: "object",
     required: ["port"],

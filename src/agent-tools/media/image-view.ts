@@ -9,7 +9,7 @@ const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 export const imageViewTool: ToolDefinition = {
   name: "image_view",
-  description: "Inspect a local workspace image with the active multimodal model. Returns dimensions, MIME information, OCR text when available, and the image itself.",
+  description: "Load a PNG, JPEG, GIF, or WebP image from the active workspace for visual inspection by the multimodal model, returning format, dimensions, OCR text when available, and the image attachment. Use this for existing local images, not remote URLs or PDF pages.",
   inputSchema: {
     type: "object",
     required: ["path"],

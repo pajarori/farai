@@ -13,6 +13,6 @@ description: How to search for and validate public exploits with the exploit_sea
 - Prefer the smallest, most targeted PoC over a fully-weaponized Metasploit module when you just
   need to confirm a vulnerability exists — easier to reason about and adapt if it doesn't work
   out of the box.
-- If no local exploit-db entry matches, fall back to `web_search`/`web_fetch` for the CVE/product
+- If no local exploit-db entry matches, fall back to `internet_search`/`internet_fetch` for the CVE/product
   name — public writeups often show the exact working payload for CTF-style intentionally
   vulnerable services (which are frequently older/unpatched versions on purpose).

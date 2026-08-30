@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const notesAddTool: ToolDefinition = {
   name: "notes_add",
-  description: "Attach a structured note to the current session.",
+  description: "Attach a durable free-form note with optional tags to the current session. Use this for important context, decisions, credentials, or observations that should survive later turns but are not formal evidence, hypotheses, or failed attempts.",
   inputSchema: {
     type: "object",
     required: ["text"],

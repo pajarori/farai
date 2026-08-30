@@ -11,7 +11,7 @@ const MAX_RESOURCE_IMAGES = 8;
 
 export const mcpResourceListTool: ToolDefinition = {
   name: "mcp_resource_list",
-  description: "List resources exposed by configured MCP servers for this session.",
+  description: "List readable resources exposed by MCP servers configured for the current session, optionally filtering by exact server name. Use this to discover resource URIs and metadata before calling mcp_resource_read; it does not list or invoke MCP tools.",
   inputSchema: { type: "object", properties: { server: { type: "string" } }, additionalProperties: false },
   mutates: false,
   timeoutMs: 90_000,
@@ -55,7 +55,7 @@ export const mcpResourceListTool: ToolDefinition = {
 
 export const mcpResourceReadTool: ToolDefinition = {
   name: "mcp_resource_read",
-  description: "Read one resource from a configured MCP server by exact URI.",
+  description: "Read one MCP resource using the exact server name and URI returned by mcp_resource_list. Returns bounded text and supported image attachments; use the server's callable MCP tool instead when an operation rather than a resource read is required.",
   inputSchema: { type: "object", required: ["server", "uri"], properties: { server: { type: "string" }, uri: { type: "string" } }, additionalProperties: false },
   mutates: false,
   timeoutMs: 90_000,

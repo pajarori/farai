@@ -12,7 +12,7 @@ function stringArray(value: unknown): string[] {
 
 export const campaignTestAttemptTool: ToolDefinition = {
   name: "campaign_test",
-  description: "Create or update one reproducible campaign experiment with a baseline, mutation, oracle, and evidence.",
+  description: "Create a reproducible campaign experiment, or update an existing attempt by attemptId, with target, method, baseline, mutation, success oracle, observation, status, evidence level, and evidence links. Use this to formalize verification before campaign_verify.",
   inputSchema: {
     type: "object",
     required: ["title", "target", "method", "baseline", "mutation", "oracle"],

@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const evidenceSaveTool: ToolDefinition = {
   name: "evidence_save",
-  description: "Save manual evidence text to the session evidence store.",
+  description: "Save manually supplied text as durable session evidence with a descriptive title and return its evidence id. Use this for concrete outputs or observations that support a finding; use notes_add for context that is not evidentiary.",
   inputSchema: {
     type: "object",
     required: ["title", "content"],

@@ -99,7 +99,7 @@ export function normalizeSubdomainNames(values: string[], domain: string): strin
 
 export const subdomainEnumTool: ToolDefinition = {
   name: "subdomain_enum",
-  description: "enumerate subdomains once across independent passive sources with structured output, suffix validation, deduplication, and isolated source failures; use this directly for subdomain, passive DNS, CT, and asset discovery instead of tool_search or ad-hoc curl/amass loops",
+  description: "Enumerate subdomains for a registrable domain across independent passive sources, then validate the suffix, deduplicate names, and report each source failure separately. Use this for passive DNS, certificate-transparency, and initial asset discovery without writing ad-hoc curl or amass loops.",
   inputSchema: {
     type: "object",
     required: ["domain"],

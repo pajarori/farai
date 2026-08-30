@@ -1,6 +1,6 @@
 import { Show, onCleanup, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
-import { useExit } from "../context/exit";
+import { useExit, useExiting } from "../context/exit";
 import { ComposerProvider } from "../context/composer";
 import { registerCommands } from "../command-registry";
 import { defineDefaultCommands } from "../commands";
@@ -16,6 +16,7 @@ import { useTuiDimensions } from "../context/terminal";
 export function AppShell(): JSX.Element {
   const tui = useTuiStore();
   const exit = useExit();
+  const exiting = useExiting();
   const dims = useTuiDimensions();
   const centerFrame = () => tui.store.ui.centerSurfaceStack.at(-1);
   const chatActive = () => !centerFrame() && tui.store.ui.activeMainTab === "chat";
@@ -60,7 +61,9 @@ export function AppShell(): JSX.Element {
 
   return (
     <ComposerProvider>
-      <KeyboardController />
+      <Show when={!exiting()}>
+        <KeyboardController />
+      </Show>
       <box
         width={dims().width}
         height={dims().height}
@@ -81,10 +84,25 @@ export function AppShell(): JSX.Element {
             {(surface) => <CenterSurfaceView frame={surface} />}
           </Show>
         </box>
-        <BottomPane />
+        <Show when={!exiting()} fallback={<ExitStatus />}>
+          <BottomPane />
+        </Show>
       </box>
     </ComposerProvider>
   );
+}
+
+function ExitStatus(): JSX.Element {
+  const dims = useTuiDimensions();
+  return (
+    <box id="exit-status" style={{ height: 2, flexShrink: 0, paddingTop: 1 }}>
+      <text fg={COLOR.dim}>{exitStatusText(dims().width)}</text>
+    </box>
+  );
+}
+
+export function exitStatusText(width: number): string {
+  return width >= 48 ? "• exiting farai... stopping runtime services" : "• exiting farai...";
 }
 
 function MainTabs(): JSX.Element {

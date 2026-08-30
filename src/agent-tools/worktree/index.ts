@@ -5,7 +5,7 @@ const render = (result: ToolResult): string => result.output ?? result.summary;
 
 export const worktreeEnterTool: ToolDefinition = {
   name: "worktree_enter",
-  description: "Create or re-enter an isolated Git worktree under .farai/worktrees and make it the active workspace for this session. Existing workspace-bound services are reset before switching.",
+  description: "Create or re-enter an isolated Git worktree beneath .farai/worktrees and switch the current session's active workspace to it. Use this to isolate risky or parallel code changes; workspace-bound services are reset during the switch, and branch is optional for detached operation.",
   inputSchema: {
     type: "object",
     required: ["name"],
@@ -37,7 +37,7 @@ export const worktreeEnterTool: ToolDefinition = {
 
 export const worktreeExitTool: ToolDefinition = {
   name: "worktree_exit",
-  description: "Return the session to the main workspace while preserving the isolated worktree by default. Set remove=true to remove it only after Farai confirms it is clean and all workspace-bound services are stopped.",
+  description: "Switch the current session from its isolated worktree back to the main workspace, preserving the worktree by default. Set remove=true only when the worktree is clean and no workspace-bound services remain; uncommitted or active work prevents removal.",
   inputSchema: {
     type: "object",
     properties: {

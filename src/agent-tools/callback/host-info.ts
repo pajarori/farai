@@ -24,7 +24,7 @@ export function rankInterfaces(all: NodeJS.Dict<NetworkInterfaceInfo[]> = networ
 export const callbackHostInfoTool: ToolDefinition = {
   name: "callback_host_info",
   description:
-    "List the host machine's network interfaces ranked by likelihood of being reachable from a VPN-connected lab/CTF target (tun/utun/tailscale/wg interfaces ranked first). Call this before setting a reverse shell LHOST — never infer LHOST from inside the Kali container, its network namespace is not the host/VPN namespace.",
+    "List host-machine network interfaces and addresses ranked by likelihood of being reachable from a VPN-connected lab or CTF target, prioritizing tunnel interfaces. Use this before choosing a reverse-shell LHOST because the Kali container has a different network namespace from the host VPN.",
   inputSchema: { type: "object", properties: {} },
   mutates: false,
   timeoutMs: 5_000,

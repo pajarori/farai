@@ -16,7 +16,7 @@ function laneForCategory(category: string): CampaignNextAction["lane"] {
 
 export const campaignNextActionTool: ToolDefinition = {
   name: "campaign_next_action",
-  description: "Choose the next pentest lane using campaign novelty, evidence gaps, confidence, and estimated cost.",
+  description: "Select one recommended next campaign lane and bounded task from current assets, open hypotheses, evidence gaps, prior attempts, confidence, novelty, and estimated cost. This is a deterministic prioritization aid; it does not execute the selected work.",
   inputSchema: { type: "object", required: [], properties: { campaignId: { type: "string" } } },
   mutates: false,
   timeoutMs: 5_000,

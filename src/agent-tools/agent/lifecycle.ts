@@ -76,7 +76,7 @@ const agentResultRenderer = (result: ToolResult): string => result.output ?? res
 
 export const agentSpawnTool: ToolDefinition = {
   name: "agent_spawn",
-  description: "Start a subagent. Attached waits for its result; detached lets it continue independently in the background.",
+  description: "Start a child agent for one concrete, bounded task, optionally restricting its lane, tools, or model. Attached mode waits for the result; detached mode returns immediately so the parent can continue independent work and later inspect it with agent_list or agent_wait.",
   inputSchema: { type: "object", required: ["prompt"], properties: spawnProperties, additionalProperties: false },
   mutates: true,
   timeoutMs: Number.POSITIVE_INFINITY,
@@ -89,7 +89,7 @@ export const agentSpawnTool: ToolDefinition = {
 
 export const agentListTool: ToolDefinition = {
   name: "agent_list",
-  description: "List child agents owned by this session with their lifecycle state.",
+  description: "List every child agent owned by the current session with its id, title, mode, lane, and current lifecycle state. Use the returned session ids with agent_wait, agent_message, agent_followup, agent_interrupt, or agent_close.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   mutates: false,
   timeoutMs: 10_000,
@@ -102,7 +102,7 @@ export const agentListTool: ToolDefinition = {
 
 export const agentWaitTool: ToolDefinition = {
   name: "agent_wait",
-  description: "Wait until any selected child agent reaches a terminal or idle state. Returns all selected states on timeout.",
+  description: "Wait until any selected child agent becomes idle or terminal, or until the bounded timeout expires, then return the state of all selected agents. Use this for synchronization; it neither sends instructions nor starts another child turn.",
   inputSchema: { type: "object", properties: { sessionIds: { type: "array", items: { type: "string" } }, timeoutSeconds: { type: "number", minimum: 0, maximum: 60 } }, additionalProperties: false },
   mutates: false,
   timeoutMs: 65_000,
@@ -121,7 +121,7 @@ export const agentWaitTool: ToolDefinition = {
 
 export const agentMessageTool: ToolDefinition = {
   name: "agent_message",
-  description: "Send steering text to a child agent that is currently running. This does not start a new child turn.",
+  description: "Send additional steering or constraints to a child agent during its active turn. This does not create a new turn and cannot resume an idle child; use agent_followup for a new task after the child becomes idle.",
   inputSchema: { type: "object", required: ["sessionId", "message"], properties: { sessionId: { type: "string" }, message: { type: "string" } }, additionalProperties: false },
   mutates: true,
   timeoutMs: 10_000,
@@ -142,7 +142,7 @@ export const agentMessageTool: ToolDefinition = {
 function followupTool(): ToolDefinition {
   return {
     name: "agent_followup",
-    description: "Give an idle child agent a new bounded task, preserving its model, lane, tool scope, and conversation context.",
+    description: "Start a new bounded turn on an idle child agent while preserving its conversation, model, lane, and tool scope. Use agent_message for steering during an active turn and agent_spawn when a separate child context is needed.",
     inputSchema: { type: "object", required: ["sessionId", "prompt"], properties: { sessionId: { type: "string" }, prompt: { type: "string" }, mode: { type: "string", enum: ["attached", "detached"] } }, additionalProperties: false },
     mutates: true,
     timeoutMs: Number.POSITIVE_INFINITY,
@@ -161,7 +161,7 @@ export const agentFollowupTool = followupTool();
 
 export const agentInterruptTool: ToolDefinition = {
   name: "agent_interrupt",
-  description: "Interrupt the active turn of a child agent without archiving its session.",
+  description: "Cancel a child agent's currently active turn while preserving the child session for later follow-up. Use this when current work should stop but its context remains useful; use agent_close to terminate work and archive the child.",
   inputSchema: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" }, reason: { type: "string" } }, additionalProperties: false },
   mutates: true,
   timeoutMs: 15_000,
@@ -178,7 +178,7 @@ export const agentInterruptTool: ToolDefinition = {
 
 export const agentCloseTool: ToolDefinition = {
   name: "agent_close",
-  description: "Stop outstanding work for a child agent and archive its session.",
+  description: "Stop any outstanding child-agent work and archive that child session. Use this when the child is no longer needed; use agent_interrupt when only the current turn should stop and future follow-up may still be useful.",
   inputSchema: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string" } }, additionalProperties: false },
   mutates: true,
   timeoutMs: 30_000,

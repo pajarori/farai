@@ -117,7 +117,7 @@ const portScanSchema = {
 
 export const portScanTool: ToolDefinition = {
   name: "port_scan",
-  description: "Scan for open ports with Nmap (-Pn -vv), including service/version detection by default.",
+  description: "Discover open TCP ports on one host or network target with Nmap using host-discovery bypass and verbose output. Service versions and default scripts run unless versionDetection=false; use shell_exec for custom Nmap flags, UDP scans, or specialized NSE workflows.",
   inputSchema: portScanSchema,
   mutates: false,
   timeoutMs: 300_000,
@@ -130,6 +130,6 @@ export const portScanTool: ToolDefinition = {
 export const nmapScanTool: ToolDefinition = {
   ...portScanTool,
   name: "nmap_scan",
-  description: "Compatibility alias for port_scan: Nmap scan (-Pn -vv) with service/version detection.",
+  description: "Compatibility alias for port_scan with the same target and versionDetection behavior. Prefer port_scan for new work; use shell_exec when the task requires custom Nmap flags, port ranges, UDP, or specialized NSE scripts.",
   run: (args, context) => runPortScan(args, context, "nmap_scan")
 };

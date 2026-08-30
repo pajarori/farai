@@ -9,7 +9,7 @@ When a target service speaks something other than plain HTTP (a legacy or custom
 e.g. LPD, a proprietary binary protocol, etc.), trial-and-error against the full exploit is slow
 and confusing. Work bottom-up instead:
 
-1. **read the spec first.** look up the RFC or protocol documentation (`web_search`, `web_fetch`, or `http_request`)
+1. **read the spec first.** look up the RFC or protocol documentation (`internet_search`, `internet_fetch`, or `http_request`)
    before writing any code — legacy protocols usually have a short, precise spec (e.g. RFC 1179
    for LPD) that tells you the exact byte sequence/framing expected, far faster than guessing.
 2. **build the smallest possible reproducer.** write a minimal script that performs just the

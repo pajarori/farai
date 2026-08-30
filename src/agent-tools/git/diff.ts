@@ -6,7 +6,7 @@ import { safeWorkspacePath } from "../filesystem/shared";
 
 export const gitDiffTool: ToolDefinition = {
   name: "git_diff",
-  description: "Show git diff for the workspace.",
+  description: "Show unstaged changes in the active Git workspace, optionally limited to one path; set staged=true to inspect the index instead. Use git_status for the file-level overview and this tool for exact patch content.",
   inputSchema: {
     type: "object",
     properties: { path: { type: "string" }, staged: { type: "boolean" } }

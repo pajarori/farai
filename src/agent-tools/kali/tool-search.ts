@@ -283,7 +283,7 @@ export function parseKaliToolSearchOutput(raw: string): KaliToolSearchOutput {
 
 export const kaliToolSearchTool: ToolDefinition = {
   name: "kali_tool_search",
-  description: "search the actual installed Kali command inventory by capability, package description, official-style category, or exact binary name; use this instead of guessing commands or using tool_search for Kali binaries",
+  description: "Search the actual command inventory installed in Farai's Kali container by task, capability, package description, category, or exact executable name. Use this only when the preloaded command map is ambiguous, runtime packages changed, or an expected command failed; it does not execute the selected command.",
   inputSchema: {
     type: "object",
     required: ["query"],

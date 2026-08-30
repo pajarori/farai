@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const memoryMarkFailedTool: ToolDefinition = {
   name: "memory_mark_failed",
-  description: "Store a failed attempt so the agent does not repeat it.",
+  description: "Record a keyed failed attempt with its reason and optional command so future turns do not repeat the same ineffective path. Use this after a meaningful negative result, not for a transient transport error that should simply be retried differently.",
   inputSchema: {
     type: "object",
     required: ["key", "reason"],

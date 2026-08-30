@@ -5,7 +5,7 @@ import { campaignIdFor, compactDossier, loadCampaign, requireCampaignStore } fro
 
 export const campaignSearchTool: ToolDefinition = {
   name: "campaign_search",
-  description: "Search campaign memory or return a bounded target dossier for the next pentest action.",
+  description: "Search persistent campaign assets, observations, hypotheses, findings, and evidence, or return a bounded dossier when no query is supplied or dossier=true. Use this to recover target state before choosing new work and avoid rediscovering existing information.",
   inputSchema: { type: "object", required: [], properties: { campaignId: { type: "string" }, query: { type: "string" }, limit: { type: "number" }, dossier: { type: "boolean" } } },
   mutates: false,
   timeoutMs: 5_000,

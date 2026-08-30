@@ -3,7 +3,6 @@ import { canonicalToolName } from "../tool-names";
 
 export type CapabilitySelection = {
   direct: ToolDefinition[];
-  deferred: ToolDefinition[];
   reasons: Record<string, string>;
 };
 
@@ -67,19 +66,12 @@ export function selectCapabilities(input: {
     const direct = input.tools.filter((tool) => scope.has(canonicalToolName(tool.name))).sort((a, b) => a.name.localeCompare(b.name));
     return {
       direct,
-      deferred: [],
       reasons: Object.fromEntries(direct.map((tool) => [tool.name, "explicit subagent scope"]))
     };
   }
   const direct = [...input.tools].sort((a, b) => a.name.localeCompare(b.name));
   return {
     direct,
-    deferred: [],
     reasons: Object.fromEntries(direct.map((tool) => [tool.name, "available session capability"]))
   };
-}
-
-export function toolSchemaTokens(tools: ToolDefinition[]): number {
-  const payload = tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema }));
-  return Math.max(0, Math.ceil(Buffer.byteLength(JSON.stringify(payload), "utf8") / 4));
 }

@@ -3,7 +3,7 @@ import { assertObject, asString } from "../../utils";
 
 export const requestUserInputTool: ToolDefinition = {
   name: "request_user_input",
-  description: "Ask 1-3 questions with required defaults; timeout is 120 seconds.",
+  description: "Pause the turn to ask the user one to three concise questions, each with a required recommended default and optional choices. Use this only when missing input materially changes the result; if the user does not answer before the timeout, Farai automatically selects every recommended value.",
   inputSchema: {
     type: "object",
     required: ["questions"],

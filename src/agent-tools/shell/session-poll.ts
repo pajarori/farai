@@ -9,7 +9,7 @@ const MAX_SESSION_POLL_TIMEOUT_MS = MAX_YIELD_MS + 5_000;
 
 export const sessionPollTool: ToolDefinition = {
   name: "session_poll",
-  description: "Check on (and optionally send input to) a background command by jobId or legacy processId. Call with no input to just poll for more output.",
+  description: "Read new output from a background command, listener, OAST session, or detached job using its jobId or legacy processId. Optionally send input to interactive command sessions; omit input to poll without writing, and use agent_message instead for a running subagent.",
   inputSchema: {
     type: "object",
     properties: {

@@ -1,8 +1,13 @@
-import { createContext, useContext, type JSX } from "solid-js";
+import { createContext, createSignal, useContext, type Accessor, type JSX } from "solid-js";
 
 export type ExitHandler = () => Promise<void> | void;
 
-const ExitContext = createContext<ExitHandler>();
+type ExitContextValue = {
+  exit: ExitHandler;
+  exiting: Accessor<boolean>;
+};
+
+const ExitContext = createContext<ExitContextValue>();
 
 type ExitProviderProps = {
   handler: ExitHandler;
@@ -10,11 +15,25 @@ type ExitProviderProps = {
 };
 
 export function ExitProvider(props: ExitProviderProps): JSX.Element {
-  return <ExitContext.Provider value={props.handler}>{props.children}</ExitContext.Provider>;
+  const [exiting, setExiting] = createSignal(false);
+  let pending: Promise<void> | undefined;
+  const exit = (): Promise<void> => {
+    if (pending) return pending;
+    setExiting(true);
+    pending = Promise.resolve().then(() => props.handler());
+    return pending;
+  };
+  return <ExitContext.Provider value={{ exit, exiting }}>{props.children}</ExitContext.Provider>;
 }
 
 export function useExit(): ExitHandler {
-  const handler = useContext(ExitContext);
-  if (!handler) throw new Error("ExitProvider missing");
-  return handler;
+  const context = useContext(ExitContext);
+  if (!context) throw new Error("ExitProvider missing");
+  return context.exit;
+}
+
+export function useExiting(): Accessor<boolean> {
+  const context = useContext(ExitContext);
+  if (!context) throw new Error("ExitProvider missing");
+  return context.exiting;
 }

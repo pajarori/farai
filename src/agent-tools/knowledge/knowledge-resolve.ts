@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const knowledgeResolveTool: ToolDefinition = {
   name: "knowledge_resolve",
-  description: "Resolve a name, alias, or identifier to authoritative taxonomy nodes (CVE, CWE, CAPEC, ATT&CK technique). Use before traversing the graph with knowledge_neighbors.",
+  description: "Resolve a CVE, CWE, CAPEC, ATT&CK identifier, alias, or name fragment into matching authoritative taxonomy nodes. Use this to obtain exact node ids before knowledge_neighbors; it does not search narrative knowledge records or the public internet.",
   inputSchema: {
     type: "object",
     required: ["name"],

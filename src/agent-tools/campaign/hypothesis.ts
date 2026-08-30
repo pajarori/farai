@@ -5,7 +5,7 @@ import { campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 export const campaignHypothesisTool: ToolDefinition = {
   name: "campaign_hypothesis",
-  description: "Create or update a vulnerability hypothesis with its next verification test.",
+  description: "Create or update a campaign vulnerability hypothesis with rationale, confidence, supporting evidence, and one concrete next verification test. Use this for testable candidate explanations; it does not create or verify a finding.",
   inputSchema: { type: "object", required: ["title", "category", "rationale", "nextTest"], properties: { campaignId: { type: "string" }, assetId: { type: "string" }, title: { type: "string" }, category: { type: "string" }, rationale: { type: "string" }, nextTest: { type: "string" }, status: { type: "string" }, confidence: { type: "number" }, evidenceIds: { type: "array", items: { type: "string" } } } },
   mutates: true,
   timeoutMs: 5_000,

@@ -5,7 +5,7 @@ import { severity } from "./shared";
 
 export const reportAddFindingTool: ToolDefinition = {
   name: "report_add_finding",
-  description: "Create a structured finding draft.",
+  description: "Create a candidate security finding with target, severity, evidence links, impact, reproduction, and remediation fields. This drafts a finding but does not verify it; campaign findings require campaign_verify and reproducible evidence before being treated as confirmed.",
   inputSchema: {
     type: "object",
     required: ["title"],

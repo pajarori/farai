@@ -5,7 +5,7 @@ import { loadSkill } from "../../agent-skills/registry";
 
 export const skillLoadTool: ToolDefinition = {
   name: "skill_load",
-  description: "Load one exact agent skill or one supporting resource from that skill. Skills are focused workflows; use knowledge_search for reference facts and large security corpora.",
+  description: "Load the complete instructions for one exact skill from the available skill catalog, or read one supporting resource explicitly exposed by that skill. Use skills for prescribed workflows; use knowledge_search for reference facts and broad security corpora.",
   inputSchema: {
     type: "object",
     required: ["name"],

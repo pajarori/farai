@@ -185,7 +185,7 @@ function withBrowserSelector(schema: Record<string, unknown>): Record<string, un
 
 const browserContextTool: ToolDefinition = {
   name: "browser_context",
-  description: "Create, list, or close isolated named browser contexts.",
+  description: "Create, list, or close isolated browser contexts with independent cookies, storage, tabs, and navigation state. Create multiple named contexts for separate users or sessions, then pass the context name or id through the browser field of every other browser tool.",
   inputSchema: objectSchema({
     action: { type: "string", enum: ["create", "list", "close"] },
     name: { type: "string", description: "Unique context name." },
@@ -275,14 +275,14 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_navigate",
     operation: "browser_navigate",
-    description: "Navigate the browser to a URL and return the loaded page snapshot. Consume that snapshot directly instead of immediately calling browser_snapshot.",
+    description: "Navigate one browser context to a URL, wait for the page to load, and return its structured accessibility snapshot. Use the returned snapshot for immediate interaction instead of calling browser_snapshot again unless page state later changes.",
     inputSchema: objectSchema({ url: { type: "string", description: "URL to open." } }, ["url"]),
     mutates: true
   }),
   browserTool({
     name: "browser_snapshot",
     operation: "browser_snapshot",
-    description: "Capture the current page's structured accessibility snapshot when navigation output is missing, truncated, stale, or page state changed after interaction.",
+    description: "Capture the current page's structured accessibility tree and target references without navigating. Use this after dynamic page changes or when the last snapshot is missing, stale, or truncated; optionally bound depth, include element boxes, or save the snapshot to a file.",
     inputSchema: objectSchema({
       target: { type: "string", description: "Optional exact target reference or unique selector." },
       filename: { type: "string", description: "Optional file to save the snapshot instead of returning it." },
@@ -294,7 +294,7 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_find",
     operation: "browser_find",
-    description: "Search the current accessibility snapshot for text or a regular expression.",
+    description: "Search the current browser accessibility snapshot by case-insensitive text or regular expression and return matching target references. Use this to locate elements in a large snapshot before browser_click or browser_type; it does not perform an internet search.",
     inputSchema: objectSchema({
       text: { type: "string", description: "Case-insensitive text to find." },
       regex: { type: "string", description: "Regular expression to find; use either text or regex." }
@@ -304,7 +304,7 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_click",
     operation: "browser_click",
-    description: "Click an element identified from a browser snapshot.",
+    description: "Click an element using the exact target reference or unique selector from a current browser snapshot, with optional mouse button, modifiers, or double-click. Refresh the snapshot first if the reference may be stale.",
     inputSchema: objectSchema({
       element: { type: "string", description: "Human-readable description of the element." },
       target: { type: "string", description: "Exact snapshot target reference or unique selector." },
@@ -317,7 +317,7 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_fill_form",
     operation: "browser_fill_form",
-    description: "Fill multiple browser form fields in one operation.",
+    description: "Fill several browser form controls in one atomic operation using names, control types, snapshot refs, and values. Prefer this for complete forms; use browser_type for one editable field or when keystroke behavior matters.",
     inputSchema: objectSchema({
       fields: {
         type: "array",
@@ -339,7 +339,7 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_type",
     operation: "browser_type",
-    description: "Type text into an editable browser element.",
+    description: "Enter text into one editable element identified by a current snapshot target, optionally typing slowly or submitting afterward. Use browser_fill_form for multiple fields and browser_press_key for standalone keyboard actions.",
     inputSchema: objectSchema({
       element: { type: "string", description: "Human-readable description of the element." },
       target: { type: "string", description: "Exact snapshot target reference or unique selector." },
@@ -352,14 +352,14 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_press_key",
     operation: "browser_press_key",
-    description: "Press a key in the active browser page.",
+    description: "Send one keyboard key or character, such as Enter, Escape, Tab, or ArrowLeft, to the active page in a browser context. Use this for keyboard-driven interactions after focusing the appropriate element.",
     inputSchema: objectSchema({ key: { type: "string", description: "Key name or character, such as Enter or ArrowLeft." } }, ["key"]),
     mutates: true
   }),
   browserTool({
     name: "browser_wait_for",
     operation: "browser_wait_for",
-    description: "Wait for browser text to appear, disappear, or for a bounded time.",
+    description: "Wait in a browser context until specified text appears, specified text disappears, or a bounded number of seconds elapses. Use this for asynchronous UI state rather than repeatedly taking snapshots or inserting shell sleeps.",
     inputSchema: objectSchema({
       time: { type: "number", minimum: 0, description: "Seconds to wait." },
       text: { type: "string", description: "Text to wait for." },
@@ -370,7 +370,7 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_tabs",
     operation: "browser_tabs",
-    description: "List, create, close, or select persistent browser tabs.",
+    description: "List, create, close, or select persistent tabs within one browser context. Tab indexes are context-local; use separate browser_context instances when cookies or storage must also be isolated.",
     inputSchema: objectSchema({
       action: { type: "string", enum: ["list", "new", "close", "select"] },
       index: { type: "integer", minimum: 0 },
@@ -381,7 +381,7 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_network_requests",
     operation: "browser_network_requests",
-    description: "List requests observed by the browser since page navigation.",
+    description: "List network requests observed by one browser context since navigation, with optional URL filtering, static-resource inclusion, or file output. Use this to discover application requests and then inspect one entry with browser_network_request.",
     inputSchema: objectSchema({
       static: { type: "boolean", description: "Include successful static resources." },
       filter: { type: "string", description: "Optional URL regular expression." },
@@ -392,7 +392,7 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_network_request",
     operation: "browser_network_request",
-    description: "Read headers and body details for one browser-observed network request.",
+    description: "Read request headers, request body, response headers, or response body for one one-based entry returned by browser_network_requests. Use proxy_flow_get instead when investigating traffic captured outside the browser or requiring proxy correlation.",
     inputSchema: objectSchema({
       index: { type: "integer", minimum: 1, description: "One-based request index from browser_network_requests." },
       part: { type: "string", enum: ["request-headers", "request-body", "response-headers", "response-body"], description: "Optional request part to return." },

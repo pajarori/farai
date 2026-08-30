@@ -11,7 +11,6 @@ import { codegenTools } from "./codegen";
 import { callbackTools } from "./callback";
 import { campaignTools } from "./campaign";
 import { outputTools } from "./output/read";
-import { deferredTools } from "./deferred";
 import { lspTools } from "./lsp";
 import { browserTools } from "./browser";
 import { kaliTools } from "./kali";
@@ -45,8 +44,7 @@ export const baseTools: ToolDefinition[] = [
   ...interactionTools,
   ...mcpResourceTools,
   ...worktreeTools,
-  ...proxyTools,
-  ...deferredTools
+  ...proxyTools
 ];
 
 export function registerTool(tool: ToolDefinition): void {
@@ -70,7 +68,7 @@ export function listToolsForSession(session: Session): ToolDefinition[] {
   const tools = [...baseTools, ...listMcpTools(session)];
   assertUniqueTools(tools);
   const scoped = session.toolScope?.length ? new Set(session.toolScope.map(canonicalToolName)) : undefined;
-  return tools.filter((tool) => !scoped || scoped.has(tool.name) || tool.name === "tool_search" || tool.name === "tool_invoke");
+  return tools.filter((tool) => !scoped || scoped.has(tool.name));
 }
 
 function assertUniqueTools(tools: ToolDefinition[]): void {

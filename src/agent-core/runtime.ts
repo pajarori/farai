@@ -15,7 +15,7 @@ import { id, nowIso } from "../utils";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import { renderModelToolResultEnvelope } from "./context-builder";
 import { sanitizeToolOutput } from "../agent-tools/shared/output-sanitize";
-import { buildChatRequest, buildToolsPayload, ChatProviderPlanner, createChatProviderForSession, createPlannerForSessionAsync, PlannerHttpError, type ConversationEntry, type PlanStreamEvent, type PlannerAction, type PlannerInput, type PlannerProvider } from "./provider";
+import { buildChatRequest, ChatProviderPlanner, createChatProviderForSession, createPlannerForSessionAsync, PlannerHttpError, type ConversationEntry, type PlanStreamEvent, type PlannerAction, type PlannerInput, type PlannerProvider } from "./provider";
 import type { ChatProvider, ProviderToolDef } from "./provider/protocol";
 import { buildSystemPrompt } from "./provider/system-prompt";
 import { resolveContextWindow, resolveMaxOutputTokens, resolveMaxSteps, resolveMaxTurnMs } from "./model-registry";
@@ -38,7 +38,7 @@ import { SessionMailbox } from "./session-mailbox";
 import { mailboxInputText, queuedInputAction, SessionInputQueue, type QueuedInputAction } from "./session-input-queue";
 import { SessionMailboxDispatcher } from "./session-mailbox-dispatcher";
 import { JobManager } from "./jobs/manager";
-import { ContextEngine, formatContextManifest, mergeProviderToolCatalog, type ContextManifest, type ContextProjection, type ContextRequest } from "./context-engine";
+import { ContextEngine, formatContextManifest, type ContextManifest, type ContextProjection, type ContextRequest } from "./context-engine";
 import { FileStateCache } from "./file-state";
 import { projectConversationHistory } from "./history-projection";
 import { loadConfig, type FaraiConfig } from "./config";
@@ -62,8 +62,7 @@ import {
   ToolExecutionLease,
   toolConcurrencyKey,
   toolForExecution,
-  toolOperationTimeout,
-  toolSchedulingDefinition
+  toolOperationTimeout
 } from "./tool-execution-control";
 import { validateToolArgs } from "./tool-input-validation";
 import { normalizeToolResult } from "./tool-result-normalization";
@@ -105,8 +104,6 @@ const INTERNAL_META_STREAM_PREFIXES = [
   "my task",
   "according to my",
   "according to the",
-  "the tool search",
-  "tool_search",
   "there's no dedicated tool",
   "there is no dedicated tool",
   "there's no specific tool",
@@ -1998,8 +1995,7 @@ export class AgentRuntime {
         contextBudget: context.requestBudget,
         contextFragments: context.admitted,
         omittedContextFragments: context.omitted,
-        directTools: context.tools.direct,
-        deferredTools: context.tools.deferred
+        directTools: context.tools.direct
       } : {})
     };
   }
@@ -2201,8 +2197,7 @@ export class AgentRuntime {
   ): Promise<ToolActionOutcome> {
     const tool = getTool(action.tool, session);
     const scope = session.toolScope;
-    const isBridge = action.tool === "tool_search" || action.tool === "tool_invoke";
-    if (!tool || (scope && !scope.includes(action.tool) && !isBridge)) {
+    if (!tool || (scope && !scope.includes(action.tool))) {
       const text = tool
         ? `Tool ${action.tool} is out of scope for this subagent lane; use only: ${scope!.join(", ")}`
         : `Planner requested unknown tool: ${action.tool}`;
@@ -2650,7 +2645,7 @@ export class AgentRuntime {
     this.assertAcceptingWork();
     session = this.store.loadSession(session.id);
     let tool = toolForExecution(session, toolName);
-    let schedulingTool = toolSchedulingDefinition(tool, args, session);
+    let schedulingTool = tool;
     const workspaceTransition = isWorkspaceTransitionTool(schedulingTool);
     const gateSignal = signal
       ? AbortSignal.any([signal, this.shutdownController.signal])
@@ -2662,7 +2657,7 @@ export class AgentRuntime {
         async () => {
           session = this.store.loadSession(session.id);
           tool = toolForExecution(session, toolName);
-          schedulingTool = toolSchedulingDefinition(tool, args, session);
+          schedulingTool = tool;
           return await this.toolExecutionGate.run(
             toolConcurrencyKey(schedulingTool, session, session.workspace),
             schedulingTool.parallel,
@@ -2739,7 +2734,7 @@ export class AgentRuntime {
     const toolCall = this.store.loadToolCall(toolCallId);
     if (toolCall.sessionId !== session.id) throw new Error(`Tool call ${toolCallId} belongs to another session`);
     let tool = toolForExecution(session, toolCall.tool);
-    let schedulingTool = toolSchedulingDefinition(tool, toolCall.args, session);
+    let schedulingTool = tool;
     const workspaceTransition = isWorkspaceTransitionTool(schedulingTool);
     const turnId = owner?.turn.id ?? toolCall.turnId;
     const gateController = turnId ? this.registerTurnController(turnId) : undefined;
@@ -2753,7 +2748,7 @@ export class AgentRuntime {
         async () => {
           session = this.store.loadSession(session.id);
           tool = toolForExecution(session, toolCall.tool);
-          schedulingTool = toolSchedulingDefinition(tool, toolCall.args, session);
+          schedulingTool = tool;
           return await this.toolExecutionGate.run(
             toolConcurrencyKey(schedulingTool, session, session.workspace),
             schedulingTool.parallel,
@@ -2852,7 +2847,7 @@ export class AgentRuntime {
       executionBackend: this.executionBackend ?? this.containerBackend(session.workspace, session.id) as unknown as ToolExecutionBackend,
       availableTools: () => {
         lease.assertActive();
-        return listToolsForSession(session).filter((item) => item.name !== "tool_search" && item.name !== "tool_invoke");
+        return listToolsForSession(session);
       },
       requestUserInput: (input, signal) => this.requestUserInput(session, input, signal ?? deadline.signal),
       agentControl: {
@@ -2977,52 +2972,6 @@ export class AgentRuntime {
           }
           return { path: current.workspace, root: this.workspace, removed: remove };
         }
-      },
-      invokeTool: async (name, args) => {
-        lease.assertActive();
-        const canonicalName = canonicalToolName(name);
-        if (canonicalName === "tool_search" || canonicalName === "tool_invoke") throw new Error(`Deferred bridge recursion is not allowed: ${canonicalName}`);
-        const allowed = listToolsForSession(session).some((item) => item.name === canonicalName);
-        if (!allowed) throw new Error(`Tool ${canonicalName} is outside this session's scope`);
-        const target = getTool(canonicalName, session);
-        if (!target) throw new Error(`Unknown deferred tool: ${canonicalName}`);
-        const validationError = validateToolArgs(target.inputSchema, args);
-        if (validationError) throw new Error(`Invalid arguments for ${canonicalName}: ${validationError}`);
-        await this.fireHooks(session, "tool.pre", canonicalName, { tool: canonicalName, toolCallId: toolCall.id, args, deferred: true });
-        const { invokeTool: _invokeTool, ...nestedContext } = context;
-        const nestedDeadline = new ToolExecutionDeadline(target.name, target.timeoutMs, context.signal);
-        let nestedResult: ToolResult;
-        try {
-          nestedResult = await nestedDeadline.run(
-            () => target.run(args, { ...nestedContext, signal: nestedDeadline.signal, timeoutMs: toolOperationTimeout(target.timeoutMs) })
-          );
-          lease.assertActive();
-          await this.fireHooks(session, "tool.post", canonicalName, {
-            tool: canonicalName,
-            toolCallId: toolCall.id,
-            status: completedToolCallStatus(nestedResult),
-            ok: nestedResult.ok,
-            summary: nestedResult.summary,
-            deferred: true
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          await this.fireHooks(session, "tool.post", canonicalName, {
-            tool: canonicalName,
-            toolCallId: toolCall.id,
-            status: "error",
-            ok: false,
-            summary: message,
-            error: message,
-            timedOut: error instanceof ToolDeadlineError,
-            cancelled: nestedDeadline.signal.aborted && !(error instanceof ToolDeadlineError),
-            deferred: true
-          });
-          throw error;
-        } finally {
-          nestedDeadline.dispose();
-        }
-        return { ...nestedResult, metadata: { ...nestedResult.metadata, deferredTool: canonicalName } };
       },
       cancelJob: async (jobId) => {
         lease.assertActive();
@@ -3226,7 +3175,6 @@ export class AgentRuntime {
     let rendered: RenderedToolResult;
     try {
       result = this.boundToolOutput(session.id, toolCall, result);
-      this.loadDiscoveredProviderTools(session, result, turnId, messageId);
       if (result.evidence) {
         for (const evidence of result.evidence) {
           const saved = this.store.saveEvidence(evidence, result.output);
@@ -3346,29 +3294,6 @@ export class AgentRuntime {
     } catch {
       return false;
     }
-  }
-
-  private loadDiscoveredProviderTools(session: Session, result: ToolResult, turnId?: string, messageId?: string): void {
-    const rawNames = result.metadata?.loadedTools;
-    if (!Array.isArray(rawNames)) return;
-    const names = [...new Set(rawNames.map((name) => canonicalToolName(name)).filter(Boolean))];
-    if (names.length === 0) return;
-    const key = this.providerCatalogKey(session);
-    const cacheKey = `${session.id}:${key}`;
-    const previous = this.providerCatalogs.get(cacheKey) ?? this.loadProviderCatalog(session.id, key) ?? [];
-    const availableTools = listToolsForSession(session);
-    const selected = buildToolsPayload(names, availableTools);
-    const tools = mergeProviderToolCatalog(previous, selected, availableTools);
-    if (sameProviderToolCatalog(previous, tools)) return;
-    this.providerCatalogs.set(cacheKey, structuredClone(tools));
-    if (!turnId || !messageId) return;
-    this.store.addPart({
-      sessionId: session.id,
-      turnId,
-      messageId,
-      type: "provider_catalog",
-      payload: { key, tools } satisfies ProviderCatalogPayload
-    });
   }
 
   private settleBackgroundProcess(sessionId: string, processId: string, status: "done" | "error"): void {

@@ -9,7 +9,7 @@ type DispatchTask = { title: string; prompt: string; lane?: string; assetIds?: s
 
 export const campaignDispatchTool: ToolDefinition = {
   name: "campaign_dispatch",
-  description: "dispatch child workers with non-overlapping ownership claims. workers return evidence and candidate hypotheses, never confirmed findings. set background=true only when the parent can continue independently.",
+  description: "Dispatch one or more campaign subagents with explicit, non-overlapping ownership claims and optional specialist lanes. Workers may return evidence and candidate hypotheses but never confirmed findings; use background=true only when the parent has independent work to continue.",
   inputSchema: { type: "object", required: ["tasks"], properties: { campaignId: { type: "string" }, background: { type: "boolean" }, tasks: { type: "array", minItems: 1, items: { type: "object", required: ["title", "prompt"], properties: { title: { type: "string" }, prompt: { type: "string" }, lane: { type: "string" }, claim: { type: "string", description: "exclusive source, asset, hypothesis, or workflow slice owned by this worker; required when dispatching multiple workers" }, assetIds: { type: "array", items: { type: "string" } } } } } } },
   mutates: true,
   timeoutMs: Number.POSITIVE_INFINITY,

@@ -5,7 +5,7 @@ import { campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 export const campaignVerifyTool: ToolDefinition = {
   name: "campaign_verify",
-  description: "Move a candidate finding through verification, rejection, or duplicate status with explicit evidence, including independent cross-session verification.",
+  description: "Change a campaign finding's verification state using explicit evidence and a reproducible test attempt. Verified status requires a passed attempt with demonstrated impact or independent cross-session verification; use this only after report_add_finding has created the candidate.",
   inputSchema: { type: "object", required: ["findingId", "status"], properties: { campaignId: { type: "string" }, findingId: { type: "string" }, status: { type: "string" }, testAttemptId: { type: "string" }, evidenceIds: { type: "array", items: { type: "string" } }, duplicateOf: { type: "string" }, reproduction: { type: "string" }, impact: { type: "string" }, remediation: { type: "string" } } },
   mutates: true,
   timeoutMs: 5_000,

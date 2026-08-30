@@ -540,7 +540,6 @@ export type ToolContext = {
   onOutputChunk?: (chunk: string, stream: "stdout" | "stderr") => void;
   cancelJob?: (jobId: string) => Promise<BackgroundJob>;
   availableTools?: () => ToolDefinition[];
-  invokeTool?: (name: string, args: unknown) => Promise<ToolResult>;
   delegateSession?: (input: { title: string; prompt: string; lane?: string; tools?: string[]; model?: string; mode?: "attached" | "detached"; sessionId?: string; linkToolCall?: boolean }) => Promise<{ sessionId: string; response?: string; jobId?: string }>;
   agentControl?: AgentControl;
   worktreeControl?: WorktreeControl;

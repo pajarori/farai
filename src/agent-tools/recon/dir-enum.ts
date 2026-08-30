@@ -29,7 +29,7 @@ export function buildDirEnumCommand(url: string, wordlist: string): string {
 
 export const dirEnumTool: ToolDefinition = {
   name: "dir_enum",
-  description: "Run ffuf directory enumeration.",
+  description: "Enumerate hidden web paths with ffuf against a URL containing the FUZZ marker, using a supplied wordlist or the default common directory list. Use this for content discovery on an authorized target; use shell_exec when custom ffuf matchers, filters, recursion, headers, or multiple injection points are required.",
   inputSchema: {
     type: "object",
     required: ["url"],

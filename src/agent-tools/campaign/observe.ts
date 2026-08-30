@@ -5,7 +5,7 @@ import { campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 export const campaignObserveTool: ToolDefinition = {
   name: "campaign_observe",
-  description: "Record a structured, evidence-linked observation from a tool or manual investigation.",
+  description: "Record a structured campaign observation from a tool result or manual investigation, optionally linking it to an asset and session evidence. Use this for factual signals and discovered state; use campaign_hypothesis for an explanatory vulnerability claim that still needs testing.",
   inputSchema: { type: "object", required: ["kind", "value"], properties: { campaignId: { type: "string" }, assetId: { type: "string" }, kind: { type: "string" }, value: {}, confidence: { type: "number" }, source: { type: "string" }, evidenceIds: { type: "array", items: { type: "string" } }, status: { type: "string" } } },
   mutates: true,
   timeoutMs: 5_000,

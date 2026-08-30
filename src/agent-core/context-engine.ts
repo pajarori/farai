@@ -11,7 +11,7 @@ import { buildSystemPrompt } from "./provider/system-prompt";
 import { ContextBuilderCache, spotlightUntrusted, workspaceRelativeReference, type PlannerContextBlock } from "./context-builder";
 import type { KnowledgeQuery } from "../agent-knowledge/types";
 import { projectConversationHistory, type HistoryProjection } from "./history-projection";
-import { selectCapabilities, toolSchemaTokens } from "./capability-admission";
+import { selectCapabilities } from "./capability-admission";
 import { ContextSearchIndex } from "./context-index";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import { renderKaliCommandCatalog } from "./kali-command-catalog";
@@ -51,9 +51,7 @@ export type ContextManifest = {
   omitted: ContextDecision[];
   tools: {
     direct: string[];
-    deferred: string[];
     schemaTokens: number;
-    savedTokens: number;
   };
   history: {
     tokens: number;
@@ -115,11 +113,6 @@ export class ContextEngine {
     const selectedToolCatalog = buildToolsPayload(capabilities.direct.map((tool) => tool.name), input.availableTools);
     const toolCatalog = mergeProviderToolCatalog(input.advertisedTools, selectedToolCatalog, input.availableTools);
     const directToolNames = toolCatalog.map((tool) => tool.name);
-    const directToolSet = new Set(directToolNames);
-    const deferredToolNames = input.availableTools
-      .map((tool) => tool.name)
-      .filter((name) => !directToolSet.has(name) && name !== "tool_search" && name !== "tool_invoke")
-      .sort();
     const automaticBudget = autoCompactThreshold(input.contextWindow, input.maxOutputTokens);
     const requestBudget = input.maxInputTokens ? Math.min(automaticBudget, input.maxInputTokens) : automaticBudget;
     const history = projectConversationHistory(messages, {
@@ -130,7 +123,7 @@ export class ContextEngine {
       history.entries.push({ role: "user", text: input.userText.trim() });
       history.estimatedTokens = estimateProviderMessagesTokens(toProviderMessages(history.entries));
     }
-    const candidates = this.buildCandidates(input.session, query, activeJobs, deferredToolNames.length, input.contextWindow, input.extraBlocks ?? []);
+    const candidates = this.buildCandidates(input.session, query, activeJobs, input.contextWindow, input.extraBlocks ?? []);
     const admittedCandidates: ContextCandidate[] = [];
     const omitted: ContextDecision[] = [];
 
@@ -152,7 +145,6 @@ export class ContextEngine {
     }));
     const volatileContext = renderVolatileContext(admittedCandidates.filter((candidate) => !candidate.stable));
     const breakdown = breakdownFor(input.session, admittedCandidates, history, toolCatalog, input.systemInstruction);
-    const allSchemaTokens = toolSchemaTokens(input.availableTools.filter((tool) => !["tool_search", "tool_invoke"].includes(tool.name)));
     const schemaTokens = textTokens(JSON.stringify(toolCatalog));
     const manifest: ContextManifest = {
       contextWindow: input.contextWindow,
@@ -164,9 +156,7 @@ export class ContextEngine {
       omitted,
       tools: {
         direct: directToolNames,
-        deferred: deferredToolNames,
-        schemaTokens,
-        savedTokens: Math.max(0, allSchemaTokens - schemaTokens)
+        schemaTokens
       },
       history: {
         tokens: history.estimatedTokens,
@@ -192,7 +182,7 @@ export class ContextEngine {
     return this.assemble(input).manifest;
   }
 
-  private buildCandidates(session: Session, query: string, activeJobs: ReturnType<typeof activeBackgroundJobs>, deferredCount: number, contextWindow: number, extraBlocks: PlannerContextBlock[]): ContextCandidate[] {
+  private buildCandidates(session: Session, query: string, activeJobs: ReturnType<typeof activeBackgroundJobs>, contextWindow: number, extraBlocks: PlannerContextBlock[]): ContextCandidate[] {
     const candidates: ContextCandidate[] = [];
     const workspace = session.workspace || this.workspace;
     const recentPaths = recentWorkspacePaths(this.store, session.id);
@@ -240,7 +230,7 @@ export class ContextEngine {
       title: "Kali Capability Inventory",
       source: "Farai curated image manifest",
       content: [
-        "The curated Kali command map is preloaded here so exact available commands can be selected and called directly with shell_exec. The managed image installs only the manifest-selected packages and Farai runtime extras, records its actual PATH inventory at build time, and is rejected when its capability contract is stale or incomplete. Do not run which, command -v, tool_search, or kali_tool_search before a manifest-listed command. Prefer a purpose-built Farai tool when it covers the workflow. kali_tool_search is only a recovery path after an unexpected exit 127, runtime package changes, or genuine command ambiguity. Capabilities absent from this map are not part of the default image; choose an available alternative instead of assuming the full Kali distribution is installed.",
+        "The curated Kali command map is preloaded here so exact available commands can be selected and called directly with shell_exec. The managed image installs only the manifest-selected packages and Farai runtime extras, records its actual PATH inventory at build time, and is rejected when its capability contract is stale or incomplete. Do not run which, command -v, or kali_tool_search before a manifest-listed command. Prefer a purpose-built Farai tool when it covers the workflow. kali_tool_search is only a recovery path after an unexpected exit 127, runtime package changes, or genuine command ambiguity. Capabilities absent from this map are not part of the default image; choose an available alternative instead of assuming the full Kali distribution is installed.",
         renderKaliCommandCatalog()
       ].join("\n\n"),
       mandatory: true,
@@ -332,18 +322,6 @@ export class ContextEngine {
       }));
     }
 
-    if (deferredCount > 0) candidates.push(candidate({
-      id: "deferred-capabilities",
-      class: "capabilities",
-      title: "Deferred Capabilities",
-      source: "tool-registry",
-      content: `${deferredCount} deferred tools load through tool_search on the next step. Use tool_invoke only as a compatibility bridge.`,
-      mandatory: true,
-      stable: true,
-      priority: 95,
-      relevance: 1
-    }));
-
     for (const [index, block] of extraBlocks.entries()) {
       candidates.push(candidate({
         id: block.id ?? `ephemeral-${index}`,
@@ -394,7 +372,7 @@ export function formatContextManifest(manifest: ContextManifest): string {
   const rows = [
     `Projected request: ${manifest.estimatedTokens} / ${manifest.requestBudget} estimated tokens${manifest.overBudget ? " (over budget)" : ""}`,
     `History: ${manifest.history.tokens} tokens, ${manifest.history.entries} entries, ${manifest.history.receiptToolResults} receipts, ${manifest.history.omittedEntries} entries omitted`,
-    `Tools: ${manifest.tools.direct.length} direct, ${manifest.tools.deferred.length} deferred, ${manifest.tools.schemaTokens} schema tokens, ${manifest.tools.savedTokens} tokens saved`,
+    `Tools: ${manifest.tools.direct.length} direct, ${manifest.tools.schemaTokens} schema tokens`,
     "Breakdown:",
     ...Object.entries(manifest.breakdown).map(([name, tokens]) => `- ${name}: ${tokens} tokens`),
     "Admitted:",

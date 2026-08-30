@@ -4,7 +4,7 @@ import { runHostProcess } from "../shared/run-host-process";
 
 export const gitStatusTool: ToolDefinition = {
   name: "git_status",
-  description: "Show concise git status for the workspace.",
+  description: "Show the active workspace's concise Git status, including modified, staged, deleted, renamed, and untracked paths. Use this read-only check before and after edits; it does not display patch contents or alter the repository.",
   inputSchema: { type: "object", properties: {} },
   mutates: false,
   timeoutMs: 10_000,

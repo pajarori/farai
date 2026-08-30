@@ -4,7 +4,7 @@ type OutputReadArgs = { artifactId?: unknown; offset?: unknown; limit?: unknown 
 
 export const outputReadTool: ToolDefinition<OutputReadArgs> = {
   name: "tool_output_read",
-  description: "Read a saved tool-output artifact (created when a tool's output was too large to inline). Page through it with offset (0-based line) and limit. Use the output_artifact_id shown in a truncated tool result.",
+  description: "Read a page of a durable tool-output artifact that was created because the original result was too large to inline. Pass the exact output_artifact_id from the truncated result and advance the zero-based line offset to inspect additional pages without rerunning the original tool.",
   inputSchema: {
     type: "object",
     required: ["artifactId"],

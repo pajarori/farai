@@ -8,7 +8,7 @@ import { processOutput } from "../shared/process-output";
 
 export const execTool: ToolDefinition = {
   name: "shell_exec",
-  description: "execute a command directly inside the managed Kali container; security-task context already contains the exact curated command map, so do not probe with which or command -v first; set background=true or let a slow command exceed yieldMs to continue with session_poll",
+  description: "Run an exact shell command inside the managed Kali container and return its stdout, stderr, and exit status. Use this for command-line workflows not covered by a purpose-built tool; use background=true for interactive or long-running work, then continue it with session_poll.",
   inputSchema: {
     type: "object",
     required: ["command"],

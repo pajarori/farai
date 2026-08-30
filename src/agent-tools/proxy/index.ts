@@ -23,7 +23,7 @@ async function call(context: Parameters<ToolDefinition["run"]>[1], tool: string,
 
 export const proxyScopeTool: ToolDefinition = {
   name: "proxy_scope",
-  description: "Read or replace the domains captured by Farai's managed mitmproxy. An empty domain list captures everything.",
+  description: "Read the current domain scope of Farai's managed mitmproxy, or replace it by supplying allowedDomains. An empty list captures every domain; use this before focused traffic collection to reduce noise without clearing existing flows.",
   inputSchema: { type: "object", properties: { allowedDomains: { type: "array", items: { type: "string" } } }, additionalProperties: false },
   mutates: true,
   timeoutMs: 90_000,
@@ -45,7 +45,7 @@ export const proxyScopeTool: ToolDefinition = {
 
 export const proxyFlowsTool: ToolDefinition = {
   name: "proxy_flows",
-  description: "List protocol-aware HTTP, WebSocket, TCP, UDP, and DNS traffic captured by Farai's managed mitmproxy.",
+  description: "List bounded summaries of HTTP, WebSocket, TCP, UDP, or DNS flows captured by Farai's managed mitmproxy, with optional kind, text, method, and status-class filters. Use the returned flow ids with proxy_flow_get, proxy_replay, or proxy_intercept.",
   inputSchema: {
     type: "object",
     properties: {
@@ -80,7 +80,7 @@ export const proxyFlowsTool: ToolDefinition = {
 
 export const proxyFlowGetTool: ToolDefinition = {
   name: "proxy_flow_get",
-  description: "Inspect one captured proxy flow with request, response, stream, or DNS detail.",
+  description: "Inspect one captured proxy flow by exact flowId, including HTTP request and response data, WebSocket or raw stream messages, or DNS questions and answers. Use proxy_flows to discover ids and browser_network_request for browser-only request records not captured by the proxy.",
   inputSchema: { type: "object", required: ["flowId"], properties: { flowId: { type: "string" } }, additionalProperties: false },
   mutates: false,
   timeoutMs: 90_000,
@@ -99,7 +99,7 @@ export const proxyFlowGetTool: ToolDefinition = {
 
 export const proxySitemapTool: ToolDefinition = {
   name: "proxy_sitemap",
-  description: "Build a compact host, method, path, and status sitemap from captured HTTP traffic.",
+  description: "Build a compact sitemap from captured HTTP and WebSocket traffic, grouped by host and path with observed methods and status codes. Use this to map routes from existing proxy traffic; it does not crawl the target or generate new requests.",
   inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 1000 }, host: { type: "string" } }, additionalProperties: false },
   mutates: false,
   timeoutMs: 90_000,
@@ -127,7 +127,7 @@ export const proxySitemapTool: ToolDefinition = {
 
 export const proxyReplayTool: ToolDefinition = {
   name: "proxy_replay",
-  description: "Replay a captured HTTP request through the managed proxy, optionally changing method, headers, or body. The resulting request is captured as a descendant flow.",
+  description: "Replay one captured HTTP request through the managed proxy, optionally replacing its method, headers, or body. The replay is linked to the original as a descendant flow for differential testing; use http_request when no captured parent request is needed.",
   inputSchema: {
     type: "object",
     required: ["flowId"],
@@ -178,7 +178,7 @@ export const proxyReplayTool: ToolDefinition = {
 
 export const proxyInterceptTool: ToolDefinition = {
   name: "proxy_intercept",
-  description: "Configure Farai's manual interception queue, list paused requests, or forward/edit/drop one paused request.",
+  description: "Control manual request interception in Farai's managed proxy: inspect status, configure host/path/method rules, list paused requests, or forward, edit, and drop one paused flow. Configure interception before generating traffic; resolve paused requests by exact flowId.",
   inputSchema: {
     type: "object",
     required: ["action"],
@@ -241,7 +241,7 @@ export const proxyInterceptTool: ToolDefinition = {
 
 export const proxyClearTool: ToolDefinition = {
   name: "proxy_clear",
-  description: "Clear captured proxy traffic after explicit confirmation. Interception rules and scope are preserved.",
+  description: "Delete all currently captured proxy flows after confirm=true while preserving proxy scope and interception configuration. Use this to start a clean capture window; the removed traffic cannot be inspected afterward.",
   inputSchema: { type: "object", required: ["confirm"], properties: { confirm: { type: "boolean" } }, additionalProperties: false },
   mutates: true,
   timeoutMs: 90_000,

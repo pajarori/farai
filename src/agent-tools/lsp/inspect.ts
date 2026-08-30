@@ -15,7 +15,7 @@ const OPERATIONS = new Set<LspInspectOperation>([
 
 export const lspInspectTool: ToolDefinition = {
   name: "lsp_inspect",
-  description: "Inspect TypeScript, Python, Go, or Rust code through a language server running inside the session container.",
+  description: "Query a language server for definitions, references, hover information, document symbols, or workspace symbols in TypeScript, Python, Go, or Rust. Use this for semantic code navigation that text search cannot provide; positional operations require 1-based line and column values.",
   inputSchema: {
     type: "object",
     required: ["operation", "path"],

@@ -5,7 +5,7 @@ import { containerGrep } from "./container-fs";
 
 export const fsGrepTool: ToolDefinition = {
   name: "fs_grep",
-  description: "Search workspace text files by regular expression. Runs inside the Kali container.",
+  description: "Search text content across workspace files with a regular expression and return bounded file, line, and matching-text results. Use include to narrow filenames; use fs_list for path discovery and shell_exec with rg only when advanced search flags are required.",
   inputSchema: {
     type: "object",
     required: ["pattern"],

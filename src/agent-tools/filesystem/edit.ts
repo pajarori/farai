@@ -7,7 +7,7 @@ import { appendDiagnosticReport } from "../../agent-lsp";
 
 export const fsEditTool: ToolDefinition = {
   name: "fs_edit",
-  description: "Replace exact text in a workspace file, optionally replacing all matches. Runs inside the Kali container.",
+  description: "Replace an exact text block in one workspace file while preserving all other content. The match must be unique unless replaceAll=true; use patch_apply for multi-file or multi-hunk changes and fs_write only for deliberate full-file replacement.",
   inputSchema: {
     type: "object",
     required: ["path", "oldString", "newString"],

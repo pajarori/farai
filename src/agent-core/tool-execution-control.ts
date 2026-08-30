@@ -220,7 +220,7 @@ export function toolForExecution(session: Session, name: string): ToolDefinition
   const tool = getTool(canonical, session);
   if (!tool) throw new Error(`unknown tool: ${canonical}`);
   const scoped = session.toolScope?.length ? new Set(session.toolScope.map(canonicalToolName)) : undefined;
-  if (scoped && !scoped.has(canonical) && canonical !== "tool_invoke") {
+  if (scoped && !scoped.has(canonical)) {
     throw new Error(`tool ${canonical} is outside this session's scope`);
   }
   return tool;
@@ -230,10 +230,4 @@ export function toolConcurrencyKey(tool: ToolDefinition, session: Session, works
   if (tool.concurrencyScope === "runtime") return "runtime";
   if (tool.concurrencyScope === "session") return `session:${session.id}`;
   return `workspace:${workspace}`;
-}
-
-export function toolSchedulingDefinition(tool: ToolDefinition, args: unknown, session: Session): ToolDefinition {
-  if (canonicalToolName(tool.name) !== "tool_invoke" || !args || typeof args !== "object" || Array.isArray(args)) return tool;
-  const targetName = canonicalToolName(String((args as Record<string, unknown>).name ?? ""));
-  return getTool(targetName, session) ?? tool;
 }

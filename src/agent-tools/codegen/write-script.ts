@@ -6,7 +6,7 @@ import { containerRelativePath, containerWriteFile } from "../filesystem/contain
 
 export const writeScriptTool: ToolDefinition = {
   name: "code_write_script",
-  description: "Write a helper script inside the workspace helpers directory. Runs inside the Kali container.",
+  description: "Create a reusable helper script beneath the workspace helpers directory from complete supplied content. Use this for task-specific automation or data processing; use fs_write for files elsewhere and shell_exec for commands that do not need a persisted script.",
   inputSchema: {
     type: "object",
     required: ["filename", "content"],

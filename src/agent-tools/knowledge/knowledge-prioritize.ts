@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 
 export const knowledgePrioritizeTool: ToolDefinition = {
   name: "knowledge_prioritize",
-  description: "Return exploitation-prioritization signals for a CVE from CISA KEV (known exploited) and FIRST EPSS (exploit prediction). These are prioritization signals, not proof that the target is exploitable — always verify against the actual target.",
+  description: "Return CISA KEV known-exploitation status and FIRST EPSS probability signals for one CVE. Use these values to prioritize investigation, not as proof that the target contains the vulnerable version or that exploitation will succeed.",
   inputSchema: {
     type: "object",
     required: ["cve"],

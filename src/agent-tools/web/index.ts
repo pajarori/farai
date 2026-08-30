@@ -1,5 +1,5 @@
 import type { ToolDefinition } from "../../types";
-import { webFetchTool } from "./web-fetch";
-import { webSearchTool } from "./web-search";
+import { internetFetchTool } from "./web-fetch";
+import { internetSearchTool } from "./web-search";
 
-export const webTools: ToolDefinition[] = [webSearchTool, webFetchTool];
+export const webTools: ToolDefinition[] = [internetSearchTool, internetFetchTool];
