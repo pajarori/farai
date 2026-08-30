@@ -62,6 +62,7 @@ export type PartType =
   | "tool_progress"
   | "mcp_startup_update"
   | "mcp_startup_complete"
+  | "mcp_catalog_changed"
   | "phase_change";
 
 export type SessionEventType =

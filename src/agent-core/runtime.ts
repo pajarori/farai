@@ -4,7 +4,8 @@ import { isAbsolute, join, relative } from "node:path";
 import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, Message, MessageWithParts, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/registry";
-import { formatMcpInventory, listMcpServerStatuses, stopMcpToolsForSession } from "../agent-tools/mcp-manager";
+import { formatMcpInventory, getMcpPrompt, getMcpPromptDescriptor, listMcpServerStatuses, probeMcpServer as probeMcpServerConfig, renderMcpPromptResult, renderMcpServerInstructionContext, requestMcpFormElicitation, startMcpServer, stopMcpServer, stopMcpToolsForSession, type McpRefreshInput, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
+import { mcpServerFromInput, type SaveMcpServerInput } from "./mcp-server-management";
 import { stopBrowserContextsForSession } from "../agent-tools/browser/context-manager";
 import { renderCtfNotes } from "../agent-report/markdown";
 import { serviceRegistry } from "../agent-tools/services/registry";
@@ -53,6 +54,7 @@ import { knowledgeDbPath } from "../agent-knowledge/paths";
 import { calculateUsageCost, estimateMaximumRequestCost, normalizeUsageTokenCounts, type UsageTokenCounts } from "./model-pricing";
 import { recordSessionLocation, removeSessionLocation } from "../session-catalog";
 import { SessionUserInputCoordinator } from "./session-user-input";
+import { resolveMcpPromptArguments } from "./mcp-prompts";
 import {
   abortablePromise,
   leasedToolCapability,
@@ -402,6 +404,18 @@ export class AgentRuntime {
     return this.userInputs.request(session.id, input, signal);
   }
 
+  private mcpCallbacks(session: Session): Pick<McpRefreshInput, "onCatalogChange" | "handleElicitation"> {
+    return {
+      onCatalogChange: (event) => this.event(session.id, "mcp_catalog_changed", event),
+      handleElicitation: (server, request, signal) => requestMcpFormElicitation(
+        server,
+        request,
+        (input, inputSignal) => this.requestUserInput(session, input, inputSignal),
+        signal
+      )
+    };
+  }
+
   private startRuntimeLease(): void {
     this.store.renewRuntimeLease(this.runtimeId, RUNTIME_LEASE_MS);
     this.containerLifecycle?.renew();
@@ -639,6 +653,7 @@ export class AgentRuntime {
           rootSessionId,
           rootWorkspace: this.workspace,
           ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
+          ...this.mcpCallbacks(session),
           server: hook.mcp!.server,
           tool: hook.mcp!.tool,
           args: payload
@@ -1136,10 +1151,69 @@ export class AgentRuntime {
       rootSessionId,
       rootWorkspace: this.workspace,
       ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
+      ...this.mcpCallbacks(session),
       background: true,
       includeResources: false,
       onStartupEvent: (event) => this.event(session.id, event.type, event)
     });
+  }
+
+  async startMcpServer(session: Session, serverName: string): Promise<McpServerRuntimeStatus> {
+    const rootSessionId = this.rootSessionId(session);
+    return await startMcpServer({
+      workspace: session.workspace,
+      configWorkspace: this.workspace,
+      session,
+      rootSessionId,
+      rootWorkspace: this.workspace,
+      ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
+      ...this.mcpCallbacks(session),
+      onStartupEvent: (event) => this.event(session.id, event.type, event)
+    }, serverName);
+  }
+
+  async stopMcpServer(session: Session, serverName: string): Promise<McpServerRuntimeStatus> {
+    const rootSessionId = this.rootSessionId(session);
+    return await stopMcpServer({
+      workspace: session.workspace,
+      configWorkspace: this.workspace,
+      session,
+      rootSessionId,
+      rootWorkspace: this.workspace,
+      ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {})
+    }, serverName);
+  }
+
+  async probeMcpServer(session: Session, input: SaveMcpServerInput, signal?: AbortSignal): Promise<McpServerProbeResult> {
+    const rootSessionId = this.rootSessionId(session);
+    return await probeMcpServerConfig({
+      workspace: session.workspace,
+      configWorkspace: this.workspace,
+      session,
+      rootSessionId,
+      rootWorkspace: this.workspace,
+      ...(signal ? { signal } : {}),
+      ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
+      ...this.mcpCallbacks(session)
+    }, mcpServerFromInput(input));
+  }
+
+  async invokeMcpPrompt(session: Session, server: string, prompt: string, positionals: string[], signal?: AbortSignal): Promise<string> {
+    const rootSessionId = this.rootSessionId(session);
+    const base: McpRefreshInput = {
+      workspace: session.workspace,
+      configWorkspace: this.workspace,
+      session,
+      rootSessionId,
+      rootWorkspace: this.workspace,
+      ...(signal ? { signal } : {}),
+      ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
+      ...this.mcpCallbacks(session),
+      onStartupEvent: (event) => this.event(session.id, event.type, event)
+    };
+    const descriptor = await getMcpPromptDescriptor({ ...base, server, prompt });
+    const args = await resolveMcpPromptArguments(server, prompt, descriptor, positionals, (input) => this.requestUserInput(session, input, signal));
+    return renderMcpPromptResult(server, prompt, await getMcpPrompt({ ...base, server, prompt, args }));
   }
 
   async stopContainer(sessionId: string): Promise<void> {
@@ -1478,6 +1552,10 @@ export class AgentRuntime {
       const passiveCompletions = step === 0 && userAuthored && mailboxItems.length > 0
         ? renderMailboxItems(mailboxItems)
         : undefined;
+      const mcpUsageMetadata = renderMcpServerInstructionContext(
+        listMcpServerStatuses(session),
+        availableTools.map((tool) => tool.name)
+      );
       const context = this.assembleContext({
         session,
         ...(step === 0 && input && userAuthored && !resumeAfterCompaction ? { userText: input } : {}),
@@ -1487,6 +1565,7 @@ export class AgentRuntime {
         ...this.contextBudgetInput(),
         toolsEnabled: true,
         extraBlocks: [
+          ...(mcpUsageMetadata ? [{ id: "mcp-server-usage-metadata", title: "MCP Server Usage Metadata", body: mcpUsageMetadata, stable: true }] : []),
           ...(passiveCompletions ? [{ title: "Completed Background Work", body: passiveCompletions, stable: false }] : []),
           ...(backgroundCompletion ? [{ title: "Background Completion", body: backgroundCompletion, stable: false }] : []),
           ...this.drainSteeringContext(session.id),
@@ -1539,7 +1618,7 @@ export class AgentRuntime {
         : undefined;
       const control = chatProvider
         ? await this.streamStep(chatProvider, plannerInput, session, turn, assistantMessage, planner.name, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs)
-        : await this.batchStep(planner, plannerInput, session, turn, assistantMessage, step, context.manifest, responses, autoContinue, remainingTurnMs);
+        : await this.batchStep(planner, plannerInput, session, turn, assistantMessage, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs);
       autoContinueStreak = autoContinue.streak;
       if (control.cancelled) return responses.join("\n");
       if (control.timedOut) {
@@ -1653,11 +1732,12 @@ export class AgentRuntime {
     context: ContextManifest,
     responses: string[],
     autoContinue: { streak: number },
+    userAuthored: boolean,
     modelTimeoutMs?: number
   ): Promise<StepControl> {
     let actions: PlannerAction[];
     try {
-      actions = await this.planWithRetry(planner, plannerInput, session, turn, assistantMessage, context, modelTimeoutMs);
+      actions = await this.planWithRetry(planner, plannerInput, session, turn, assistantMessage, context, modelTimeoutMs, !userAuthored);
     } catch (error) {
       if (error instanceof ModelCallDeadlineError) return { timedOut: true, shouldContinue: false };
       throw error;
@@ -3359,6 +3439,7 @@ export class AgentRuntime {
         rootSessionId,
         rootWorkspace: this.workspace,
         ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
+        ...this.mcpCallbacks(session),
         background: true,
         force: true,
         includeResources: false,

@@ -18,6 +18,7 @@ import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
 import { fitTerminal, fitTerminalPair } from "../terminal-text";
 import { useTuiDimensions } from "../context/terminal";
+import { MarkdownView } from "../markdown";
 
 type CenterSurfaceViewProps = {
   frame: CenterSurfaceFrame;
@@ -75,7 +76,7 @@ export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
           <Show when={loader.filetype() === "markdown"} fallback={
             <code content={loader.body()} filetype={loader.filetype()} syntaxStyle={syntax()} fg={COLOR.text} />
           }>
-            <markdown content={loader.body()} streaming={false} syntaxStyle={syntax()} tableOptions={{ style: "grid" }} fg={COLOR.markdownText} />
+            <MarkdownView content={loader.body()} variant="document" />
           </Show>
         </scrollbox>
       }>

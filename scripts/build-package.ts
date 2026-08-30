@@ -9,9 +9,11 @@ import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
 const root = join(import.meta.dir, "..");
 const outfile = join(root, "dist", "cli", "index.js");
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+  version?: string;
   bin?: string | Record<string, string>;
   dependencies?: Record<string, string>;
 };
+if (!packageJson.version) throw new Error("package version is required");
 const declaredBin = typeof packageJson.bin === "string" ? packageJson.bin : packageJson.bin?.farai;
 if (declaredBin !== "dist/cli/index.js") {
   throw new Error(`package bin must point to dist/cli/index.js, received ${declaredBin ?? "nothing"}`);
@@ -49,6 +51,7 @@ const result = await Bun.build({
   target: "bun",
   packages: "external",
   naming: "index.js",
+  define: { __FARAI_VERSION__: JSON.stringify(packageJson.version) },
   plugins: [solidClientRuntimePlugin, openTuiSolidClientPlugin, solidPlugin],
   sourcemap: "linked"
 });

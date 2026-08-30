@@ -1,5 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { FARAI_VERSION } from "../version";
 import { ContentLengthParser, encodeJsonRpcMessage, type JsonRpcId, type JsonRpcMessage } from "./protocol";
 import type { LspDiagnostic, LspInspectOperation } from "./types";
 
@@ -70,7 +71,7 @@ export class LspClient {
     const rootUri = pathToFileURL(this.projectRoot).toString();
     await this.request("initialize", {
       processId: null,
-      clientInfo: { name: "farai", version: "0.1.0" },
+      clientInfo: { name: "farai", version: FARAI_VERSION },
       rootUri,
       workspaceFolders: [{ name: this.projectRoot.split("/").pop() || "workspace", uri: rootUri }],
       capabilities: {

@@ -193,8 +193,8 @@ export class BrowserContextManager {
       }, config);
       const client = this.createClient(prepared);
       entry.client = client;
-      await waitForSignal(client.initialize(), signal);
-      const descriptors = await waitForSignal(client.listTools(), signal);
+      await waitForSignal(client.initialize(signal), signal);
+      const descriptors = await waitForSignal(client.listTools(signal), signal);
       entry.tools = new Set(descriptors.map((descriptor) => descriptor.name));
       for (const required of ["browser_navigate", "browser_snapshot"]) {
         if (!entry.tools.has(required)) throw new Error(`Playwright MCP server does not provide ${required}`);

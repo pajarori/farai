@@ -11,6 +11,7 @@ import type { DialogOption } from "../dialog/fuzzy";
 import { isPrimaryClick } from "../input/mouse";
 import { fitTerminal, terminalWidth } from "../terminal-text";
 import { useTuiDimensions } from "../context/terminal";
+import { useCommandRegistryRevision } from "../command-registry-signal";
 
 export function composerHeightFromVisualLines(visualLines: number): number {
   return Math.min(6, Math.max(1, visualLines));
@@ -21,6 +22,7 @@ export function Composer(props: { visible?: boolean; active?: boolean } = {}): J
   const composer = useComposerControl();
   const dims = useTuiDimensions();
   const renderer = useRenderer();
+  const commandRegistryRevision = useCommandRegistryRevision();
   let textareaRef!: TextareaRenderable;
   let composerHeightRefreshPending = false;
   let disposed = false;
@@ -48,7 +50,10 @@ export function Composer(props: { visible?: boolean; active?: boolean } = {}): J
     renderer.requestRender();
   };
 
-  const slashOptions = createMemo<DialogOption<Command>[]>(slashCommandOptions);
+  const slashOptions = createMemo<DialogOption<Command>[]>(() => {
+    commandRegistryRevision();
+    return slashCommandOptions();
+  });
   const slashRowLimit = () => slashPopupRowLimit(dims().height);
   const slashMatches = createMemo(() => matchSlashCommands(slashOptions(), composer.text(), slashRowLimit()));
   const slashActive = () => slashPopupVisible(

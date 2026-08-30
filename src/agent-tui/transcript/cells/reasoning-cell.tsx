@@ -1,8 +1,8 @@
 import { Show, createMemo, type JSX } from "solid-js";
 import type { TimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
-import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
+import { MarkdownView } from "../../markdown";
 import { useTuiDimensions } from "../../context/terminal";
 import { useTuiStore } from "../../context/store";
 import { ExpandedPanel } from "./expanded-panel";
@@ -33,7 +33,7 @@ export function ReasoningRow(props: ReasoningRowProps): JSX.Element {
       </box>
       <Show when={expanded() && content().body.trim()}>
         <ExpandedPanel>
-          <markdown content={content().body} streaming={true} internalBlockMode="top-level" syntaxStyle={syntax()} fg={COLOR.dim} />
+          <MarkdownView id={`${props.row.id}:markdown`} content={content().body} streaming={props.row.streaming} fg={COLOR.dim} />
         </ExpandedPanel>
       </Show>
     </box>

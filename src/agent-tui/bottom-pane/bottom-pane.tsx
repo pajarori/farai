@@ -15,15 +15,19 @@ import { activityStatusVisible, bottomPaneSurface, fitFooterLine } from "./foote
 import { RequestUserInput } from "./request-user-input";
 import { ModelProviderWizard } from "./model-provider-wizard";
 import { ModelProviderRemoval } from "./model-provider-removal";
+import { McpServerWizard } from "./mcp-server-wizard";
+import { McpServerRemoval } from "./mcp-server-removal";
 import { slashCommandOptions, slashMatches, slashPopupRowLimit, slashPopupVisible } from "../slash-autocomplete";
 import { truncateLine } from "../renderers";
 import { useTuiDimensions } from "../context/terminal";
+import { useCommandRegistryRevision } from "../command-registry-signal";
 
 export function BottomPane(): JSX.Element {
   const tui = useTuiStore();
   const exit = useExit();
   const composer = useComposerControl();
   const dims = useTuiDimensions();
+  const commandRegistryRevision = useCommandRegistryRevision();
   const [elapsed, setElapsed] = createSignal(0);
   let tick: ReturnType<typeof setInterval> | undefined;
   const frame = () => tui.store.ui.overlayStack.at(-1);
@@ -42,6 +46,7 @@ export function BottomPane(): JSX.Element {
   };
   const ctx = () => ({ tui, dialog, exit });
   const slashPanelActive = () => {
+    commandRegistryRevision();
     if (tui.store.ui.activeMainTab !== "chat") return false;
     const text = composer.text();
     return slashPopupVisible(
@@ -54,6 +59,8 @@ export function BottomPane(): JSX.Element {
   const surface = () => bottomPaneSurface({
     hasModelProviderRemoval: providerRemovalActive(),
     hasModelProviderWizard: providerWizardActive(),
+    hasMcpServerRemoval: mcpServerRemovalActive(),
+    hasMcpServerWizard: mcpServerWizardActive(),
     hasRequestUserInput: inputRequestActive(),
     hasListFrame: Boolean(listFrame()),
     hasCenterFrame: Boolean(centerFrame()),
@@ -61,6 +68,8 @@ export function BottomPane(): JSX.Element {
   });
   const providerWizardActive = () => Boolean(tui.store.ui.modelProviderWizard);
   const providerRemovalActive = () => Boolean(tui.store.ui.modelProviderRemoval);
+  const mcpServerWizardActive = () => Boolean(tui.store.ui.mcpServerWizard);
+  const mcpServerRemovalActive = () => Boolean(tui.store.ui.mcpServerRemoval);
   const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed);
   const inputRequestPending = () => Boolean(tui.store.snapshot.pendingUserInput);
   const composerSurfaceVisible = () => surface() === "composer";
@@ -127,6 +136,12 @@ export function BottomPane(): JSX.Element {
         </Match>
         <Match when={surface() === "model_provider_wizard"}>
           <ModelProviderWizard />
+        </Match>
+        <Match when={surface() === "mcp_server_removal"}>
+          <McpServerRemoval />
+        </Match>
+        <Match when={surface() === "mcp_server_wizard"}>
+          <McpServerWizard />
         </Match>
         <Match when={surface() === "request_user_input"}>
           <Show when={tui.store.snapshot.pendingUserInput} keyed>

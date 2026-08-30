@@ -1,9 +1,10 @@
-import { Show, onCleanup, type JSX } from "solid-js";
+import { Show, createEffect, onCleanup, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { useExit, useExiting } from "../context/exit";
 import { ComposerProvider } from "../context/composer";
 import { registerCommands } from "../command-registry";
 import { defineDefaultCommands } from "../commands";
+import { defineMcpPromptCommands } from "../mcp-prompt-commands";
 import { KeyboardController } from "../input/keyboard-controller";
 import { Transcript } from "../transcript/transcript";
 import { ProxyLogView } from "../proxy/proxy-log-view";
@@ -58,12 +59,15 @@ export function AppShell(): JSX.Element {
     mcp: () => { void tui.openMcpOverlay(); }
   }));
   onCleanup(disposeCommands);
+  createEffect(() => {
+    const visible = new Set(tui.store.ui.mcpServers.filter((server) => !server.backbone).map((server) => server.id));
+    const dispose = registerCommands(defineMcpPromptCommands(tui.store.ui.mcpStatuses.filter((status) => visible.has(status.name))));
+    onCleanup(dispose);
+  });
 
   return (
     <ComposerProvider>
-      <Show when={!exiting()}>
-        <KeyboardController />
-      </Show>
+      <KeyboardController />
       <box
         width={dims().width}
         height={dims().height}
@@ -116,6 +120,8 @@ function MainTabs(): JSX.Element {
     || tui.store.ui.centerSurfaceStack.length
     || tui.store.ui.modelProviderWizard
     || tui.store.ui.modelProviderRemoval
+    || tui.store.ui.mcpServerWizard
+    || tui.store.ui.mcpServerRemoval
     || (tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed)
   );
   const openChat = () => {

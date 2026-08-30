@@ -9,6 +9,7 @@ import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
 import { createPrimaryClickGesture } from "../../input/mouse";
 import { terminalWidth } from "../../terminal-text";
+import { MarkdownView } from "../../markdown";
 
 type ArtifactRowProps = {
   row: Extract<TimelineRow, { kind: "artifact" }>;
@@ -44,7 +45,7 @@ export function ArtifactRow(props: ArtifactRowProps): JSX.Element {
           <ExpandedPanel id={`${props.row.id}:expanded`}>
             <Show
               when={props.row.bodyFormat === "text"}
-              fallback={<markdown content={body()} streaming={false} syntaxStyle={syntax()} fg={COLOR.text} />}
+              fallback={<MarkdownView content={body()} fg={COLOR.text} />}
             >
               <code content={body()} filetype="text" syntaxStyle={syntax()} fg={COLOR.text} />
             </Show>
@@ -112,7 +113,7 @@ export function FindingRow(props: FindingRowProps): JSX.Element {
       <Show when={expanded() && props.row.body}>
         {(body) => (
           <ExpandedPanel>
-            <markdown content={body()} streaming={false} syntaxStyle={syntax()} fg={COLOR.text} />
+            <MarkdownView content={body()} fg={COLOR.text} />
           </ExpandedPanel>
         )}
       </Show>

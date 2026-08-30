@@ -1,8 +1,8 @@
 import { Show, type JSX } from "solid-js";
 import type { TimelineRow } from "../../renderers";
 import { useTuiStore } from "../../context/store";
-import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
+import { MarkdownView } from "../../markdown";
 import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
 import { createPrimaryClickGesture } from "../../input/mouse";
@@ -50,7 +50,7 @@ export function NoticeRow(props: NoticeRowProps): JSX.Element {
       <Show when={expanded() && body()}>
         {(content) => (
           <ExpandedPanel>
-            <markdown content={content()} streaming={false} syntaxStyle={syntax()} fg={props.row.kind === "error" ? COLOR.error : COLOR.dim} />
+            <MarkdownView content={content()} fg={props.row.kind === "error" ? COLOR.error : COLOR.dim} />
           </ExpandedPanel>
         )}
       </Show>

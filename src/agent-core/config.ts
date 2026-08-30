@@ -1,10 +1,12 @@
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
+import { MCP_BACKBONE_SERVER_IDS } from "../agent-tools/mcp-builtins";
 
 export type ConfigLocation = "global" | "project";
 
 export type FaraiConfig = {
+  configVersion?: number;
   model?: string;
   baseUrl?: string;
   apiKeyEnv?: string;
@@ -151,6 +153,7 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
   const lsp = lspConfig(raw.lsp);
   const web = webConfig(raw.web);
   return {
+    ...(positiveInteger(raw.config_version ?? raw.configVersion) !== undefined ? { configVersion: positiveInteger(raw.config_version ?? raw.configVersion)! } : {}),
     ...(typeof raw.model === "string" ? { model: raw.model } : {}),
     ...(typeof raw.base_url === "string" ? { baseUrl: raw.base_url } : typeof raw.baseUrl === "string" ? { baseUrl: raw.baseUrl } : {}),
     ...(typeof raw.env_key === "string" ? { apiKeyEnv: raw.env_key } : typeof raw.apiKeyEnv === "string" ? { apiKeyEnv: raw.apiKeyEnv } : {}),
@@ -338,6 +341,7 @@ export function removeAuthEntry(name: string, location: ConfigLocation = "global
 
 export function serializeConfigToml(config: FaraiConfig): string {
   const lines: string[] = [];
+  if (config.configVersion !== undefined) lines.push(`config_version = ${config.configVersion}`);
   if (config.model) lines.push(`model = ${tomlString(config.model)}`);
   if (config.recentModels?.length) lines.push(`recent_models = ${tomlArray(config.recentModels)}`);
   if (config.contextWindow) lines.push(`context_window = ${config.contextWindow}`);
@@ -428,7 +432,25 @@ export function updateConfig(mutator: (config: FaraiConfig) => FaraiConfig, loca
 export function ensureDefaultConfig(): string {
   const path = configPath("global");
   mkdirSync(localFaraiDir(), { recursive: true });
-  if (!existsSync(path)) atomicWriteFile(path, DEFAULT_CONFIG_TEMPLATE, 0o600);
+  if (!existsSync(path)) {
+    atomicWriteFile(path, DEFAULT_CONFIG_TEMPLATE, 0o600);
+    return path;
+  }
+  let current: FaraiConfig;
+  try {
+    current = normalizeConfig(Bun.TOML.parse(readFileSync(path, "utf8")));
+  } catch {
+    return path;
+  }
+  const defaults = defaultMcpServers();
+  const missingBackbone = MCP_BACKBONE_SERVER_IDS.filter((id) => !(id in (current.mcpServers ?? {})));
+  const needsMigration = (current.configVersion ?? 0) < CURRENT_CONFIG_VERSION;
+  if (missingBackbone.length || needsMigration) {
+    const servers = { ...(current.mcpServers ?? {}) };
+    for (const id of missingBackbone) servers[id] = defaults[id]!;
+    if (needsMigration && isLegacyPwnoMcpDefault(servers["pwno-mcp"])) delete servers["pwno-mcp"];
+    writeConfig({ ...current, configVersion: CURRENT_CONFIG_VERSION, mcpServers: servers });
+  }
   return path;
 }
 
@@ -462,7 +484,15 @@ export function defaultMcpServers(): Record<string, Record<string, unknown>> {
   return normalizeConfig(Bun.TOML.parse(DEFAULT_CONFIG_TEMPLATE)).mcpServers ?? {};
 }
 
-const DEFAULT_CONFIG_TEMPLATE = `model = "big-pickle"
+const CURRENT_CONFIG_VERSION = 2;
+
+function isLegacyPwnoMcpDefault(entry: Record<string, unknown> | undefined): boolean {
+  if (!entry || entry.command !== "docker" || !Array.isArray(entry.args)) return false;
+  return entry.args.includes("ghcr.io/pwno-io/pwno-mcp:v0.2.1") && entry.args.includes("--stdio");
+}
+
+const DEFAULT_CONFIG_TEMPLATE = `config_version = ${CURRENT_CONFIG_VERSION}
+model = "big-pickle"
 
 [proxy]
 transparent = true
@@ -487,4 +517,9 @@ enabled = true
 required = false
 startup_timeout_sec = 60
 tool_timeout_sec = 120
+
 `;
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}

@@ -32,7 +32,7 @@ export type FooterItem = {
 };
 
 export type BottomPaneSlot = "list_overlay" | "center_surface" | "proxy_tab" | "composer";
-export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "request_user_input";
+export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "mcp_server_removal" | "mcp_server_wizard" | "request_user_input";
 
 export function activityStatusVisible(activeMainTab: "chat" | "proxy"): boolean {
   return activeMainTab === "chat";
@@ -52,6 +52,8 @@ export function bottomPaneSlot(input: {
 export function bottomPaneSurface(input: {
   hasModelProviderRemoval: boolean;
   hasModelProviderWizard: boolean;
+  hasMcpServerRemoval?: boolean;
+  hasMcpServerWizard?: boolean;
   hasRequestUserInput: boolean;
   hasListFrame: boolean;
   hasCenterFrame: boolean;
@@ -59,6 +61,8 @@ export function bottomPaneSurface(input: {
 }): BottomPaneSurface {
   if (input.hasModelProviderRemoval) return "model_provider_removal";
   if (input.hasModelProviderWizard) return "model_provider_wizard";
+  if (input.hasMcpServerRemoval) return "mcp_server_removal";
+  if (input.hasMcpServerWizard) return "mcp_server_wizard";
   if (input.hasRequestUserInput) return "request_user_input";
   return bottomPaneSlot(input);
 }

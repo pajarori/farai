@@ -1,6 +1,6 @@
 {
   "name": "farai",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": false,
   "type": "module",
   "description": "Cyber-first freestyle local AI agent",
@@ -43,7 +43,7 @@
     "dev": "bun run src/cli/index.ts",
     "link:local": "bun run build && bun link",
     "start": "bun run src/cli/index.ts",
-    "tui:test": "bun test ./test/tui-router.test.ts ./test/tui-input-architecture.test.ts ./test/tui-composer.test.ts ./test/tui-proxy-divider.test.ts ./test/tui-proxy-state.test.ts ./test/tui-footer-state.test.ts ./test/tui-renderers.test.ts ./test/tui-transcript-render.test.tsx ./test/tui-transcript-stream-engine.test.ts ./test/tui-store-session-race.test.tsx ./test/tui-store-previews.test.ts ./test/tui-events.test.ts ./test/tui-runtime-port.test.ts ./test/tui-dialog-fuzzy.test.ts ./test/tui-list-scroll.test.ts ./test/tui-command-registry.test.ts ./test/tui-cells.test.ts ./test/tui-clipboard.test.ts ./test/tui-resize.test.ts ./test/tui-steering-wiring.test.ts ./test/tui-websocket-history.test.ts ./test/tui-websocket-render.test.tsx",
+    "tui:test": "bun test ./test/tui-router.test.ts ./test/tui-input-architecture.test.ts ./test/tui-input-controllers.test.ts ./test/tui-keyboard-exit.test.tsx ./test/tui-composer.test.ts ./test/tui-proxy-divider.test.ts ./test/tui-proxy-state.test.ts ./test/tui-footer-state.test.ts ./test/tui-renderers.test.ts ./test/tui-transcript-render.test.tsx ./test/tui-transcript-stream-engine.test.ts ./test/tui-store-session-race.test.tsx ./test/tui-store-previews.test.ts ./test/tui-events.test.ts ./test/tui-runtime-port.test.ts ./test/tui-dialog-fuzzy.test.ts ./test/tui-list-scroll.test.ts ./test/tui-command-registry.test.ts ./test/tui-cells.test.ts ./test/tui-clipboard.test.ts ./test/tui-resize.test.ts ./test/tui-steering-wiring.test.ts ./test/tui-websocket-history.test.ts ./test/tui-websocket-render.test.tsx ./test/tui-mcp.test.tsx ./test/tui-markdown-finalize.test.ts ./test/tui-markdown.test.tsx",
     "doctor": "bun run src/cli/index.ts doctor",
     "typecheck": "tsc --noEmit",
     "test": "bun test ./test",
@@ -59,16 +59,18 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@opentui/core": "0.5.8",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@opentui/core": "0.5.9",
     "ajv": "8.20.0",
     "bun-pty": "0.4.10",
     "entities": "7.0.1",
     "figlet": "1.11.4",
     "fuzzysort": "3.1.0",
+    "highlight.js": "11.11.1",
     "solid-js": "1.9.12"
   },
   "devDependencies": {
-    "@opentui/solid": "0.5.8",
+    "@opentui/solid": "0.5.9",
     "@types/bun": "^1.1.0",
     "typescript": "5.9.3"
   }

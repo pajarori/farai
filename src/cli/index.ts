@@ -1,6 +1,4 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { AgentRuntime } from "../agent-core/runtime";
 import { KALI_IMAGE_CONTRACT, KaliContainerBackend } from "../agent-container/kali";
 import { resolveDefaultModel } from "../agent-core/model-registry";
@@ -9,11 +7,12 @@ import { addModelProfile, loadModelProfiles, modelProfilePaths, type ModelProfil
 import { ensureDefaultUserConfig, globalConfigPath, loadGlobalConfig } from "../agent-core/global-config";
 import { authPath, loadConfig, updateConfig } from "../agent-core/config";
 import { FARAI_BANNER } from "../branding";
+import { FARAI_VERSION } from "../version";
 
 const [, , command, ...args] = process.argv;
 
 if (command === "--version" || command === "-v" || command === "version") {
-  console.log(packageVersion());
+  console.log(FARAI_VERSION);
   process.exit(0);
 }
 
@@ -341,16 +340,6 @@ function parseProviderModel(value: string): { provider: string; model?: string }
   const model = value.slice(separator + 1).trim();
   if (!provider || !model) throw new Error("Model must be <provider>/<model> or <provider>:<model>.");
   return { provider, model };
-}
-
-function packageVersion(): string {
-  try {
-    const raw = readFileSync(join(import.meta.dir, "..", "..", "package.json"), "utf8");
-    const parsed = JSON.parse(raw) as { version?: unknown };
-    return typeof parsed.version === "string" ? parsed.version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
 }
 
 function help(topic?: string): void {

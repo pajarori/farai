@@ -95,7 +95,20 @@ export type RouterAction =
   | { kind: "model.addProvider" }
   | { kind: "model.editProvider" }
   | { kind: "model.testProvider" }
-  | { kind: "model.removeProvider" };
+  | { kind: "model.removeProvider" }
+  | { kind: "mcpServer.next"; test?: boolean }
+  | { kind: "mcpServer.back" }
+  | { kind: "mcpServer.transportMove"; delta: number }
+  | { kind: "mcpServer.authMove"; delta: number }
+  | { kind: "mcpServer.secretBackspace" }
+  | { kind: "mcpServer.credentialRemove" }
+  | { kind: "mcpServerRemoval.confirm" }
+  | { kind: "mcpServerRemoval.cancel" }
+  | { kind: "mcp.addServer" }
+  | { kind: "mcp.editServer" }
+  | { kind: "mcp.testServer" }
+  | { kind: "mcp.toggleServer" }
+  | { kind: "mcp.removeServer" };
 
 export type RouteResult =
   | { type: "consumed"; actions: RouterAction[] }
@@ -135,8 +148,21 @@ export type RouterContext = {
   modelProviderRemoval?: {
     busy: boolean;
   };
+  mcpServerWizard?: {
+    field: "id" | "transport" | "endpoint" | "authentication" | "credential" | "oauth" | "environment" | "behavior" | "tools" | "review";
+    busy: boolean;
+    cancellable?: boolean;
+  };
+  mcpServerRemoval?: {
+    busy: boolean;
+  };
   modelOverlay?: {
     providerID?: string;
+    removable: boolean;
+  };
+  mcpOverlay?: {
+    serverID?: string;
+    toggleable: boolean;
     removable: boolean;
   };
 };
@@ -201,11 +227,13 @@ export function slashActive(ctx: RouterContext): boolean {
 }
 
 export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
+  if (ctx.mcpServerRemoval) return routeMcpServerRemoval(key, ctx.mcpServerRemoval);
+  if (ctx.mcpServerWizard) return routeMcpServerWizard(key, ctx.mcpServerWizard);
   if (ctx.modelProviderRemoval) return routeModelProviderRemoval(key, ctx.modelProviderRemoval);
   if (ctx.modelProviderWizard) return routeModelProviderWizard(key, ctx.modelProviderWizard);
   if (ctx.pendingUserInput && key.ctrl && key.name === "q") return consumed({ kind: "requestUserInput.show" });
   if (ctx.requestUserInput) return routeRequestUserInput(key, ctx.requestUserInput);
-  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay);
+  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay, ctx.mcpOverlay);
   if (ctx.centerSurfaceKind) return routeCenterSurface(key, ctx.centerSurfaceKind, ctx.centerProxyFlowKind, ctx.centerSurfaceBusy);
   if (ctx.historySearchActive) return routeHistorySearch(key);
   if (slashActive(ctx)) {
@@ -214,6 +242,43 @@ export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
 
   }
   return routeBase(key, ctx);
+}
+
+function routeMcpServerRemoval(key: KeyToken, state: NonNullable<RouterContext["mcpServerRemoval"]>): RouteResult {
+  if (state.busy) return consumed();
+  if (key.name === "return") return consumed({ kind: "mcpServerRemoval.confirm" });
+  if (key.name === "escape" || (key.ctrl && key.name === "c")) return consumed({ kind: "mcpServerRemoval.cancel" });
+  return consumed();
+}
+
+function routeMcpServerWizard(key: KeyToken, state: NonNullable<RouterContext["mcpServerWizard"]>): RouteResult {
+  if (state.busy) return key.name === "escape" && state.cancellable ? consumed({ kind: "mcpServer.back" }) : consumed();
+  if (key.name === "escape") return consumed({ kind: "mcpServer.back" });
+  if (state.field === "transport") {
+    if (key.name === "up" || key.name === "left") return consumed({ kind: "mcpServer.transportMove", delta: -1 });
+    if (key.name === "down" || key.name === "right") return consumed({ kind: "mcpServer.transportMove", delta: 1 });
+    if (key.name === "return") return consumed({ kind: "mcpServer.next" });
+    return consumed();
+  }
+  if (state.field === "authentication") {
+    if (key.name === "up" || key.name === "left") return consumed({ kind: "mcpServer.authMove", delta: -1 });
+    if (key.name === "down" || key.name === "right") return consumed({ kind: "mcpServer.authMove", delta: 1 });
+    if (key.name === "return") return consumed({ kind: "mcpServer.next" });
+    return consumed();
+  }
+  if (state.field === "credential") {
+    if (key.ctrl && key.name === "r") return consumed({ kind: "mcpServer.credentialRemove" });
+    if (key.name === "backspace") return consumed({ kind: "mcpServer.secretBackspace" });
+    if (key.name === "return") return consumed({ kind: "mcpServer.next" });
+    return PASSTHROUGH;
+  }
+  if (state.field === "review") {
+    if (key.ctrl && key.name === "s") return consumed({ kind: "mcpServer.next", test: false });
+    if (key.name === "return") return consumed({ kind: "mcpServer.next", test: true });
+    return consumed();
+  }
+  if (key.name === "return") return consumed({ kind: "mcpServer.next" });
+  return PASSTHROUGH;
 }
 
 function routeModelProviderRemoval(key: KeyToken, state: NonNullable<RouterContext["modelProviderRemoval"]>): RouteResult {
@@ -282,7 +347,7 @@ function routeRequestUserInput(key: KeyToken, state: NonNullable<RouterContext["
   }
 }
 
-function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["modelOverlay"]): RouteResult {
+function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["modelOverlay"], mcp?: RouterContext["mcpOverlay"]): RouteResult {
   if (key.ctrl && key.name === "c") return consumed({ kind: "overlay.pop" });
   if (key.name === "escape") return consumed({ kind: "overlay.pop" });
 
@@ -292,6 +357,13 @@ function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["m
       if (key.name === "t" && model?.providerID) return consumed({ kind: "model.testProvider" });
       if (key.name === "e" && model?.providerID && model.removable) return consumed({ kind: "model.editProvider" });
       if (key.name === "d" && model?.providerID && model.removable) return consumed({ kind: "model.removeProvider" });
+    }
+    if (kind === "mcp" && key.ctrl) {
+      if (key.name === "a") return consumed({ kind: "mcp.addServer" });
+      if (key.name === "t" && mcp?.serverID) return consumed({ kind: "mcp.testServer" });
+      if (key.name === "e" && mcp?.serverID) return consumed({ kind: "mcp.editServer" });
+      if (key.name === "x" && mcp?.serverID && mcp.toggleable) return consumed({ kind: "mcp.toggleServer" });
+      if (key.name === "d" && mcp?.serverID && mcp.removable) return consumed({ kind: "mcp.removeServer" });
     }
     if (kind === "agents" && (key.name === "space" || key.char === " ")) {
       return consumed({ kind: "overlay.agentPreview" });

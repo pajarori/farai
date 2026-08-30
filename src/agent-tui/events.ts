@@ -332,7 +332,7 @@ function isToolInputPreviewEvent(event: SessionEvent): boolean {
 }
 
 function isMcpStartupEvent(event: SessionEvent): boolean {
-  return event.type === "mcp_startup_update" || event.type === "mcp_startup_complete";
+  return event.type === "mcp_startup_update" || event.type === "mcp_startup_complete" || event.type === "mcp_catalog_changed";
 }
 
 function isTerminalMcpStartupEvent(event: SessionEvent): boolean {

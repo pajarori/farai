@@ -13,11 +13,14 @@ import { clampIndex as clampRequestIndex, syncRequestUserInputUiState, wrapIndex
 import type { ModelProviderInfo } from "../agent-core/model-provider-management";
 import { createModelProviderWizard, type ModelProviderWizardState } from "./model-provider-state";
 import type { UpdateNotice } from "./update-check";
+import type { McpServerInfo } from "../agent-core/mcp-server-management";
+import { createMcpServerWizard, type McpServerWizardState } from "./mcp-server-state";
 
 export type OverlayFrame =
-  | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory" | "mcp"; query: string; index: number }
+  | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory"; query: string; index: number }
   | { kind: "agents"; query: string; index: number; expandedId?: string }
-  | { kind: "model"; query: string; index: number; providerID?: string };
+  | { kind: "model"; query: string; index: number; providerID?: string }
+  | { kind: "mcp"; query: string; index: number; serverID?: string };
 
 export type CenterSurfaceFrame =
   | { kind: "detail"; title: string; body: string }
@@ -35,6 +38,12 @@ export type CenterSurfaceBusy = "report_save" | "container_toggle" | "container_
 
 export type ModelProviderRemovalState = {
   provider: ModelProviderInfo;
+  busy: boolean;
+  error: string | undefined;
+};
+
+export type McpServerRemovalState = {
+  server: McpServerInfo;
   busy: boolean;
   error: string | undefined;
 };
@@ -96,6 +105,7 @@ export type FaraiTuiStore = {
     promptHistory: PromptHistoryEntry[];
     historySearch: HistorySearchState | undefined;
     footerMode: "ambient" | "shortcuts" | "quit_hint" | "esc_hint";
+    quitArmedUntil: number | undefined;
     runningSince: number | undefined;
     submitting: boolean;
     compacting: boolean;
@@ -117,6 +127,9 @@ export type FaraiTuiStore = {
     modelProviders: ModelProviderInfo[];
     modelProviderWizard: ModelProviderWizardState | undefined;
     modelProviderRemoval: ModelProviderRemovalState | undefined;
+    mcpServers: McpServerInfo[];
+    mcpServerWizard: McpServerWizardState | undefined;
+    mcpServerRemoval: McpServerRemovalState | undefined;
     mcpStatuses: McpServerRuntimeStatus[];
     mcpStatusError: string | undefined;
     messageNavigation: { direction: "next" | "prev"; sequence: number };
@@ -193,6 +206,7 @@ export type StoreActions = {
   historySearchBackspace: () => void;
   historySearchMove: (delta: number, optionCount: number) => void;
   footerModeSet: (mode: FaraiTuiStore["ui"]["footerMode"]) => void;
+  quitConfirmationSet: (until: number | undefined) => void;
   statusDetailSet: (detail: string | undefined) => void;
   centerSurfaceBusySet: (busy: FaraiTuiStore["ui"]["centerSurfaceBusy"]) => void;
   contextUsageUpdated: (usage: ContextUsage | undefined) => void;
@@ -206,6 +220,13 @@ export type StoreActions = {
   modelProviderRemovalOpen: (provider: ModelProviderInfo) => void;
   modelProviderRemovalPatch: (patch: Partial<Omit<ModelProviderRemovalState, "provider">>) => void;
   modelProviderRemovalClose: () => void;
+  mcpCatalogSet: (servers: McpServerInfo[], statuses: McpServerRuntimeStatus[]) => void;
+  mcpServerWizardOpen: (server?: McpServerInfo) => void;
+  mcpServerWizardPatch: (patch: Partial<McpServerWizardState>) => void;
+  mcpServerWizardClose: () => void;
+  mcpServerRemovalOpen: (server: McpServerInfo) => void;
+  mcpServerRemovalPatch: (patch: Partial<Omit<McpServerRemovalState, "server">>) => void;
+  mcpServerRemovalClose: () => void;
   mcpStatusesSet: (statuses: McpServerRuntimeStatus[]) => void;
   mcpStatusErrorSet: (message: string | undefined) => void;
   agentThreadsSet: (threads: AgentThreadSummary[]) => void;
@@ -286,6 +307,7 @@ export function initialStore(workspace: string): FaraiTuiStore {
       promptHistory: [],
       historySearch: undefined,
       footerMode: "ambient",
+      quitArmedUntil: undefined,
       runningSince: undefined,
       submitting: false,
       compacting: false,
@@ -307,6 +329,9 @@ export function initialStore(workspace: string): FaraiTuiStore {
       modelProviders: [],
       modelProviderWizard: undefined,
       modelProviderRemoval: undefined,
+      mcpServers: [],
+      mcpServerWizard: undefined,
+      mcpServerRemoval: undefined,
       mcpStatuses: [],
       mcpStatusError: undefined,
       messageNavigation: { direction: "next", sequence: 0 },
@@ -354,6 +379,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.slashSuppressedText = undefined;
         s.ui.historySearch = undefined;
         s.ui.footerMode = "ambient";
+        s.ui.quitArmedUntil = undefined;
         s.ui.runningSince = undefined;
         s.ui.submitting = false;
         s.ui.compacting = false;
@@ -373,6 +399,9 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.services = [];
         s.ui.modelProviderWizard = undefined;
         s.ui.modelProviderRemoval = undefined;
+        s.ui.mcpServers = [];
+        s.ui.mcpServerWizard = undefined;
+        s.ui.mcpServerRemoval = undefined;
         s.ui.mcpStatuses = [];
         s.ui.agentThreads = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
@@ -711,7 +740,16 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       }));
     },
     footerModeSet(mode: FaraiTuiStore["ui"]["footerMode"]): void {
-      setStore("ui", "footerMode", mode);
+      setStore(produce((s) => {
+        s.ui.footerMode = mode;
+        if (mode !== "quit_hint") s.ui.quitArmedUntil = undefined;
+      }));
+    },
+    quitConfirmationSet(until: number | undefined): void {
+      setStore(produce((s) => {
+        s.ui.quitArmedUntil = until;
+        s.ui.footerMode = until === undefined ? "ambient" : "quit_hint";
+      }));
     },
     statusDetailSet(detail: string | undefined): void {
       setStore("ui", "statusDetail", detail);
@@ -786,6 +824,50 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     modelProviderRemovalClose(): void {
       setStore(produce((s) => {
         s.ui.modelProviderRemoval = undefined;
+        s.ui.lastError = undefined;
+      }));
+    },
+    mcpCatalogSet(servers: McpServerInfo[], statuses: McpServerRuntimeStatus[]): void {
+      setStore(produce((s) => {
+        s.ui.mcpServers = servers;
+        s.ui.mcpStatuses = statuses;
+        s.ui.mcpStatusError = undefined;
+      }));
+    },
+    mcpServerWizardOpen(server?: McpServerInfo): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.mcpServerWizard = createMcpServerWizard(server);
+      }));
+    },
+    mcpServerWizardPatch(patch: Partial<McpServerWizardState>): void {
+      setStore(produce((s) => {
+        if (!s.ui.mcpServerWizard) return;
+        Object.assign(s.ui.mcpServerWizard, patch);
+      }));
+    },
+    mcpServerWizardClose(): void {
+      setStore(produce((s) => {
+        s.ui.mcpServerWizard = undefined;
+        s.ui.lastError = undefined;
+      }));
+    },
+    mcpServerRemovalOpen(server: McpServerInfo): void {
+      if (!server.removable) return;
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.mcpServerRemoval = { server, busy: false, error: undefined };
+      }));
+    },
+    mcpServerRemovalPatch(patch: Partial<Omit<McpServerRemovalState, "server">>): void {
+      setStore(produce((s) => {
+        if (!s.ui.mcpServerRemoval) return;
+        Object.assign(s.ui.mcpServerRemoval, patch);
+      }));
+    },
+    mcpServerRemovalClose(): void {
+      setStore(produce((s) => {
+        s.ui.mcpServerRemoval = undefined;
         s.ui.lastError = undefined;
       }));
     },

@@ -1,3 +1,4 @@
+import type { ScrollBoxRenderable } from "@opentui/core";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
 import type { DialogOption, FuzzyMatch } from "../dialog/fuzzy";
 import { filterOptions, groupByCategory } from "../dialog/fuzzy";
@@ -10,7 +11,7 @@ import type { AgentThreadSummary } from "../runtime-port";
 import { useTuiStore } from "../context/store";
 import { createPrimaryClickGesture, isPrimaryClick } from "../input/mouse";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "./selection-row";
-import { fitTerminalPair, terminalWidth } from "../terminal-text";
+import { clipTerminal, fitTerminal, fitTerminalPair, terminalWidth, truncateTerminal } from "../terminal-text";
 import { useTuiDimensions } from "../context/terminal";
 import { bottomPaneOverlayHeightLimit } from "../bottom-pane/footer-state";
 
@@ -39,13 +40,18 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
     const start = scrollWindowStart(all.length, cap, selectedIndex);
     return all.slice(start, start + cap);
   });
-  const standardHeight = () => Math.max(1, Math.min(bottomPaneOverlayHeightLimit(dims().height), maxRows() + 5));
+  const standardRowHeight = () => props.frame.kind === "mcp"
+    ? Math.max(1, Math.min(maxRows(), allRows().length))
+    : maxRows();
+  const standardHeight = () => Math.max(1, Math.min(bottomPaneOverlayHeightLimit(dims().height), standardRowHeight() + 5));
   const left = () => 0;
   const standardTop = () => Math.max(0, dims().height - standardHeight() - 1);
   const descCol = () => descriptionColumn(allRows(), width());
-  const subtitle = () => overlaySubtitle(props.frame.kind);
-  const status = () => props.frame.kind === "model" ? tui.store.ui.statusDetail : undefined;
-  const notice = () => tui.store.ui.lastError;
+  const subtitle = () => overlaySubtitle(props.frame);
+  const status = () => props.frame.kind === "model" || props.frame.kind === "mcp" ? tui.store.ui.statusDetail : undefined;
+  const notice = () => props.frame.kind === "mcp"
+    ? tui.store.ui.lastError ?? tui.store.ui.mcpStatusError
+    : tui.store.ui.lastError;
   const statusLeft = () => notice()
     ? `  error · ${notice()}`
     : props.frame.query
@@ -74,31 +80,6 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
     }
   });
 
-  if (props.frame.kind === "mcp") {
-    const optionRows = () => rows().filter((row): row is OptionOverlayRow => row.kind === "option");
-    const optionLimit = () => mcpOverlayMaxItems(dims().height);
-    const optionCapacity = () => Math.max(1, Math.min(
-      optionLimit(),
-      allRows().filter((row): row is OptionOverlayRow => row.kind === "option").length
-    ));
-    const selectedIndex = () => optionRows().findIndex((row) => row.selected);
-    const optionStart = () => scrollWindowStart(optionRows().length, optionCapacity(), selectedIndex());
-    const visibleOptionRows = () => optionRows().slice(optionStart(), optionStart() + optionCapacity());
-    const overlayHeight = () => mcpOverlayHeight(dims().height, optionCapacity());
-    return (
-      <McpOverlay
-        docked={props.docked}
-        width={width()}
-        height={overlayHeight()}
-        left={left()}
-        top={Math.max(0, dims().height - overlayHeight() - 1)}
-        rows={visibleOptionRows()}
-        summaryRows={rows()}
-        onSelect={selectOption}
-      />
-    );
-  }
-
   if (props.frame.kind === "agents") {
     return (
       <AgentsOverlay
@@ -114,6 +95,20 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
     );
   }
 
+  if (props.frame.kind === "mcp" && props.frame.serverID) {
+    return (
+      <McpDetailOverlay
+        frame={props.frame as Extract<OverlayFrame, { kind: "mcp" }> & { serverID: string }}
+        docked={props.docked}
+        width={width()}
+        terminalHeight={dims().height}
+        allMatches={filterOptions(props.options, "")}
+        matches={matches()}
+        selectedId={selectedId()}
+      />
+    );
+  }
+
   return (
     <box style={{
       ...(props.docked ? {} : { position: "absolute", zIndex: 3000, left: left(), top: standardTop() }),
@@ -123,7 +118,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
       flexShrink: 0,
       overflow: "hidden"
     }}>
-      <text fg={COLOR.text}>{`  ${truncateLine(overlayTitle(props.frame.kind as never), Math.max(1, width() - 4))}`}</text>
+      <text fg={COLOR.text}>{`  ${truncateLine(overlayTitle(props.frame), Math.max(1, width() - 4))}`}</text>
       <Show when={subtitle()}>
         <text fg={COLOR.dim}>{`  ${truncateLine(subtitle(), Math.max(1, width() - 4))}`}</text>
       </Show>
@@ -131,7 +126,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
         <text fg={notice() ? COLOR.error : COLOR.dim}>{statusLine().left || " "}</text>
         <text fg={COLOR.dim}>{statusLine().right}</text>
       </box>
-      <box style={{ height: maxRows(), flexDirection: "column", overflow: "hidden" }}>
+      <box style={{ height: standardRowHeight(), flexDirection: "column", overflow: "hidden" }}>
         <Show when={matches().length > 0} fallback={<text fg={COLOR.dim}>{"  no results"}</text>}>
           <For each={visibleRows()}>{(row) => {
             if (row.kind === "category") return <CategoryRow row={row} />;
@@ -140,7 +135,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
           }}</For>
         </Show>
       </box>
-      <SelectionMenuHint text={overlayHint(props.frame, matches(), tui.store.ui.modelProviders)} />
+      <SelectionMenuHint text={overlayHint(props.frame, matches(), tui.store.ui.modelProviders, tui.store.ui.mcpServers)} />
     </box>
   );
 }
@@ -152,17 +147,6 @@ type OverlayRow = CategoryOverlayRow | SpacerOverlayRow | OptionOverlayRow;
 type CategoryRowProps = { row: CategoryOverlayRow };
 type OptionRowProps = { row: OptionOverlayRow; descCol: number; width: number; onSelect: (id: string) => void };
 
-type McpOverlayProps = {
-  docked: boolean | undefined;
-  width: number;
-  height: number;
-  left: number;
-  top: number;
-  rows: OverlayRow[];
-  summaryRows: OverlayRow[];
-  onSelect: (id: string) => void;
-};
-
 type AgentsOverlayProps = {
   frame: Extract<OverlayFrame, { kind: "agents" }>;
   docked: boolean | undefined;
@@ -170,6 +154,16 @@ type AgentsOverlayProps = {
   left: number;
   terminalHeight: number;
   totalCount: number;
+  matches: FuzzyMatch<unknown>[];
+  selectedId: string | undefined;
+};
+
+type McpDetailOverlayProps = {
+  frame: Extract<OverlayFrame, { kind: "mcp" }> & { serverID: string };
+  docked: boolean | undefined;
+  width: number;
+  terminalHeight: number;
+  allMatches: FuzzyMatch<unknown>[];
   matches: FuzzyMatch<unknown>[];
   selectedId: string | undefined;
 };
@@ -212,80 +206,151 @@ function OptionRow(props: OptionRowProps): JSX.Element {
   );
 }
 
-function McpOverlay(props: McpOverlayProps): JSX.Element {
+function McpDetailOverlay(props: McpDetailOverlayProps): JSX.Element {
   const tui = useTuiStore();
-  const optionRows = () => props.rows.filter((row): row is OptionOverlayRow => row.kind === "option");
-  const summaryOptionRows = () => props.summaryRows.filter((row): row is OptionOverlayRow => row.kind === "option");
-  const readyCount = () => summaryOptionRows().filter((row) => row.option.category === "running").length;
-  const failedCount = () => summaryOptionRows().filter((row) => row.option.category === "stopped").length;
-  const startingCount = () => summaryOptionRows().filter((row) => row.option.category === "starting").length;
-  const summary = () => {
-    const total = summaryOptionRows().length;
-    if (total === 0) return "no configured mcp servers";
-    return `${readyCount()}/${total} ready${startingCount() ? ` · ${startingCount()} starting` : ""}${failedCount() ? ` · ${failedCount()} failed` : ""}`;
+  const server = () => tui.store.ui.mcpServers.find((item) => item.id === props.frame.serverID);
+  const status = () => tui.store.ui.mcpStatuses.find((item) => item.name === props.frame.serverID);
+  const detailColumn = () => mcpDetailColumn(props.allMatches, props.width);
+  const detailWidth = () => Math.max(1, props.width - detailColumn() - 2);
+  const linesFor = (match: FuzzyMatch<unknown>) => previewLines(match.option.description ?? "", detailWidth(), 3);
+  const contentRows = () => props.allMatches.reduce((total, match) => total + Math.max(1, linesFor(match).length), 0);
+  const error = () => status()?.error ?? tui.store.ui.mcpStatusError;
+  const errorRows = () => error() ? 1 : 0;
+  const height = () => Math.max(7, Math.min(bottomPaneOverlayHeightLimit(props.terminalHeight), 4 + errorRows() + contentRows()));
+  const top = () => Math.max(0, props.terminalHeight - height() - 1);
+  const state = () => {
+    const current = status();
+    if (!server()?.enabled) return "disabled";
+    if (current?.running || current?.startupState === "ready") return "running";
+    if (current?.startupState === "starting") return "starting";
+    if (current?.error) return "failed";
+    return "stopped";
   };
+  const endpoint = () => {
+    const current = server();
+    if (!current) return "";
+    if (current.transport === "http") return current.url ?? "";
+    const command = [current.command, ...current.args].join(" ");
+    return command === current.id ? "" : command;
+  };
+  const headerLeft = () => [
+    `mcp · ${props.frame.serverID}`,
+    state(),
+    status()?.cached ? "cached catalog" : undefined
+  ].filter(Boolean).join(" · ");
+  const headerRight = () => [server()?.transport, endpoint()].filter(Boolean).join(" · ");
+  const headerWidth = () => Math.max(1, props.width - 4);
+  const headerLine = () => fitTerminalPair(
+    headerLeft(),
+    truncateTerminal(headerRight(), Math.max(1, Math.floor(headerWidth() * 0.44))),
+    headerWidth(),
+    8,
+    2
+  );
+  let scrollRef!: ScrollBoxRenderable;
+
+  createEffect(() => {
+    const id = props.selectedId;
+    if (!id || !scrollRef) return;
+    try { scrollRef.scrollChildIntoView(id); } catch { }
+  });
+
+  const select = (id: string): void => {
+    const enabled = props.matches.filter((match) => !match.option.disabled);
+    const index = enabled.findIndex((match) => match.option.id === id);
+    if (index >= 0) tui.actions.overlaySetIndex(index, enabled.length);
+  };
+
   return (
-    <box style={{
-      ...(props.docked ? {} : { position: "absolute", zIndex: 3000, left: props.left, top: props.top }),
+    <box id="mcp-detail-overlay" style={{
+      ...(props.docked ? {} : { position: "absolute", zIndex: 3000, left: 0, top: top() }),
       width: props.width,
-      height: props.height,
+      height: height(),
       flexDirection: "column",
       flexShrink: 0,
       overflow: "hidden"
     }}>
-      <text fg={COLOR.text}>{"  mcp servers"}</text>
-      <text fg={tui.store.ui.lastError ? COLOR.error : COLOR.dim}>{`  ${truncateLine(tui.store.ui.lastError ? `error · ${tui.store.ui.lastError}` : summary(), Math.max(1, props.width - 4))}`}</text>
-      <box style={{ height: Math.max(1, props.height - 5), flexShrink: 0, flexDirection: "column", marginTop: 1, overflow: "hidden" }}>
-        <Show when={optionRows().length > 0} fallback={<text fg={COLOR.dim}>{"  no mcp servers configured."}</text>}>
-          <For each={optionRows()}>{(row) => <McpServerRow row={row} width={props.width} onSelect={props.onSelect} />}</For>
-        </Show>
+      <box style={{ height: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-between", paddingLeft: 2, paddingRight: 2 }}>
+        <text fg={COLOR.text}>{headerLine().left}</text>
+        <text fg={COLOR.dim}>{headerLine().right}</text>
       </box>
-      <SelectionMenuHint text="press esc to go back" />
+      <Show when={error()}>{(message) => (
+        <text fg={COLOR.error}>{`  ${truncateLine(`error · ${message()}`, Math.max(1, props.width - 4))}`}</text>
+      )}</Show>
+      <box style={{ height: 1, flexShrink: 0 }} />
+      <scrollbox ref={scrollRef} viewportCulling scrollbarOptions={{ visible: false }} style={{ flexGrow: 1, minHeight: 0, flexDirection: "column" }}>
+        <Show when={props.matches.length > 0} fallback={<text fg={COLOR.dim}>{"  no details match this filter"}</text>}>
+          <For each={props.matches}>{(match) => {
+            const selected = () => match.option.id === props.selectedId;
+            const detailLines = () => linesFor(match);
+            const rowHeight = () => Math.max(1, detailLines().length);
+            const prefix = () => selected() ? "›   " : "    ";
+            const gap = () => detailColumn() >= terminalWidth(prefix()) + 2 ? "  " : "";
+            const label = () => fitTerminal(match.option.title, Math.max(0, detailColumn() - terminalWidth(prefix()) - terminalWidth(gap())));
+            return (
+              <box
+                id={match.option.id}
+                style={{
+                  width: "100%",
+                  height: rowHeight(),
+                  flexShrink: 0,
+                  flexDirection: "column",
+                  backgroundColor: selected() ? COLOR.panelActive : COLOR.panel
+                }}
+                onMouseUp={(event) => {
+                  if (!isPrimaryClick(event)) return;
+                  select(match.option.id);
+                }}
+              >
+                <For each={detailLines().length ? detailLines() : [""]}>{(line, index) => (
+                  <box style={{ height: 1, flexShrink: 0, flexDirection: "row" }}>
+                    <Show when={index() === 0} fallback={<text selectable={false}>{" ".repeat(detailColumn())}</text>}>
+                      <text selectable={false} fg={selected() ? COLOR.accent : COLOR.dim}>{prefix()}</text>
+                      <text selectable={false} fg={COLOR.text}>{label()}</text>
+                      <text selectable={false}>{gap()}</text>
+                    </Show>
+                    <text selectable={false} fg={COLOR.dim}>{line}</text>
+                  </box>
+                )}</For>
+              </box>
+            );
+          }}</For>
+        </Show>
+      </scrollbox>
+      <SelectionMenuHint text={overlayHint(props.frame, props.matches, tui.store.ui.modelProviders, tui.store.ui.mcpServers)} />
     </box>
   );
 }
 
-function McpServerRow(props: { row: OptionOverlayRow; width: number; onSelect: (id: string) => void }): JSX.Element {
-  const option = () => props.row.option;
-  const selected = () => props.row.selected;
-  const state = () => String(option().category ?? "stopped");
-  const color = () => {
-    if (option().id === "mcp-error" || state() === "stopped") return COLOR.error;
-    if (state() === "running") return COLOR.success;
-    if (state() === "starting") return COLOR.accent;
-    if (state() === "disabled") return COLOR.dim;
-    return COLOR.accent;
-  };
-  const statusText = () => {
-    if (option().id === "mcp-error") return "failed";
-    if (state() === "running") return "ready";
-    if (state() === "starting") return "starting";
-    if (state() === "disabled") return "disabled";
-    return "stopped";
-  };
-  const footer = () => option().footer ? ` · ${option().footer}` : "";
-  const status = () => `${statusText()}${footer()}`;
-  const headline = () => fitTerminalPair(option().title, status(), Math.max(1, props.width - 4), 3, 1);
-  const detail = () => truncateLine(option().description ?? "", Math.max(1, props.width - 4));
-  return (
-    <box
-      style={{ height: 2, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}
-      onMouseUp={(event) => {
-        if (!isPrimaryClick(event) || props.row.disabled) return;
-        props.onSelect(props.row.option.id);
-      }}
-    >
-      <box style={{ flexDirection: "row" }}>
-        <text selectable={false} fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
-        <text selectable={false} fg={color()}>{statusGlyph(statusText())}</text>
-        <text selectable={false} fg={COLOR.text}>{` ${headline().left}`}</text>
-        <Show when={headline().right}><text selectable={false} fg={COLOR.dim}>{` ${headline().right}`}</text></Show>
-      </box>
-      <Show when={detail()}>
-        <text selectable={false} fg={option().id === "mcp-error" || detail().startsWith("error:") ? COLOR.error : COLOR.dim}>{`    ${detail()}`}</text>
-      </Show>
-    </box>
-  );
+function mcpDetailColumn(matches: FuzzyMatch<unknown>[], width: number): number {
+  const longest = matches.reduce((maximum, match) => Math.max(maximum, terminalWidth(match.option.title)), 0);
+  const preferred = longest + 6;
+  const maximum = Math.max(1, Math.min(Math.max(1, width - 8), Math.floor(width * 0.46)));
+  return Math.min(Math.max(18, preferred), maximum);
+}
+
+function previewLines(value: string, width: number, limit: number): string[] {
+  const available = Math.max(1, Math.floor(width));
+  const maximum = Math.max(1, Math.floor(limit));
+  let remaining = value.replace(/\s+/g, " ").trim();
+  if (!remaining) return [];
+  const lines: string[] = [];
+  while (remaining && lines.length < maximum) {
+    if (terminalWidth(remaining) <= available) {
+      lines.push(remaining);
+      remaining = "";
+      break;
+    }
+    const clipped = clipTerminal(remaining, available);
+    const boundary = clipped.lastIndexOf(" ");
+    const useBoundary = boundary >= Math.floor(clipped.length * 0.45);
+    const line = (useBoundary ? clipped.slice(0, boundary) : clipped).trimEnd();
+    const consumed = useBoundary ? boundary + 1 : clipped.length;
+    lines.push(line);
+    remaining = remaining.slice(consumed).trimStart();
+  }
+  if (remaining && lines.length) lines[lines.length - 1] = truncateTerminal(`${lines[lines.length - 1]}...`, available, "...");
+  return lines;
 }
 
 function AgentsOverlay(props: AgentsOverlayProps): JSX.Element {
@@ -407,14 +472,6 @@ function agentOverlayMaxItems(terminalHeight: number, expandedRows: number): num
   return Math.min(8, Math.max(1, Math.floor((bottomPaneOverlayHeightLimit(terminalHeight) - 5 - expandedRows) / 2)));
 }
 
-function mcpOverlayMaxItems(terminalHeight: number): number {
-  return Math.min(8, Math.max(1, Math.floor((bottomPaneOverlayHeightLimit(terminalHeight) - 5) / 2)));
-}
-
-function mcpOverlayHeight(terminalHeight: number, itemLimit: number): number {
-  return Math.min(bottomPaneOverlayHeightLimit(terminalHeight), 5 + itemLimit * 2);
-}
-
 function agentDetailLines(item: AgentThreadSummary): string[] {
   if (item.role === "main") return ["main coordination thread"];
   const detail = item.error ?? item.summary;
@@ -465,14 +522,6 @@ function agentElapsed(item: AgentThreadSummary, now: number): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-function statusGlyph(status: string): string {
-  if (status === "ready") return "✓";
-  if (status === "starting") return "•";
-  if (status === "failed" || status === "stopped") return "×";
-  if (status === "disabled") return "-";
-  return "•";
-}
-
 function overlayMaxRows(kind: string, terminalHeight: number): number {
   let cap = 8;
   switch (kind) {
@@ -499,27 +548,43 @@ function descriptionColumn(rows: OverlayRow[], width: number): number {
     })), width);
 }
 
-function overlaySubtitle(kind: string): string {
-  if (kind === "model") return "choose what model to use";
-  if (kind === "mcp") return "review configured mcp servers";
-  if (kind === "sessions") return "resume a saved chat";
-  if (kind === "agents") return "inspect subagent sessions and background work";
-  if (kind === "palette") return "run a tui action";
-  if (kind === "evidence") return "open captured evidence";
-  if (kind === "findings") return "review security findings";
-  if (kind === "memory") return "inspect durable memory";
+function overlaySubtitle(frame: OverlayFrame): string {
+  if (frame.kind === "model") return "choose what model to use";
+  if (frame.kind === "mcp") return frame.serverID ? "auth, tools, resources, and templates" : "review configured mcp servers";
+  if (frame.kind === "sessions") return "resume a saved chat";
+  if (frame.kind === "agents") return "inspect subagent sessions and background work";
+  if (frame.kind === "palette") return "run a tui action";
+  if (frame.kind === "evidence") return "open captured evidence";
+  if (frame.kind === "findings") return "review security findings";
+  if (frame.kind === "memory") return "inspect durable memory";
   return "";
 }
 
 function overlayHint(
   frame: OverlayFrame,
   matches: FuzzyMatch<unknown>[],
-  providers: Array<{ id: string; removable: boolean }>
+  providers: Array<{ id: string; removable: boolean }>,
+  mcpServers: Array<{ id: string; toggleable: boolean; removable: boolean }>
 ): string {
-  if (frame.kind !== "model") return "press enter to confirm or esc to go back";
   const enabled = matches.filter((match) => !match.option.disabled);
   const index = selectableIndex(matches, frame.index);
   const selected = index >= 0 ? enabled[index]?.option.value as { kind?: string; providerID?: string } | undefined : undefined;
+  if (frame.kind === "mcp") {
+    const serverID = frame.serverID ?? (selected?.kind === "mcp_server" ? (selected as { serverID?: string }).serverID : undefined);
+    const server = mcpServers.find((item) => item.id === serverID);
+    const actions = [
+      "ctrl+e edit",
+      "ctrl+t test/start",
+      frame.serverID ? "ctrl+a add" : undefined,
+      server?.toggleable ? "ctrl+x toggle" : undefined,
+      server?.removable ? "ctrl+d remove" : undefined,
+      "esc back"
+    ].filter(Boolean).join(" · ");
+    if (frame.serverID) return actions;
+    if (selected?.kind === "mcp_action") return "enter add · ctrl+a add server · esc back";
+    return `enter details · ctrl+a add · ${actions}`;
+  }
+  if (frame.kind !== "model") return "press enter to confirm or esc to go back";
   if (selected?.kind === "model_action") return "enter add provider · ctrl+a add · esc back";
   const providerID = frame.providerID ?? (selected?.kind === "model_provider" ? selected.providerID : undefined);
   if (!providerID) return "ctrl+a add provider · esc back";

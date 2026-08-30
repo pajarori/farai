@@ -1,8 +1,8 @@
 import { For, Show, type JSX } from "solid-js";
 import type { TimelineRow } from "../../renderers";
-import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
 import { FaraiSpinner } from "../../common/spinner";
+import { MarkdownView } from "../../markdown";
 
 type PlanRowProps = {
   row: Extract<TimelineRow, { kind: "plan" }>;
@@ -30,7 +30,7 @@ export function PlanRow(props: PlanRowProps): JSX.Element {
       <Show when={props.row.markdown && props.row.items.length === 0}>
         {(markdown) => (
           <box style={{ flexDirection: "column", paddingLeft: 2, marginTop: 1 }}>
-            <markdown content={String(markdown())} streaming={props.row.streaming} syntaxStyle={syntax()} fg={COLOR.markdownText} />
+            <MarkdownView content={String(markdown())} streaming={props.row.streaming} />
           </box>
         )}
       </Show>

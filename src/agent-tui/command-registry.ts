@@ -8,6 +8,7 @@ export type CommandCategory =
 
 export type SlashVisibility = "visible" | "hidden";
 export type SlashBehavior = "prompt" | "local";
+export type CommandInvocation = { raw: string; args: string[] };
 
 export type Command = {
   name: string;
@@ -21,7 +22,7 @@ export type Command = {
   slashBehavior?: SlashBehavior;
 
   when?: (ctx: CommandContext) => boolean;
-  run: (ctx: CommandContext) => void | Promise<void>;
+  run: (ctx: CommandContext, invocation?: CommandInvocation) => void | Promise<void>;
 };
 
 export type CommandContext = {
@@ -40,12 +41,14 @@ export type CommandContext = {
 type CommandRegistration = { command: Command };
 
 const commands = new Map<string, CommandRegistration[]>();
+const listeners = new Set<() => void>();
 
 export function registerCommand(command: Command): () => void {
   const registration: CommandRegistration = { command };
   const registrations = commands.get(command.name) ?? [];
   registrations.push(registration);
   commands.set(command.name, registrations);
+  emitChanged();
   return () => {
     const current = commands.get(command.name);
     if (!current) return;
@@ -53,6 +56,7 @@ export function registerCommand(command: Command): () => void {
     if (index < 0) return;
     current.splice(index, 1);
     if (current.length === 0) commands.delete(command.name);
+    emitChanged();
   };
 }
 
@@ -96,4 +100,14 @@ export function isVisibleSlashCommand(command: Command): boolean {
 
 export function clearCommands(): void {
   commands.clear();
+  emitChanged();
+}
+
+export function subscribeCommands(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function emitChanged(): void {
+  for (const listener of listeners) listener();
 }

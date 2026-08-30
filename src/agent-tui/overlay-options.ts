@@ -11,7 +11,11 @@ export type ModelChoice =
   | { kind: "model_provider"; providerID: string }
   | { kind: "model_action"; action: "add" }
   | { kind: "model"; model: string; providerID?: string; contextWindow?: number; maxOutputTokens?: number };
-export type OverlayOptionValue = Command | string | ModelChoice | AgentThreadSummary;
+export type McpChoice =
+  | { kind: "mcp_server"; serverID: string }
+  | { kind: "mcp_detail"; serverID: string; itemID: string }
+  | { kind: "mcp_action"; action: "add" };
+export type OverlayOptionValue = Command | string | ModelChoice | McpChoice | AgentThreadSummary;
 
 export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreValue, ctx: CommandContext): DialogOption<OverlayOptionValue>[] {
   if (!frame) return [];
@@ -102,42 +106,89 @@ export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreVal
     }
     case "mcp": {
       const statuses = tui.store.ui.mcpStatuses;
-      if (tui.store.ui.mcpStatusError) {
-        return [{
-          id: "mcp-error",
-          title: "mcp refresh failed",
-          description: tui.store.ui.mcpStatusError,
-          category: "mcp",
+      const statusByName = new Map(statuses.map((status) => [status.name, status]));
+      if (frame.serverID) {
+        const server = tui.store.ui.mcpServers.find((item) => item.id === frame.serverID);
+        if (!server) return [{
+          id: "mcp-server-missing",
+          title: "server unavailable",
+          description: `${frame.serverID} is no longer configured`,
           disabled: true,
+          numbered: false,
           value: ""
         }];
+        const status = statusByName.get(server.id);
+        return mcpDetailOptions(server, status);
       }
-      if (statuses.length === 0) {
-        return [{
-          id: "mcp-loading",
-          title: tui.store.ui.statusDetail === "refreshing mcp" || tui.store.ui.statusDetail === "starting mcp" ? "loading mcp servers…" : "no mcp servers configured",
-          description: "",
-          category: "mcp",
-          disabled: true,
-          value: ""
-        }];
-      }
-      return statuses.map((status) => {
-        const state = mcpServerState(status);
-        const proxy = status.proxy ? ` · proxy ${status.proxy.running ? `127.0.0.1:${status.proxy.port}` : "stopped"}` : "";
-        return {
-          id: `mcp-${status.name}`,
-          title: status.name,
-          description: status.error ? `error: ${status.error}` : `${status.command}${proxy}`,
-          category: state,
-          footer: `${status.toolCount} tools`,
-          value: status.name
-        };
-      });
+      const servers = [
+        ...tui.store.ui.mcpServers.filter((server) => !server.backbone).map((server) => {
+          const status = statusByName.get(server.id);
+          const state = status ? mcpServerState(status) : server.enabled ? "stopped" : "disabled";
+          const endpoint = server.transport === "http" ? server.url ?? "" : [server.command, ...server.args].join(" ");
+          const endpointLabel = endpoint === server.id ? undefined : endpoint;
+          return {
+            id: `mcp-${server.id}`,
+            title: server.id,
+            description: status?.error
+              ? `error · ${status.error}`
+              : [state, `${status?.toolCount ?? 0} tools`, `${status?.prompts.length ?? 0} prompts`, server.transport, endpointLabel, status?.cached ? "cached catalog" : undefined].filter(Boolean).join(" · "),
+            value: { kind: "mcp_server" as const, serverID: server.id }
+          };
+        }),
+        {
+          id: "mcp-action-add",
+          title: "+ add server",
+          description: "connect a stdio or streamable http mcp server",
+          numbered: false,
+          separatorBefore: true,
+          value: { kind: "mcp_action" as const, action: "add" as const }
+        }
+      ];
+      if (servers.length > 1 || !tui.store.ui.mcpStatusError) return servers;
+      return [{
+        id: "mcp-error",
+        title: "mcp refresh failed",
+        description: tui.store.ui.mcpStatusError,
+        disabled: true,
+        numbered: false,
+        value: ""
+      }, ...servers];
     }
     default:
       return [];
   }
+}
+
+function mcpDetailOptions(
+  server: TuiStoreValue["store"]["ui"]["mcpServers"][number],
+  status: TuiStoreValue["store"]["ui"]["mcpStatuses"][number] | undefined
+): DialogOption<OverlayOptionValue>[] {
+  const auth = status?.authStatus === "bearer_token"
+    ? "bearer token"
+    : status?.authStatus === "oauth"
+      ? "oauth"
+      : status?.authStatus === "not_logged_in"
+        ? "not logged in"
+        : server.transport === "stdio"
+          ? "unsupported"
+          : server.auth;
+  const value = (itemID: string): McpChoice => ({ kind: "mcp_detail", serverID: server.id, itemID });
+  const tools = status?.toolDetails?.length
+    ? status.toolDetails.map((tool) => tool.name)
+    : status?.tools ?? [];
+  const prompts = status?.prompts.map((prompt) => {
+    const args = prompt.arguments.map((argument) => `${argument.name}${argument.required ? "" : "?"}`).join(" ");
+    return `${prompt.title ?? prompt.name}${args ? ` (${args})` : ""}`;
+  }) ?? [];
+  const resources = status?.resources.map((resource) => `${resource.title ?? resource.name} (${resource.uri})`) ?? [];
+  const templates = status?.resourceTemplates.map((template) => `${template.title ?? template.name} (${template.uriTemplate})`) ?? [];
+  return [
+    { id: `mcp-detail-${server.id}-auth`, title: "auth", description: auth, numbered: false, value: value("auth") },
+    { id: `mcp-detail-${server.id}-tools`, title: `tools (${tools.length})`, description: tools.join(", ") || (status?.cached ? "cached catalog is empty" : "test or start the server to load its catalog"), numbered: false, value: value("tools") },
+    { id: `mcp-detail-${server.id}-prompts`, title: `prompts (${prompts.length})`, description: prompts.join(", ") || "none", numbered: false, value: value("prompts") },
+    { id: `mcp-detail-${server.id}-resources`, title: `resources (${resources.length})`, description: resources.join(", ") || "none", numbered: false, value: value("resources") },
+    { id: `mcp-detail-${server.id}-templates`, title: `resource templates (${templates.length})`, description: templates.join(", ") || "none", numbered: false, value: value("templates") }
+  ];
 }
 
 function sessionCategory(archived: boolean, running: boolean): "archived" | "running" | "recent" {
@@ -226,8 +277,9 @@ function compactStats(evidence: number, findings: number, todos: number): string
   return `${evidence}e ${findings}f ${todos}t`;
 }
 
-export function overlayTitle(kind: OverlayFrame["kind"]): string {
-  switch (kind) {
+export function overlayTitle(frame: OverlayFrame): string {
+  if (frame.kind === "mcp" && frame.serverID) return `mcp · ${frame.serverID}`;
+  switch (frame.kind) {
     case "palette": return "command palette";
     case "sessions": return "resume conversation";
     case "evidence": return "evidence";

@@ -325,12 +325,12 @@ export class ContextEngine {
     for (const [index, block] of extraBlocks.entries()) {
       candidates.push(candidate({
         id: block.id ?? `ephemeral-${index}`,
-        class: "ephemeral",
+        class: block.stable ? "capabilities" : "ephemeral",
         title: block.title,
         source: "runtime",
         content: boundedEphemeralContext(block.body),
         mandatory: true,
-        stable: false,
+        stable: Boolean(block.stable),
         priority: 100,
         relevance: 1
       }));

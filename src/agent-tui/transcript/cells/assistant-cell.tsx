@@ -1,7 +1,7 @@
 import type { JSX } from "solid-js";
 import type { TimelineRow } from "../../renderers";
-import { syntax } from "../../syntax";
 import { COLOR } from "../../theme";
+import { MarkdownView } from "../../markdown";
 import { TranscriptMarker } from "./transcript-marker";
 
 type AssistantMessageProps = {
@@ -15,13 +15,10 @@ export function AssistantMessage(props: AssistantMessageProps): JSX.Element {
       <box style={{ flexDirection: "row", flexShrink: 0, minWidth: 0 }}>
         <TranscriptMarker color={COLOR.dim} />
         <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
-          <markdown
-            width="100%"
+          <MarkdownView
+            id={`${props.row.id}:markdown`}
             content={props.streamedText ?? props.row.text}
-            streaming={true}
-            internalBlockMode="top-level"
-            syntaxStyle={syntax()}
-            tableOptions={{ style: "columns", widthMode: "content", cellPaddingX: 1 }}
+            streaming={props.row.streaming}
             fg={COLOR.markdownText}
           />
         </box>

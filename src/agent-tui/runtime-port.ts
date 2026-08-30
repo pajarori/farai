@@ -26,7 +26,7 @@ import type { ServiceStatus } from "../agent-tools/services/types";
 import { sessionDisplayName } from "../session-title";
 import { serviceRegistry } from "../agent-tools/services/registry";
 import { proxyFlowDetailFromMcpInspect, proxyFlowsFromMcpTrafficSummary, readProxyFlowDetail, readProxyFlows, type ProxyFlowDetail, type ProxyFlowQuery, type ProxyFlowSummary } from "../agent-tools/services/mitmproxy/flows";
-import { callMcpServerTool, listMcpServerStatuses, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
+import { callMcpServerTool, listMcpServerStatuses, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
 import type { ModelChoiceInfo } from "../agent-core/model-choices";
 import { modelChoicesFromCatalog } from "../agent-core/model-choices";
 import { buildModelCatalog } from "../agent-core/model-catalog";
@@ -35,6 +35,7 @@ import { loadModelProfiles } from "../agent-core/model-profiles";
 import { HEURISTIC_MODEL_ID } from "../agent-core/model-registry";
 import type { ContextManifest } from "../agent-core/context-engine";
 import { browserContextManager, type BrowserContextActivity } from "../agent-tools/browser/context-manager";
+import { listConfiguredMcpServers, removeMcpServer, saveMcpServer, setMcpServerEnabled, type McpServerInfo, type SaveMcpServerInput } from "../agent-core/mcp-server-management";
 
 export type TuiEvent =
   | { type: "event.appended"; sessionId: string; event: SessionEvent }
@@ -134,6 +135,11 @@ export type RemoveModelProviderResult = {
   updatedSessions: number;
 };
 
+export type McpCatalogSnapshot = {
+  servers: McpServerInfo[];
+  statuses: McpServerRuntimeStatus[];
+};
+
 export interface TuiRuntimePort {
   listSessions(): Promise<Session[]>;
   listSessionItems(): Promise<SessionListItem[]>;
@@ -156,7 +162,15 @@ export interface TuiRuntimePort {
   saveModelProvider(input: SaveModelProviderInput): Promise<ModelCatalogSnapshot>;
   removeModelProvider(providerID: string): Promise<RemoveModelProviderResult>;
   refreshMcp(): Promise<void>;
+  loadMcpCatalog(): Promise<McpCatalogSnapshot>;
   listMcpStatuses(): Promise<McpServerRuntimeStatus[]>;
+  probeMcpServer(input: SaveMcpServerInput, signal?: AbortSignal): Promise<McpServerProbeResult>;
+  saveMcpServer(input: SaveMcpServerInput): Promise<McpCatalogSnapshot>;
+  removeMcpServer(serverID: string): Promise<McpCatalogSnapshot>;
+  setMcpServerEnabled(serverID: string, enabled: boolean): Promise<McpCatalogSnapshot>;
+  startMcpServer(serverID: string): Promise<McpServerRuntimeStatus>;
+  stopMcpServer(serverID: string): Promise<McpServerRuntimeStatus>;
+  invokeMcpPrompt(sessionId: string, server: string, prompt: string, args: string[]): Promise<string>;
   startContainer(): Promise<void>;
   stopContainer(): Promise<void>;
   loadSnapshot(sessionId: string): Promise<SessionSnapshot>;
@@ -628,8 +642,53 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       const session = runtime.loadSession(activeSessionId);
       await runtime.refreshMcp(session);
     },
+    async loadMcpCatalog() {
+      return {
+        servers: listConfiguredMcpServers(runtime.workspace),
+        statuses: listMcpServerStatuses(activeSessionId)
+      };
+    },
     async listMcpStatuses() {
       return listMcpServerStatuses(activeSessionId);
+    },
+    async probeMcpServer(input, signal) {
+      if (!activeSessionId) throw new Error("no active session to test an MCP server for");
+      return await runtime.probeMcpServer(runtime.loadSession(activeSessionId), input, signal);
+    },
+    async saveMcpServer(input) {
+      saveMcpServer(runtime.workspace, input);
+      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId));
+      return {
+        servers: listConfiguredMcpServers(runtime.workspace),
+        statuses: listMcpServerStatuses(activeSessionId)
+      };
+    },
+    async removeMcpServer(serverID) {
+      removeMcpServer(runtime.workspace, serverID);
+      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId));
+      return {
+        servers: listConfiguredMcpServers(runtime.workspace),
+        statuses: listMcpServerStatuses(activeSessionId)
+      };
+    },
+    async setMcpServerEnabled(serverID, enabled) {
+      setMcpServerEnabled(runtime.workspace, serverID, enabled);
+      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId));
+      return {
+        servers: listConfiguredMcpServers(runtime.workspace),
+        statuses: listMcpServerStatuses(activeSessionId)
+      };
+    },
+    async startMcpServer(serverID) {
+      if (!activeSessionId) throw new Error("no active session to start an MCP server for");
+      return await runtime.startMcpServer(runtime.loadSession(activeSessionId), serverID);
+    },
+    async stopMcpServer(serverID) {
+      if (!activeSessionId) throw new Error("no active session to stop an MCP server for");
+      return await runtime.stopMcpServer(runtime.loadSession(activeSessionId), serverID);
+    },
+    async invokeMcpPrompt(sessionId, server, prompt, args) {
+      return await runtime.invokeMcpPrompt(runtime.loadSession(sessionId), server, prompt, args);
     },
     async startContainer() {
       if (!activeSessionId) throw new Error("no active session to start a container for.");
