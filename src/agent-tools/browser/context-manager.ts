@@ -20,6 +20,7 @@ type BrowserContextEntry = BrowserContextActivity & {
   mutex: AsyncMutex;
   ready: Promise<void>;
   lifecycle: AbortController;
+  stopTask?: Promise<void>;
 };
 
 type BrowserContextListener = (contexts: BrowserContextActivity[]) => void;
@@ -38,6 +39,7 @@ const MAX_BROWSER_CONTEXTS_PER_SESSION = 8;
 export class BrowserContextManager {
   private readonly contexts = new Map<string, Map<string, BrowserContextEntry>>();
   private readonly listeners = new Map<string, Set<BrowserContextListener>>();
+  private readonly sessionStopTasks = new Map<string, Promise<void>>();
 
   constructor(private readonly options: BrowserContextManagerOptions = {}) {}
 
@@ -67,19 +69,9 @@ export class BrowserContextManager {
   }
 
   async close(input: { session: Session; browser: string; signal?: AbortSignal }): Promise<BrowserContextActivity> {
+    input.signal?.throwIfAborted();
     const entry = this.resolve(input.session.id, input.browser);
-    await waitForSignal(entry.ready, input.signal);
-    await entry.mutex.run(async () => {
-      entry.status = "closing";
-      this.emit(entry.sessionId);
-      try {
-        await entry.client?.stop();
-      } finally {
-        this.contexts.get(entry.sessionId)?.delete(entry.id);
-        if (this.contexts.get(entry.sessionId)?.size === 0) this.contexts.delete(entry.sessionId);
-        this.emit(entry.sessionId);
-      }
-    }, input.signal);
+    await this.disposeEntry(entry, new Error("Browser context closed"));
     return toActivity(entry);
   }
 
@@ -93,8 +85,13 @@ export class BrowserContextManager {
     const entry = input.browser
       ? this.resolve(input.session.id, input.browser)
       : await this.createNamed({ ...input, name: "default" }, true).then((activity) => this.resolve(input.session.id, activity.id));
-    await waitForSignal(entry.ready, input.signal);
+    const signal = input.signal
+      ? AbortSignal.any([input.signal, entry.lifecycle.signal])
+      : entry.lifecycle.signal;
+    await waitForSignal(entry.ready, signal);
     return await entry.mutex.run(async () => {
+      signal.throwIfAborted();
+      if (entry.status === "closing") throw new Error("Browser context is closing");
       entry.status = "busy";
       entry.lastUsedAt = nowIso();
       this.emit(entry.sessionId);
@@ -102,41 +99,40 @@ export class BrowserContextManager {
         const invoke = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
           if (!entry.tools.has(tool)) throw new Error(`Browser backend does not provide ${tool}`);
           if (!entry.client) throw new Error("Browser context client is unavailable");
-          return await entry.client.callTool(tool, args, input.signal);
+          return await entry.client.callTool(tool, args, signal);
         };
         const context = toActivity(entry);
         return { context, value: await operation(invoke, context) };
       } finally {
-        entry.status = "ready";
+        if (!entry.lifecycle.signal.aborted && this.contexts.get(entry.sessionId)?.get(entry.id) === entry) entry.status = "ready";
         entry.lastUsedAt = nowIso();
         this.emit(entry.sessionId);
       }
-    }, input.signal);
+    }, signal);
   }
 
   async stopSession(session: Session | string): Promise<void> {
     const sessionId = typeof session === "string" ? session : session.id;
-    const entries = [...(this.contexts.get(sessionId)?.values() ?? [])];
-    for (const entry of entries) entry.lifecycle.abort(new Error("Browser session stopped"));
-    await Promise.allSettled(entries.map(async (entry) => {
-      await entry.ready.catch(() => {});
-      await entry.mutex.run(async () => {
-        entry.status = "closing";
-        this.emit(sessionId);
-        await entry.client?.stop().catch(() => {});
-      });
-    }));
-    this.contexts.delete(sessionId);
-    this.emit(sessionId);
+    const existing = this.sessionStopTasks.get(sessionId);
+    if (existing) return await existing;
+    const task = this.stopSessionOnce(sessionId);
+    this.sessionStopTasks.set(sessionId, task);
+    try {
+      await task;
+    } finally {
+      if (this.sessionStopTasks.get(sessionId) === task) this.sessionStopTasks.delete(sessionId);
+    }
   }
 
   private async createNamed(input: { workspace: string; configWorkspace?: string; session: Session; name: string; signal?: AbortSignal }, allowDefault: boolean): Promise<BrowserContextActivity> {
     input.signal?.throwIfAborted();
+    if (this.sessionStopTasks.has(input.session.id)) throw new Error("Browser session is stopping");
     const name = normalizeBrowserName(input.name);
     if (!allowDefault && name.toLowerCase() === "default") throw new Error("Browser name 'default' is reserved for the implicit browser context");
     const sessionContexts = this.sessionContexts(input.session.id);
     const existing = [...sessionContexts.values()].find((entry) => entry.name.toLowerCase() === name.toLowerCase());
     if (existing) {
+      if (existing.status === "closing") throw new Error(`Browser context is closing: ${name}`);
       await waitForSignal(existing.ready, input.signal);
       return toActivity(existing);
     }
@@ -178,19 +174,19 @@ export class BrowserContextManager {
     try {
       const managedProxyPort = loopbackProxyPort(config);
       if (managedProxyPort !== undefined) {
-        await (this.options.ensureProxy ?? ensureMcpProxyReady)({
+        await waitForSignal((this.options.ensureProxy ?? ensureMcpProxyReady)({
           workspace: input.workspace,
           configWorkspace,
           session: input.session,
           signal
-        }, managedProxyPort);
+        }, managedProxyPort), signal);
       }
-      const prepared = await (this.options.prepareServer ?? prepareMcpServerProcess)({
+      const prepared = await waitForSignal((this.options.prepareServer ?? prepareMcpServerProcess)({
         workspace: input.workspace,
         configWorkspace,
         session: input.session,
         signal
-      }, config);
+      }, config), signal);
       const client = this.createClient(prepared);
       entry.client = client;
       await waitForSignal(client.initialize(signal), signal);
@@ -205,12 +201,38 @@ export class BrowserContextManager {
       return toActivity(entry);
     } catch (error) {
       rejectReady(error);
-      await entry.client?.stop().catch(() => {});
-      sessionContexts.delete(entry.id);
-      if (sessionContexts.size === 0) this.contexts.delete(entry.sessionId);
-      this.emit(entry.sessionId);
+      await this.disposeEntry(entry, error instanceof Error ? error : new Error(String(error))).catch(() => {});
       throw error;
     }
+  }
+
+  private async stopSessionOnce(sessionId: string): Promise<void> {
+    const entries = [...(this.contexts.get(sessionId)?.values() ?? [])];
+    await Promise.allSettled(entries.map((entry) => this.disposeEntry(entry, new Error("Browser session stopped"))));
+    if (this.contexts.get(sessionId)?.size === 0) this.contexts.delete(sessionId);
+    this.emit(sessionId);
+  }
+
+  private async disposeEntry(entry: BrowserContextEntry, reason: Error): Promise<void> {
+    if (entry.stopTask) return await entry.stopTask;
+    entry.status = "closing";
+    entry.lifecycle.abort(reason);
+    this.emit(entry.sessionId);
+    const task = (async () => {
+      await entry.ready.catch(() => {});
+      try {
+        await entry.mutex.run(async () => {
+          await entry.client?.stop();
+        });
+      } finally {
+        const contexts = this.contexts.get(entry.sessionId);
+        if (contexts?.get(entry.id) === entry) contexts.delete(entry.id);
+        if (contexts?.size === 0) this.contexts.delete(entry.sessionId);
+        this.emit(entry.sessionId);
+      }
+    })();
+    entry.stopTask = task;
+    return await task;
   }
 
   private resolve(sessionId: string, selector: string): BrowserContextEntry {

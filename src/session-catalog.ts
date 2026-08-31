@@ -1,13 +1,18 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { localFaraiDir } from "./agent-core/config";
 import type { Session } from "./types";
+import { readBoundedFileTextSyncNoFollow } from "./file-read";
+import { atomicWriteFile } from "./agent-core/atomic-file";
+import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists } from "./agent-core/private-path";
+
+const SESSION_CATALOG_ENTRY_MAX_BYTES = 64 * 1024;
 
 export type SessionCatalogEntry = Pick<Session, "id" | "workspace" | "title" | "parentId" | "updatedAt">;
 
 export function recordSessionLocation(session: Session): void {
   const directory = catalogDirectory();
-  mkdirSync(directory, { recursive: true });
+  ensurePrivateDirectory(directory, "session catalog directory");
   const entry: SessionCatalogEntry = {
     id: session.id,
     workspace: resolve(session.workspace),
@@ -15,7 +20,9 @@ export function recordSessionLocation(session: Session): void {
     ...(session.parentId ? { parentId: session.parentId } : {}),
     updatedAt: session.updatedAt
   };
-  writeFileSync(join(directory, `${session.id}.json`), `${JSON.stringify(entry)}\n`);
+  const path = join(directory, `${session.id}.json`);
+  ensurePrivateRegularFileIfExists(path, "session catalog entry");
+  atomicWriteFile(path, `${JSON.stringify(entry)}\n`, 0o600);
 }
 
 export function removeSessionLocation(sessionId: string): void {
@@ -37,11 +44,14 @@ export function resolveSessionLocation(query: string): SessionCatalogEntry | und
 export function listSessionLocations(): SessionCatalogEntry[] {
   const directory = catalogDirectory();
   if (!existsSync(directory)) return [];
+  try { ensurePrivateDirectory(directory, "session catalog directory"); } catch { return []; }
   return readdirSync(directory)
     .filter((name) => name.endsWith(".json"))
     .flatMap((name) => {
       try {
-        const value = JSON.parse(readFileSync(join(directory, name), "utf8")) as Partial<SessionCatalogEntry>;
+        const path = join(directory, name);
+        ensurePrivateRegularFileIfExists(path, "session catalog entry");
+        const value = JSON.parse(readBoundedFileTextSyncNoFollow(path, SESSION_CATALOG_ENTRY_MAX_BYTES, "session catalog entry")) as Partial<SessionCatalogEntry>;
         if (typeof value.id !== "string" || typeof value.workspace !== "string" || typeof value.updatedAt !== "string") return [];
         return [{
           id: value.id,

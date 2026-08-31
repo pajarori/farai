@@ -452,7 +452,26 @@ export type OutputArtifact = {
   toolCallId?: string;
   path: string;
   bytes: number;
+  lines?: number;
   createdAt: string;
+};
+
+export type OutputArtifactReadOptions = {
+  offset?: number;
+  limit?: number;
+  byteOffset?: number;
+  byteLimit?: number;
+};
+
+export type OutputArtifactReadResult = {
+  artifact: OutputArtifact;
+  content: string;
+  totalLines: number;
+  from: number;
+  to: number;
+  byteFrom?: number;
+  byteTo?: number;
+  nextByteOffset?: number;
 };
 
 export type AgentPromptResult = {
@@ -474,13 +493,16 @@ export type ToolResult = {
   processId?: string;
 };
 
-export type ToolAttachment = {
+type ToolAttachmentMetadata = {
   kind: "image";
   mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
-  data: string;
   name?: string;
   detail?: "auto" | "low" | "high";
 };
+
+export type InlineToolAttachment = ToolAttachmentMetadata & { data: string; path?: string; bytes?: number; sha256?: string };
+export type StoredToolAttachment = ToolAttachmentMetadata & { data?: undefined; path: string; bytes: number; sha256: string };
+export type ToolAttachment = InlineToolAttachment | StoredToolAttachment;
 
 export type AgentLifecycleEntry = {
   sessionId: string;
@@ -553,7 +575,7 @@ export type ToolContext = {
     loadEvidence?: (evidenceId: string) => Evidence;
     loadSession?: (sessionId: string) => Session;
     saveOutputArtifact: (input: { sessionId: string; toolCallId?: string; content: string }) => OutputArtifact;
-    readOutputArtifact?: (artifactId: string, options?: { offset?: number; limit?: number }) => { artifact: OutputArtifact; content: string; totalLines: number; from: number; to: number } | undefined;
+    readOutputArtifact?: (artifactId: string, options?: OutputArtifactReadOptions) => OutputArtifactReadResult | undefined;
     loadJob?: (jobId: string) => BackgroundJob;
     findJobByProcessId?: (processId: string) => BackgroundJob | undefined;
     addNote: (note: Note) => void;

@@ -3,7 +3,6 @@ import { mkdirSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { spawn as spawnPty } from "bun-pty";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { truncate } from "../utils";
 import type { BackendExecResult, BackendSessionResult, ExecutionBackend, SessionKind } from "../agent-tools/backends/types";
 import { SpawnSessionStore, allOutput, combinedOutput, killEntry, toBackendSession, touch, waitForExit, waitForExitOrYield, writeInput } from "../agent-tools/backends/spawn-session";
 import {
@@ -17,6 +16,10 @@ import {
   waitForPtyExitOrYield,
   writePtyInput
 } from "../agent-tools/backends/pty-session";
+import { runCapturedProcess } from "../agent-tools/backends/captured-process";
+import { BoundedOutputBuffer, INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
+import { isolatedProcessGroup, terminateProcessTree } from "../agent-tools/backends/process-tree";
+import { id } from "../utils";
 import { KALI_TOOL_MANIFEST } from "./kali-tool-manifest";
 import {
   managedContainerLabels,
@@ -78,6 +81,79 @@ const kaliSessions = new SpawnSessionStore();
 const kaliPtySessions = new PtySessionStore();
 const containerStartLocks = new Map<string, Promise<ContainerExecResult>>();
 let globalContainerStartChain: Promise<unknown> = Promise.resolve();
+
+const CONTAINER_EXEC_MARKER_DIR = "/tmp/farai-exec";
+const CONTAINER_EXEC_WRAPPER = [
+  "marker=$1",
+  "shift",
+  "umask 077",
+  "mkdir -p -- \"$(dirname -- \"$marker\")\"",
+  "printf '%s\\n' \"$$\" > \"$marker\"",
+  "cleanup() { rm -f -- \"$marker\"; }",
+  "trap cleanup EXIT",
+  "\"$@\"",
+  "status=$?",
+  "exit \"$status\""
+].join("\n");
+const CONTAINER_EXEC_KILLER = [
+  "import os, signal, sys, time",
+  "path = sys.argv[1]",
+  "root = None",
+  "marker_deadline = time.monotonic() + 0.25",
+  "while root is None and time.monotonic() < marker_deadline:",
+  "    try:",
+  "        with open(path, encoding='ascii') as handle:",
+  "            root = int(handle.read().strip())",
+  "    except (FileNotFoundError, OSError, ValueError):",
+  "        time.sleep(0.01)",
+  "if root is None:",
+  "    raise SystemExit(0)",
+  "def direct_children(pid):",
+  "    try:",
+  "        with open(f'/proc/{pid}/task/{pid}/children', encoding='ascii') as handle:",
+  "            return [int(value) for value in handle.read().split()]",
+  "    except (FileNotFoundError, OSError, ValueError):",
+  "        return []",
+  "def descendants(pid):",
+  "    found = []",
+  "    pending = direct_children(pid)",
+  "    seen = set()",
+  "    while pending:",
+  "        child = pending.pop()",
+  "        if child in seen:",
+  "            continue",
+  "        seen.add(child)",
+  "        found.append(child)",
+  "        pending.extend(direct_children(child))",
+  "    return found",
+  "def alive(pid):",
+  "    try:",
+  "        os.kill(pid, 0)",
+  "        return True",
+  "    except ProcessLookupError:",
+  "        return False",
+  "    except PermissionError:",
+  "        return True",
+  "targets = descendants(root)",
+  "for pid in [*reversed(targets), root]:",
+  "    try:",
+  "        os.kill(pid, signal.SIGTERM)",
+  "    except (ProcessLookupError, PermissionError):",
+  "        pass",
+  "deadline = time.monotonic() + 1.0",
+  "while time.monotonic() < deadline and any(alive(pid) for pid in [root, *targets]):",
+  "    time.sleep(0.025)",
+  "targets = list(dict.fromkeys([*targets, *descendants(root)]))",
+  "for pid in [*reversed(targets), root]:",
+  "    try:",
+  "        os.kill(pid, signal.SIGKILL)",
+  "    except (ProcessLookupError, PermissionError):",
+  "        pass",
+  "try:",
+  "    os.unlink(path)",
+  "except FileNotFoundError:",
+  "    pass"
+].join("\n");
 
 function withGlobalContainerStartLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = globalContainerStartChain.catch(() => undefined).then(fn);
@@ -352,7 +428,10 @@ export class KaliContainerBackend implements ExecutionBackend {
     options: { cwd?: string; env?: Record<string, string> } = {}
   ): Promise<ChildProcessWithoutNullStreams> {
     await this.ensurePersistentRunning();
-    const child = spawn("docker", this.stdioArgs(command, options), { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("docker", this.stdioArgs(command, options), {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: isolatedProcessGroup()
+    });
     await new Promise<void>((resolve, reject) => {
       const onSpawn = (): void => { cleanup(); resolve(); };
       const onError = (error: Error): void => { cleanup(); reject(error); };
@@ -374,58 +453,83 @@ export class KaliContainerBackend implements ExecutionBackend {
   ): Promise<ContainerExecResult & { backgroundSessionId?: string }> {
     await this.ensurePersistentRunning();
     const started = Date.now();
-    const args = this.execArgs(command);
+    const marker = this.execMarker();
+    const args = this.managedExecArgs(["bash", "-lc", command], marker);
 
     return await new Promise((resolve) => {
-      const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
-      let stdout = "";
-      let stderr = "";
+      const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"], detached: isolatedProcessGroup() });
+      const stdout = new BoundedOutputBuffer(maxOutputChars);
+      const stderr = new BoundedOutputBuffer(maxOutputChars);
       const stdoutDecoder = new StringDecoder("utf8");
       const stderrDecoder = new StringDecoder("utf8");
       let converted = false;
+      let terminating = false;
+      let settled = false;
       const onStdout = (chunk: Buffer) => {
+        stdout.push(chunk);
         const text = stdoutDecoder.write(chunk);
-        stdout += text;
         if (text) this.onOutputChunk?.(text, "stdout");
       };
       const onStderr = (chunk: Buffer) => {
+        stderr.push(chunk);
         const text = stderrDecoder.write(chunk);
-        stderr += text;
         if (text) this.onOutputChunk?.(text, "stderr");
       };
       const timer = setTimeout(() => {
+        if (terminating || settled) return;
         converted = true;
         child.stdout.removeListener("data", onStdout);
         child.stderr.removeListener("data", onStderr);
-        const { sessionId } = kaliSessions.register(child);
+        const { sessionId } = kaliSessions.register(child, { beforeKill: () => this.stopContainerExec(marker) });
         resolve({
           exitCode: null,
-          stdout: truncate(stdout, maxOutputChars),
-          stderr: truncate(stderr, maxOutputChars),
+          stdout: stdout.text(),
+          stderr: stderr.text(),
           durationMs: Date.now() - started,
           timedOut: false,
           backgroundSessionId: sessionId
         });
       }, timeoutMs);
-      const abort = () => child.kill("SIGTERM");
+      let settleExit!: () => void;
+      const exited = new Promise<void>((settle) => { settleExit = settle; });
+      const abort = () => {
+        terminating = true;
+        clearTimeout(timer);
+        void this.stopContainerExec(marker).finally(() => terminateProcessTree(child, exited));
+      };
       if (signal?.aborted) abort();
       else signal?.addEventListener("abort", abort, { once: true });
       child.stdout.on("data", onStdout);
       child.stderr.on("data", onStderr);
-      child.on("close", (exitCode) => {
+      child.on("error", (error) => {
+        settleExit();
         clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
-        if (converted) return;
+        if (converted || settled) return;
+        settled = true;
+        stderr.push(error.message);
+        resolve({
+          exitCode: 127,
+          stdout: stdout.text(),
+          stderr: stderr.text(),
+          durationMs: Date.now() - started,
+          timedOut: false
+        });
+      });
+      child.on("close", (exitCode) => {
+        settleExit();
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        if (converted || settled) return;
+        settled = true;
         const stdoutTail = stdoutDecoder.end();
         const stderrTail = stderrDecoder.end();
-        stdout += stdoutTail;
-        stderr += stderrTail;
         if (stdoutTail) this.onOutputChunk?.(stdoutTail, "stdout");
         if (stderrTail) this.onOutputChunk?.(stderrTail, "stderr");
         resolve({
           exitCode,
-          stdout: truncate(stdout, maxOutputChars),
-          stderr: truncate(stderr, maxOutputChars),
+          stdout: stdout.text(),
+          stderr: stderr.text(),
           durationMs: Date.now() - started,
           timedOut: false
         });
@@ -446,30 +550,34 @@ export class KaliContainerBackend implements ExecutionBackend {
     await this.ensurePersistentRunning();
 
     if (opts.pty) {
-
-      const proc = spawnPty("docker", ["exec", "-it", "-w", this.workspacePath, this.containerName, "bash", "-l"], {
+      const marker = this.execMarker();
+      const proc = spawnPty("docker", ["exec", "-it", "-w", this.workspacePath, this.containerName, ...this.wrappedCommand(["bash", "-l"], marker)], {
         name: "xterm-256color",
         cols: 120,
         rows: 30,
         env: process.env as Record<string, string>
       });
-      const abort = () => proc.kill();
+      const { sessionId, entry } = kaliPtySessions.register(proc, { beforeKill: () => this.stopContainerExec(marker) });
+      const abort = () => { void killPtyEntry(entry); };
       if (opts.signal?.aborted) abort();
       else opts.signal?.addEventListener("abort", abort, { once: true });
-
-      const { sessionId, entry } = kaliPtySessions.register(proc);
-      writePtyInput(entry, command);
+      void entry.exit.then(() => opts.signal?.removeEventListener("abort", abort));
+      await writePtyInput(entry, command);
       await waitForPtyExitOrYield(entry, opts.yieldMs);
       touchPty(entry);
       return { session: toPtyBackendSession(sessionId, entry), output: drainOutput(entry) };
     }
 
-    const child = spawn("docker", ["exec", "-i", "-w", this.workspacePath, this.containerName, "bash", "-lc", command], { stdio: ["pipe", "pipe", "pipe"] });
-    const abort = () => child.kill("SIGTERM");
+    const marker = this.execMarker();
+    const child = spawn("docker", this.managedExecArgs(["bash", "-lc", command], marker), {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: isolatedProcessGroup()
+    });
+    const { sessionId, entry } = kaliSessions.register(child, { beforeKill: () => this.stopContainerExec(marker) });
+    const abort = () => { void killEntry(entry); };
     if (opts.signal?.aborted) abort();
     else opts.signal?.addEventListener("abort", abort, { once: true });
-
-    const { sessionId, entry } = kaliSessions.register(child);
+    void entry.exit.then(() => opts.signal?.removeEventListener("abort", abort));
     await waitForExitOrYield(entry, opts.yieldMs);
     touch(entry);
     return { session: toBackendSession(sessionId, entry), output: combinedOutput(entry) };
@@ -493,7 +601,7 @@ export class KaliContainerBackend implements ExecutionBackend {
   async pollSession(sessionId: string, opts: { input?: string; yieldMs: number }): Promise<BackendSessionResult> {
     const ptyEntry = kaliPtySessions.get(sessionId);
     if (ptyEntry) {
-      if (opts.input) writePtyInput(ptyEntry, opts.input);
+      if (opts.input) await writePtyInput(ptyEntry, opts.input);
       await waitForPtyExitOrYield(ptyEntry, opts.yieldMs);
       touchPty(ptyEntry);
       return { session: toPtyBackendSession(sessionId, ptyEntry), output: drainOutput(ptyEntry) };
@@ -501,7 +609,7 @@ export class KaliContainerBackend implements ExecutionBackend {
 
     const entry = kaliSessions.get(sessionId);
     if (!entry) throw new Error(`Unknown session: ${sessionId}`);
-    if (opts.input) writeInput(entry, opts.input);
+    if (opts.input) await writeInput(entry, opts.input);
     await waitForExitOrYield(entry, opts.yieldMs);
     touch(entry);
     return { session: toBackendSession(sessionId, entry), output: combinedOutput(entry) };
@@ -510,15 +618,34 @@ export class KaliContainerBackend implements ExecutionBackend {
   async stopSession(sessionId: string): Promise<void> {
     const ptyEntry = kaliPtySessions.get(sessionId);
     if (ptyEntry) {
-      killPtyEntry(ptyEntry);
+      await killPtyEntry(ptyEntry);
       kaliPtySessions.delete(sessionId);
       return;
     }
 
     const entry = kaliSessions.get(sessionId);
     if (!entry) return;
-    killEntry(entry);
+    await killEntry(entry);
     kaliSessions.delete(sessionId);
+  }
+
+  private execMarker(): string {
+    return `${CONTAINER_EXEC_MARKER_DIR}/${id()}.pid`;
+  }
+
+  private managedExecArgs(command: string[], marker: string): string[] {
+    return ["exec", "-i", "-w", this.workspacePath, this.containerName, ...this.wrappedCommand(command, marker)];
+  }
+
+  private wrappedCommand(command: string[], marker: string): string[] {
+    return ["bash", "-c", CONTAINER_EXEC_WRAPPER, "farai-exec", marker, ...command];
+  }
+
+  private async stopContainerExec(marker: string): Promise<void> {
+    const result = await this.processRunner("docker", ["exec", this.containerName, "python3", "-c", CONTAINER_EXEC_KILLER, marker]);
+    if (result.exitCode !== 0 && !containerDoesNotExist(result)) {
+      throw new Error(result.stderr.trim() || result.stdout.trim() || `Could not stop process in ${this.containerName}`);
+    }
   }
 
   private execArgs(command: string): string[] {
@@ -590,53 +717,7 @@ function imageIdsMatch(left: string, right: string): boolean {
 }
 
 async function runProcess(command: string, args: string[], timeoutMs = 15_000): Promise<ContainerExecResult> {
-  const started = Date.now();
-  let proc: ReturnType<typeof spawn>;
-  try {
-    proc = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-  } catch (error) {
-    return {
-      exitCode: 127,
-      stdout: "",
-      stderr: error instanceof Error ? error.message : String(error),
-      durationMs: Date.now() - started,
-      timedOut: false
-    };
-  }
-  let stdout = "";
-  let stderr = "";
-  const stdoutDecoder = new StringDecoder("utf8");
-  const stderrDecoder = new StringDecoder("utf8");
-  proc.stdout?.on("data", (chunk) => {
-    stdout += stdoutDecoder.write(chunk);
-  });
-  proc.stderr?.on("data", (chunk) => {
-    stderr += stderrDecoder.write(chunk);
-  });
-  const exitCode = await new Promise<number | null>((resolve) => {
-    const timer = setTimeout(() => {
-      proc.kill("SIGTERM");
-      resolve(null);
-    }, timeoutMs);
-    proc.once("error", (error) => {
-      clearTimeout(timer);
-      stderr += error.message;
-      resolve(127);
-    });
-    proc.once("close", (code) => {
-      clearTimeout(timer);
-      stdout += stdoutDecoder.end();
-      stderr += stderrDecoder.end();
-      resolve(code);
-    });
-  });
-  return {
-    exitCode,
-    stdout: truncate(stdout),
-    stderr: truncate(stderr),
-    durationMs: Date.now() - started,
-    timedOut: exitCode === null
-  };
+  return await runCapturedProcess(command, args, { timeoutMs, maxOutputBytes: INTERNAL_PROCESS_OUTPUT_MAX_BYTES });
 }
 
 function containerDoesNotExist(result: ContainerExecResult): boolean {

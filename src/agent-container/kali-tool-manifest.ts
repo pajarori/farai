@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readBoundedFileTextSync } from "../file-read";
 
 export type KaliToolManifest = {
   contract: string;
@@ -8,7 +8,7 @@ export type KaliToolManifest = {
 };
 
 export const KALI_TOOL_MANIFEST_PATH = join(import.meta.dir, "..", "..", "docker", "kali", "farai-tool-manifest.json");
-export const KALI_TOOL_MANIFEST = parseManifest(JSON.parse(readFileSync(KALI_TOOL_MANIFEST_PATH, "utf8")));
+export const KALI_TOOL_MANIFEST = parseManifest(JSON.parse(readBoundedFileTextSync(KALI_TOOL_MANIFEST_PATH, 1024 * 1024, "kali tool manifest")));
 
 function parseManifest(value: unknown): KaliToolManifest {
   if (!value || typeof value !== "object") throw new Error("invalid farai tool manifest");

@@ -1,14 +1,15 @@
-import { spawn } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { localFaraiDir } from "../global-config";
 import { sanitizeToolOutput } from "../../agent-tools/shared/output-sanitize";
 import { spotlightUntrusted } from "../context-builder";
 import type { HookDefinition, HookEvent, HookPayload } from "./types";
+import { runCapturedProcess } from "../../agent-tools/backends/captured-process";
+import { readBoundedFileTextSync } from "../../file-read";
 
 const DEFAULT_HOOK_TIMEOUT_MS = 10_000;
 const HOOK_OUTPUT_MAX_BYTES = 8 * 1024;
+const HOOK_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
 
 const HOOK_EVENTS: HookEvent[] = ["session.start", "user.prompt", "tool.pre", "tool.post", "finding.created", "job.completed", "turn.stop"];
 
@@ -22,7 +23,7 @@ export function loadHooks(workspace: string): HookDefinition[] {
   for (const path of hookConfigPaths(workspace)) {
     if (!existsSync(path)) continue;
     try {
-      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+      const parsed: unknown = JSON.parse(readBoundedFileTextSync(path, HOOK_CONFIG_MAX_BYTES, "hook config"));
       if (!Array.isArray(parsed)) continue;
       for (const entry of parsed) {
         const hook = normalizeHook(entry);
@@ -93,24 +94,15 @@ export type HookRunner = {
   mcp(hook: HookDefinition, payload: HookPayload): Promise<string>;
 };
 
-function runCommandHook(hook: HookDefinition, payload: HookPayload): Promise<string> {
+async function runCommandHook(hook: HookDefinition, payload: HookPayload): Promise<string> {
   const timeoutMs = hook.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS;
-  return new Promise((resolve, reject) => {
-    const child = spawn("sh", ["-c", hook.command!], {
-      env: { ...process.env, FARAI_HOOK_EVENT: hook.event, FARAI_HOOK_SESSION: payload.sessionId },
-      stdio: ["pipe", "pipe", "ignore"]
-    });
-    let stdout = "";
-    const stdoutDecoder = new StringDecoder("utf8");
-    let settled = false;
-    const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
-    const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {  } finish(() => reject(new Error(`hook timed out after ${timeoutMs}ms`))); }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += stdoutDecoder.write(chunk);
-      if (stdout.length > HOOK_OUTPUT_MAX_BYTES * 2) stdout = stdout.slice(0, HOOK_OUTPUT_MAX_BYTES * 2);
-    });
-    child.on("error", (error) => finish(() => reject(error)));
-    child.on("close", () => finish(() => resolve(`${stdout}${stdoutDecoder.end()}`)));
-    try { child.stdin.write(JSON.stringify(payload)); child.stdin.end(); } catch {  }
+  const result = await runCapturedProcess("sh", ["-c", hook.command!], {
+    env: { ...process.env, FARAI_HOOK_EVENT: hook.event, FARAI_HOOK_SESSION: payload.sessionId },
+    input: JSON.stringify(payload),
+    timeoutMs,
+    maxOutputBytes: HOOK_OUTPUT_MAX_BYTES
   });
+  if (result.timedOut) throw new Error(`hook timed out after ${timeoutMs}ms`);
+  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `hook exited with code ${result.exitCode}`);
+  return result.stdout;
 }

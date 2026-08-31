@@ -1,14 +1,15 @@
 #!/usr/bin/env bun
-import { chmodSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BunPlugin } from "bun";
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
+import { readBoundedFileText, readBoundedFileTextSync } from "../src/file-read";
 
 const root = join(import.meta.dir, "..");
 const outfile = join(root, "dist", "cli", "index.js");
-const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+const packageJson = JSON.parse(readBoundedFileTextSync(join(root, "package.json"), 1024 * 1024, "package metadata")) as {
   version?: string;
   bin?: string | Record<string, string>;
   dependencies?: Record<string, string>;
@@ -61,7 +62,7 @@ if (!result.success) {
   process.exit(1);
 }
 
-const bundle = await Bun.file(outfile).text();
+const bundle = await readBoundedFileText(outfile, 64 * 1024 * 1024, "production bundle");
 if (/from\s+["']solid-js(?:\/store)?(?:\/dist\/(?:solid|store)\.js)?["']/.test(bundle)) {
   throw new Error("production bundle externalizes Solid and may split the reactive runtime");
 }

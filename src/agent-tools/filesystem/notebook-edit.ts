@@ -1,10 +1,13 @@
-import { chmodSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, join } from "node:path";
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { safeExistingWorkspacePath } from "./shared";
+import { readBoundedFileTextSync } from "../../file-read";
+import { atomicWriteFile } from "../../agent-core/atomic-file";
+
+const NOTEBOOK_MAX_BYTES = 64 * 1024 * 1024;
 
 type NotebookCell = { id?: string; cell_type: string; source: string[]; metadata?: Record<string, unknown>; outputs?: unknown[]; execution_count?: number | null };
 type Notebook = { cells: NotebookCell[]; metadata?: Record<string, unknown>; nbformat: number; nbformat_minor: number };
@@ -34,7 +37,7 @@ export const notebookEditTool: ToolDefinition = {
     assertObject(args, "args");
     const requested = asString(args.path, "path");
     const path = safeExistingWorkspacePath(context.workspace, requested, "write");
-    const notebook = parseNotebook(readFileSync(path, "utf8"));
+    const notebook = parseNotebook(readBoundedFileTextSync(path, NOTEBOOK_MAX_BYTES, "Jupyter notebook"));
     if (typeof args.index !== "number" || !Number.isFinite(args.index) || !Number.isInteger(args.index)) throw new Error("index must be a finite integer");
     const index = args.index;
     const operation = asString(args.operation, "operation");
@@ -58,7 +61,9 @@ export const notebookEditTool: ToolDefinition = {
         if (cellType !== "code") { delete notebook.cells[index]!.outputs; delete notebook.cells[index]!.execution_count; }
       }
     }
-    writeNotebookAtomically(path, `${JSON.stringify(notebook, null, 1)}\n`);
+    const content = `${JSON.stringify(notebook, null, 1)}\n`;
+    if (Buffer.byteLength(content, "utf8") > NOTEBOOK_MAX_BYTES) throw new Error(`Jupyter notebook exceeded the ${NOTEBOOK_MAX_BYTES}-byte file limit`);
+    writeNotebookAtomically(path, content);
     context.fileState?.invalidate(context.session.id, `${context.executionBackend?.workspacePath ?? "/workspace"}/${requested.replace(/^\.\//, "")}`);
     return { ok: true, summary: `${operation} at cell ${index}`, output: `${requested}: ${notebook.cells.length} cells` };
   }
@@ -79,14 +84,7 @@ function parseNotebook(text: string): Notebook {
 
 function writeNotebookAtomically(path: string, content: string): void {
   const mode = statSync(path).mode & 0o777;
-  const temporary = join(dirname(path), `.${basename(path)}.farai-${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temporary, content, { mode });
-    chmodSync(temporary, mode);
-    renameSync(temporary, path);
-  } finally {
-    try { unlinkSync(temporary); } catch { }
-  }
+  atomicWriteFile(path, content, mode);
 }
 
 function newCell(cellType: string, source: string, includeId: boolean): NotebookCell {

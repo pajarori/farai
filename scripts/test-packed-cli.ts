@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { readBoundedFileText, readFileTextPrefixSync } from "../src/file-read";
+import { runCapturedProcess } from "../src/agent-tools/backends/captured-process";
 
 const root = join(import.meta.dir, "..");
 const scratch = mkdtempSync(join(tmpdir(), "farai-package-smoke-"));
@@ -28,11 +30,11 @@ try {
   }
 
   const version = (await run([bin, "--version"], scratch)).trim();
-  const manifest = await Bun.file(join(root, "package.json")).json() as { version: string; engines?: Record<string, string> };
+  const manifest = JSON.parse(await readBoundedFileText(join(root, "package.json"), 1024 * 1024, "package metadata")) as { version: string; engines?: Record<string, string> };
   if (version !== manifest.version) throw new Error(`packed CLI reported ${version}, expected ${manifest.version}`);
-  const packedManifest = await Bun.file(join(packageRoot, "package.json")).json() as { engines?: Record<string, string> };
+  const packedManifest = JSON.parse(await readBoundedFileText(join(packageRoot, "package.json"), 1024 * 1024, "packed package metadata")) as { engines?: Record<string, string> };
   if (packedManifest.engines?.bun !== ">=1.1.0" || packedManifest.engines?.node) throw new Error("packed CLI must declare Bun, not Node, as its runtime");
-  if (!readFileSync(join(packageRoot, "dist", "cli", "index.js"), "utf8").startsWith("#!/usr/bin/env bun\n")) throw new Error("packed CLI is missing its Bun shebang");
+  if (!readFileTextPrefixSync(join(packageRoot, "dist", "cli", "index.js"), 64, "packed CLI").text.startsWith("#!/usr/bin/env bun\n")) throw new Error("packed CLI is missing its Bun shebang");
   const help = await run([bin, "--help"], scratch);
   if (!help.includes("farai setup") || !help.includes("farai resume")) throw new Error("packed CLI help is incomplete");
   for (const skill of ["ctf-solving", "web-assessment", "binary-reversing", "packet-analysis", "source-security-review"]) {
@@ -45,12 +47,8 @@ try {
 }
 
 async function run(cmd: string[], cwd: string): Promise<string> {
-  const process = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text()
-  ]);
-  if (exitCode !== 0) throw new Error(`${cmd.join(" ")} failed (${exitCode})\n${stderr || stdout}`);
-  return stdout;
+  const result = await runCapturedProcess(cmd[0]!, cmd.slice(1), { cwd, timeoutMs: 10 * 60_000, maxOutputBytes: 2 * 1024 * 1024 });
+  if (result.timedOut) throw new Error(`${cmd.join(" ")} timed out`);
+  if (result.exitCode !== 0) throw new Error(`${cmd.join(" ")} failed (${result.exitCode})\n${result.stderr || result.stdout}`);
+  return result.stdout;
 }

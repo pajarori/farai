@@ -1,4 +1,5 @@
-import { For, Index, Show, type JSX } from "solid-js";
+import { createMemo, For, Index, Show, type JSX } from "solid-js";
+import type { ToolAttachment } from "../../../types";
 import type { TimelineRow, ToolTimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
 import { inferFiletype } from "../../filetype";
@@ -18,6 +19,7 @@ import { titleFromPrompt } from "../../../session-title";
 import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
 import { createPrimaryClickGesture } from "../../input/mouse";
+import { loadToolAttachmentBytes } from "../../../tool-attachment";
 import { fitTerminalPair } from "../../terminal-text";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 5;
@@ -200,7 +202,6 @@ export function ActivityRow(props: ActivityRowProps): JSX.Element {
 }
 
 function ToolResultContext(props: { row: ToolTimelineRow }): JSX.Element {
-  const dims = useTuiDimensions();
   const result = () => props.row.toolResult;
   const evidence = () => result()?.evidence ?? [];
   const attachments = () => result()?.attachments ?? [];
@@ -233,10 +234,7 @@ function ToolResultContext(props: { row: ToolTimelineRow }): JSX.Element {
           <box style={{ flexDirection: "column", marginTop: 1 }}>
             <text fg={COLOR.dim}>attachments</text>
             <For each={attachments()}>{(item) => (
-              <box style={{ flexDirection: "column" }}>
-                <text fg={COLOR.text}>{[item.name ?? "image", item.mediaType, item.detail].filter(Boolean).join(" · ")}</text>
-                <image source={attachmentBytes(item.data)} fit="fit" protocol="auto" style={{ width: Math.max(1, dims().width - 10), height: Math.max(3, Math.min(12, Math.floor(dims().height / 3))) }} />
-              </box>
+              <ToolAttachmentPreview attachment={item} />
             )}</For>
           </box>
         </Show>
@@ -248,6 +246,22 @@ function ToolResultContext(props: { row: ToolTimelineRow }): JSX.Element {
         </Show>
       </box>
     </Show>
+  );
+}
+
+function ToolAttachmentPreview(props: { attachment: ToolAttachment }): JSX.Element {
+  const dims = useTuiDimensions();
+  const loaded = createMemo((): { source?: Uint8Array; error?: string } => {
+    try { return { source: Uint8Array.from(loadToolAttachmentBytes(props.attachment)) }; }
+    catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
+  });
+  return (
+    <box style={{ flexDirection: "column" }}>
+      <text fg={COLOR.text}>{[props.attachment.name ?? "image", props.attachment.mediaType, props.attachment.detail].filter(Boolean).join(" · ")}</text>
+      <Show when={loaded().source} fallback={<text fg={COLOR.error}>attachment unavailable · {loaded().error ?? "unknown error"}</text>}>
+        {(source) => <image source={source()} fit="fit" protocol="auto" style={{ width: Math.max(1, dims().width - 10), height: Math.max(3, Math.min(12, Math.floor(dims().height / 3))) }} />}
+      </Show>
+    </box>
   );
 }
 
@@ -523,8 +537,4 @@ function mcpContentLine(part: unknown): string {
   }
   try { return JSON.stringify(record); }
   catch { return String(record); }
-}
-
-function attachmentBytes(data: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(data, "base64"));
 }

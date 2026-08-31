@@ -1,5 +1,5 @@
 import type { CliRenderer } from "@opentui/core";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Command, CommandContext } from "../command-registry";
@@ -12,8 +12,10 @@ import { slashCommandInvocation } from "../slash-command-line";
 import { writeClipboard } from "../clipboard";
 import { ctrlCDecision } from "./interrupt";
 import type { SessionOwner } from "./center-surface-controller";
+import { readBoundedFileTextSync } from "../../file-read";
 
 const quitConfirmationMs = 1_500;
+const EXTERNAL_EDITOR_DRAFT_MAX_BYTES = 4 * 1024 * 1024;
 
 type ComposerControllerInput = {
   tui: TuiStoreValue;
@@ -293,7 +295,7 @@ export function createComposerController(input: ComposerControllerInput) {
     }
     const dir = mkdtempSync(join(tmpdir(), "farai-editor-"));
     const file = join(dir, "prompt.md");
-    writeFileSync(file, composer.ref()?.plainText ?? composer.text());
+    writeFileSync(file, composer.ref()?.plainText ?? composer.text(), { encoding: "utf8", mode: 0o600 });
     composer.blur();
     try {
       renderer.suspend();
@@ -311,7 +313,7 @@ export function createComposerController(input: ComposerControllerInput) {
         });
         return;
       }
-      composer.setDraft(readFileSync(file, "utf8").trimEnd());
+      composer.setDraft(readBoundedFileTextSync(file, EXTERNAL_EDITOR_DRAFT_MAX_BYTES, "external editor draft").trimEnd());
     } catch (error) {
       tui.actions.centerSurfacePush({
         kind: "detail",

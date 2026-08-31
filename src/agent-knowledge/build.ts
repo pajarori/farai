@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
+import { syncDirectory } from "../agent-core/atomic-file";
+import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
 import { KnowledgeStore } from "./store";
 import { knowledgeDbPath } from "./paths";
 import { latestPacks, readEntities, readRecords, type NormalizedRecord } from "./pack";
@@ -22,7 +24,9 @@ export type BuildResult = {
 export function buildKnowledgeDb(options: { only?: string[]; path?: string } = {}): BuildResult {
   const path = options.path ?? knowledgeDbPath();
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  if (options.path === undefined) ensurePrivateDirectory(dirname(path), "farai home directory");
+  ensurePrivateRegularFileIfExists(path, "knowledge database");
   const store = new KnowledgeStore(temporary, true);
   const db = store.writable();
   const builtAt = new Date().toISOString();
@@ -78,7 +82,13 @@ export function buildKnowledgeDb(options: { only?: string[]; path?: string } = {
     const actualNodes = rowCount(db, "kb_nodes");
     const actualEdges = rowCount(db, "kb_edges");
     store.close();
+    ensurePrivateSqlitePath(temporary, "staged knowledge database");
+    rmSync(`${temporary}-wal`, { force: true });
+    rmSync(`${temporary}-shm`, { force: true });
+    rmSync(`${temporary}-journal`, { force: true });
     renameSync(temporary, path);
+    ensurePrivateRegularFileIfExists(path, "knowledge database");
+    syncDirectory(dirname(path));
     return { path, packs: packs.length, records: actualRecords, entities: actualEntities, nodes: actualNodes, edges: actualEdges, prunedEdges, duplicateGroups };
   } catch (error) {
     store.close();

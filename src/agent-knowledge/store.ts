@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { Database } from "bun:sqlite";
+import { ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
 import { KNOWLEDGE_SCHEMA_VERSION, migrateKnowledge, rebuildFtsIndexes } from "./schema";
 import type {
   KnowledgeEdge,
@@ -40,10 +41,7 @@ export class KnowledgeStore implements KnowledgeQuery {
     if (!existsSync(path)) return undefined;
     const store = new KnowledgeStore(path);
     try {
-      if (!store.compatible()) {
-        store.close();
-        return undefined;
-      }
+      store.database();
       return store;
     } catch {
       store.close();
@@ -53,27 +51,29 @@ export class KnowledgeStore implements KnowledgeQuery {
 
   private database(): Database {
     if (this.db) return this.db;
-    this.db = this.create ? new Database(this.path, { create: true, readwrite: true }) : new Database(this.path, { readonly: true });
-    this.db.exec("pragma busy_timeout = 5000;");
-    if (this.create) {
-      this.db.exec("pragma journal_mode = WAL;");
-      this.db.exec("pragma foreign_keys = ON;");
-      migrateKnowledge(this.db);
-    } else if (!this.compatible()) {
-      throw new Error("knowledge database schema is stale; rebuild with `farai setup --no-docker`");
+    ensurePrivateSqlitePath(this.path, "knowledge database");
+    const db = this.create ? new Database(this.path, { create: true, readwrite: true }) : new Database(this.path, { readonly: true });
+    try {
+      ensurePrivateRegularFileIfExists(this.path, "knowledge database");
+      db.exec("pragma busy_timeout = 5000;");
+      if (this.create) {
+        db.exec("pragma journal_mode = WAL;");
+        db.exec("pragma foreign_keys = ON;");
+        migrateKnowledge(db);
+      } else if (!compatibleDatabase(db)) {
+        throw new Error("knowledge database schema is stale; rebuild with `farai setup --no-docker`");
+      }
+      ensurePrivateSqlitePath(this.path, "knowledge database");
+      this.db = db;
+      return db;
+    } catch (error) {
+      try { db.close(true); } catch {}
+      throw error;
     }
-    return this.db;
-  }
-
-  private compatible(): boolean {
-    const db = this.db ?? new Database(this.path, { readonly: true });
-    const version = Number((db.query("pragma user_version").get() as { user_version?: number } | null)?.user_version ?? 0);
-    if (!this.db) db.close();
-    return version === KNOWLEDGE_SCHEMA_VERSION;
   }
 
   close(): void {
-    this.db?.close();
+    this.db?.close(true);
     this.db = undefined;
   }
 
@@ -345,8 +345,12 @@ export class KnowledgeStore implements KnowledgeQuery {
   finalizeIndexes(): void {
     const db = this.writable();
     rebuildFtsIndexes(db);
-    db.exec("pragma wal_checkpoint(TRUNCATE);");
     db.exec("pragma optimize;");
+    const checkpoint = db.query("pragma wal_checkpoint(TRUNCATE)").get() as Record<string, unknown> | null;
+    if (Number(Object.values(checkpoint ?? {})[0] ?? 1) !== 0) throw new Error("knowledge database checkpoint remained busy");
+    const journal = db.query("pragma journal_mode = DELETE").get() as Record<string, unknown> | null;
+    if (String(Object.values(journal ?? {})[0] ?? "").toLowerCase() !== "delete") throw new Error("knowledge database could not leave WAL mode");
+    ensurePrivateSqlitePath(this.path, "knowledge database");
   }
 
   private entityRows(identifiers: string[], options: KnowledgeSearchOptions, limit: number): number[] {
@@ -384,6 +388,11 @@ export class KnowledgeStore implements KnowledgeQuery {
     ).all(params) as Row[];
     return rows.map((row) => Number(row.rowid));
   }
+}
+
+function compatibleDatabase(db: Database): boolean {
+  const version = Number((db.query("pragma user_version").get() as { user_version?: number } | null)?.user_version ?? 0);
+  return version === KNOWLEDGE_SCHEMA_VERSION;
 }
 
 function recordFilters(options: KnowledgeSearchOptions, params: Record<string, string | number>): string[] {

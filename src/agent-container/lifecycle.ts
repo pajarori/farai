@@ -1,11 +1,9 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { Database } from "bun:sqlite";
 import { localFaraiDir } from "../agent-core/config";
-import { truncate } from "../utils";
+import { runCapturedProcess } from "../agent-tools/backends/captured-process";
+import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
 
 export const FARAI_MANAGED_LABEL = "org.farai.managed";
 export const FARAI_CONTAINER_KIND_LABEL = "org.farai.kind";
@@ -210,20 +208,29 @@ class ContainerLeaseRegistry {
   private readonly db: Database;
 
   constructor(path = join(localFaraiDir(), "docker-lifecycle.db")) {
-    mkdirSync(join(path, ".."), { recursive: true });
-    this.db = new Database(path, { create: true });
-    this.db.exec("PRAGMA journal_mode = WAL;");
-    this.db.exec("PRAGMA busy_timeout = 5000;");
-    this.db.exec(`create table if not exists container_leases (
-      container_name text primary key,
-      root_session_id text not null,
-      workspace text not null,
-      image_contract text not null,
-      lease_owner text,
-      lease_expires_at text,
-      idle_since text,
-      last_used_at text not null
-    )`);
+    ensurePrivateDirectory(join(path, ".."), "farai home directory");
+    ensurePrivateSqlitePath(path, "container lifecycle database");
+    const db = new Database(path, { create: true });
+    try {
+      ensurePrivateRegularFileIfExists(path, "container lifecycle database");
+      db.exec("PRAGMA journal_mode = WAL;");
+      db.exec("PRAGMA busy_timeout = 5000;");
+      db.exec(`create table if not exists container_leases (
+        container_name text primary key,
+        root_session_id text not null,
+        workspace text not null,
+        image_contract text not null,
+        lease_owner text,
+        lease_expires_at text,
+        idle_since text,
+        last_used_at text not null
+      )`);
+      ensurePrivateSqlitePath(path, "container lifecycle database");
+      this.db = db;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
   }
 
   acquire(identity: ManagedContainerIdentity, runtimeId: string, leaseMs: number): void {
@@ -387,28 +394,5 @@ function containerAlreadyStopped(result: DockerProcessResult): boolean {
 }
 
 async function runDockerProcess(command: string, args: string[], timeoutMs = 15_000): Promise<DockerProcessResult> {
-  const started = Date.now();
-  let proc: ReturnType<typeof spawn>;
-  try {
-    proc = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-  } catch (error) {
-    return { exitCode: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error), durationMs: Date.now() - started, timedOut: false };
-  }
-  let stdout = "";
-  let stderr = "";
-  const stdoutDecoder = new StringDecoder("utf8");
-  const stderrDecoder = new StringDecoder("utf8");
-  proc.stdout?.on("data", (chunk) => { stdout += stdoutDecoder.write(chunk); });
-  proc.stderr?.on("data", (chunk) => { stderr += stderrDecoder.write(chunk); });
-  const exitCode = await new Promise<number | null>((resolveExit) => {
-    const timer = setTimeout(() => { proc.kill("SIGTERM"); resolveExit(null); }, timeoutMs);
-    proc.once("error", (error) => { clearTimeout(timer); stderr += error.message; resolveExit(127); });
-    proc.once("close", (code) => {
-      clearTimeout(timer);
-      stdout += stdoutDecoder.end();
-      stderr += stderrDecoder.end();
-      resolveExit(code);
-    });
-  });
-  return { exitCode, stdout: truncate(stdout), stderr: truncate(stderr), durationMs: Date.now() - started, timedOut: exitCode === null };
+  return await runCapturedProcess(command, args, { timeoutMs });
 }

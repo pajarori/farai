@@ -1,9 +1,10 @@
-import { readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { basename, relative } from "node:path";
 import type { ToolAttachment, ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { safeExistingWorkspacePath } from "../filesystem/shared";
 import { backend } from "../shared/backend";
+import { readBoundedFileBytesSync } from "../../file-read";
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
@@ -28,7 +29,7 @@ export const imageViewTool: ToolDefinition = {
     const stat = statSync(path);
     if (!stat.isFile()) throw new Error(`not a file: ${requested}`);
     if (stat.size > MAX_IMAGE_BYTES) throw new Error(`image exceeds ${MAX_IMAGE_BYTES} bytes`);
-    const data = readFileSync(path);
+    const data = readBoundedFileBytesSync(path, MAX_IMAGE_BYTES, "image");
     const mediaType = detectImage(data);
     if (!mediaType) throw new Error("unsupported image format; use PNG, JPEG, GIF, or WebP");
     const workspaceRelative = relative(context.workspace, path).split(/[\\/]+/).join("/");

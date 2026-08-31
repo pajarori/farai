@@ -1,55 +1,67 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
 import type { BackendSession, BackendSessionStatus } from "./types";
 import { id } from "../../utils";
+import { terminateProcessTree } from "./process-tree";
+import { BACKGROUND_PROCESS_OUTPUT_MAX_BYTES, BoundedOutputBuffer } from "./output-buffer";
 
 type SessionEntry = {
   child: ChildProcessWithoutNullStreams;
-  stdout: string;
-  stderr: string;
-  allStdout: string;
-  allStderr: string;
+  stdout: BoundedOutputBuffer;
+  stderr: BoundedOutputBuffer;
+  allStdout: BoundedOutputBuffer;
+  allStderr: BoundedOutputBuffer;
   status: BackendSessionStatus;
   exitCode: number | null;
   lastUsedAt: number;
   exit: Promise<void>;
+  beforeKill?: () => Promise<void>;
 };
 
-const MAX_RETAINED_OUTPUT_CHARS = 256 * 1024;
-
-function appendBounded(existing: string, chunk: string): string {
-  const next = existing + chunk;
-  return next.length <= MAX_RETAINED_OUTPUT_CHARS ? next : next.slice(next.length - MAX_RETAINED_OUTPUT_CHARS);
-}
+type SpawnSessionOptions = {
+  beforeKill?: () => Promise<void>;
+};
 
 export class SpawnSessionStore {
   private readonly sessions = new Map<string, SessionEntry>();
 
-  register(child: ChildProcessWithoutNullStreams): { sessionId: string; entry: SessionEntry } {
+  register(child: ChildProcessWithoutNullStreams, options: SpawnSessionOptions = {}): { sessionId: string; entry: SessionEntry } {
     const sessionId = id();
     let settle!: () => void;
     const exit = new Promise<void>((resolve) => { settle = resolve; });
-    const entry: SessionEntry = { child, stdout: "", stderr: "", allStdout: "", allStderr: "", status: "running", exitCode: null, lastUsedAt: Date.now(), exit };
+    let finished = false;
+    const entry: SessionEntry = {
+      child,
+      stdout: new BoundedOutputBuffer(BACKGROUND_PROCESS_OUTPUT_MAX_BYTES),
+      stderr: new BoundedOutputBuffer(BACKGROUND_PROCESS_OUTPUT_MAX_BYTES),
+      allStdout: new BoundedOutputBuffer(BACKGROUND_PROCESS_OUTPUT_MAX_BYTES),
+      allStderr: new BoundedOutputBuffer(BACKGROUND_PROCESS_OUTPUT_MAX_BYTES),
+      status: "running",
+      exitCode: null,
+      lastUsedAt: Date.now(),
+      exit,
+      ...(options.beforeKill ? { beforeKill: options.beforeKill } : {})
+    };
     this.sessions.set(sessionId, entry);
-    const stdoutDecoder = new StringDecoder("utf8");
-    const stderrDecoder = new StringDecoder("utf8");
     child.stdout.on("data", (chunk) => {
-      const text = stdoutDecoder.write(chunk);
-      entry.stdout = appendBounded(entry.stdout, text);
-      entry.allStdout = appendBounded(entry.allStdout, text);
+      entry.stdout.push(chunk);
+      entry.allStdout.push(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      const text = stderrDecoder.write(chunk);
-      entry.stderr = appendBounded(entry.stderr, text);
-      entry.allStderr = appendBounded(entry.allStderr, text);
+      entry.stderr.push(chunk);
+      entry.allStderr.push(chunk);
+    });
+    child.on("error", (error) => {
+      if (finished) return;
+      finished = true;
+      entry.stderr.push(error.message);
+      entry.allStderr.push(error.message);
+      entry.status = "error";
+      entry.exitCode = 127;
+      settle();
     });
     child.on("close", (exitCode) => {
-      const stdoutTail = stdoutDecoder.end();
-      const stderrTail = stderrDecoder.end();
-      entry.stdout = appendBounded(entry.stdout, stdoutTail);
-      entry.allStdout = appendBounded(entry.allStdout, stdoutTail);
-      entry.stderr = appendBounded(entry.stderr, stderrTail);
-      entry.allStderr = appendBounded(entry.allStderr, stderrTail);
+      if (finished) return;
+      finished = true;
       entry.status = exitCode === 0 ? "done" : "error";
       entry.exitCode = exitCode;
       settle();
@@ -86,15 +98,15 @@ export function waitForExitOrYield(entry: SessionEntry, yieldMs: number): Promis
 }
 
 export function combinedOutput(entry: SessionEntry): string {
-  const out = entry.stdout;
-  const err = entry.stderr;
-  entry.stdout = "";
-  entry.stderr = "";
+  const out = entry.stdout.takeText();
+  const err = entry.stderr.takeText();
   return [out, err ? `STDERR:\n${err}` : ""].filter(Boolean).join("\n");
 }
 
 export function allOutput(entry: SessionEntry): string {
-  return [entry.allStdout, entry.allStderr ? `STDERR:\n${entry.allStderr}` : ""].filter(Boolean).join("\n");
+  const stdout = entry.allStdout.text();
+  const stderr = entry.allStderr.text();
+  return [stdout, stderr ? `STDERR:\n${stderr}` : ""].filter(Boolean).join("\n");
 }
 
 export function toBackendSession(sessionId: string, entry: SessionEntry): BackendSession {
@@ -105,10 +117,26 @@ export function touch(entry: SessionEntry): void {
   entry.lastUsedAt = Date.now();
 }
 
-export function writeInput(entry: SessionEntry, input: string): void {
-  entry.child.stdin.write(input.endsWith("\n") ? input : `${input}\n`);
+export async function writeInput(entry: SessionEntry, input: string): Promise<void> {
+  if (entry.status !== "running" || entry.child.stdin.destroyed || !entry.child.stdin.writable) {
+    throw new Error("Background session input is closed");
+  }
+  await new Promise<void>((resolve, reject) => {
+    entry.child.stdin.write(input.endsWith("\n") ? input : `${input}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
-export function killEntry(entry: SessionEntry): void {
-  entry.child.kill("SIGTERM");
+export async function killEntry(entry: SessionEntry): Promise<void> {
+  if (entry.status !== "running") return;
+  let cleanupError: unknown;
+  try {
+    await entry.beforeKill?.();
+  } catch (error) {
+    cleanupError = error;
+  }
+  await terminateProcessTree(entry.child, entry.exit);
+  if (cleanupError) throw cleanupError;
 }

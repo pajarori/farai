@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { BenchmarkBundle, BenchmarkManifest, BenchmarkResult } from "./types";
 import { canonicalBenchmarkManifest } from "./hash";
+import { atomicWriteFile } from "../agent-core/atomic-file";
 
 export function writeBenchmarkBundle(bundle: BenchmarkBundle, directory: string): string {
   mkdirSync(directory, { recursive: true });
@@ -20,12 +21,12 @@ export function writeBenchmarkBundle(bundle: BenchmarkBundle, directory: string)
     ["compactions.jsonl", jsonl(bundle.compactions)],
     ["evidence.jsonl", jsonl(bundle.evidence)]
   ]);
-  for (const [name, content] of files) writeFileSync(join(directory, name), content);
+  for (const [name, content] of files) atomicWriteFile(join(directory, name), content, 0o600);
   const checksums = [...files.keys()]
     .sort()
-    .map((name) => `${sha256(readFileSync(join(directory, name)))}  ${name}`)
+    .map((name) => `${sha256(files.get(name)!)}  ${name}`)
     .join("\n");
-  writeFileSync(join(directory, "checksums.sha256"), `${checksums}\n`);
+  atomicWriteFile(join(directory, "checksums.sha256"), `${checksums}\n`, 0o600);
   for (const name of [...files.keys(), "checksums.sha256"]) chmodSync(join(directory, name), 0o444);
   return directory;
 }
@@ -33,7 +34,7 @@ export function writeBenchmarkBundle(bundle: BenchmarkBundle, directory: string)
 export function writeBenchmarkResult(result: BenchmarkResult, path: string): void {
   const directory = path.slice(0, Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")));
   if (directory) mkdirSync(directory, { recursive: true });
-  writeFileSync(path, json(result));
+  atomicWriteFile(path, json(result), 0o600);
 }
 
 function redactManifest(manifest: BenchmarkManifest): unknown {

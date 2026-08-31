@@ -1,4 +1,4 @@
-import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { ToolDefinition } from "../../types";
@@ -6,6 +6,8 @@ import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { cleanHtml, decodeBody, normalizeText, readBoundedBody } from "./shared";
 import { backend } from "../shared/backend";
+import { atomicWriteFile } from "../../agent-core/atomic-file";
+import { discardResponseBody } from "../../http-response";
 
 const MAX_FETCH_BYTES = 8 * 1024 * 1024;
 
@@ -28,7 +30,10 @@ export const internetFetchTool: ToolDefinition = {
     assertObject(args, "args");
     const requested = asString(args.url, "url");
     const response = await fetch(requested, { redirect: "follow", headers: { "user-agent": "Mozilla/5.0 Farai/0.1", accept: "text/html,application/json,text/plain,application/pdf,*/*;q=0.1" }, ...(context.signal ? { signal: context.signal } : {}) });
-    if (!response.ok) throw new Error(`web fetch failed: HTTP ${response.status} ${response.statusText}`);
+    if (!response.ok) {
+      await discardResponseBody(response);
+      throw new Error(`web fetch failed: HTTP ${response.status} ${response.statusText}`);
+    }
     const bytes = await readBoundedBody(response, MAX_FETCH_BYTES);
     const contentType = (response.headers.get("content-type") ?? "application/octet-stream").toLowerCase();
     let text: string;
@@ -61,7 +66,7 @@ async function extractPdf(context: Parameters<ToolDefinition["run"]>[1], bytes: 
   mkdirSync(directory, { recursive: true });
   const name = `web-fetch-${randomUUID()}.pdf`;
   const path = join(directory, name);
-  writeFileSync(path, bytes);
+  atomicWriteFile(path, bytes, 0o600);
   try {
     const backendPath = context.executionBackend?.kind === "host" ? path : `/workspace/.farai/tmp/${name}`;
     const result = await backend(context).exec(`pdftotext -layout -- '${backendPath.replaceAll("'", `'"'"'`)}' -`, 30_000, context.signal, 4_000_000);

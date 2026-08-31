@@ -1,8 +1,11 @@
 import { resolveRequestMaxOutputTokens } from "../model-registry";
 import { estimateChatRequestInputTokens, type ChatProvider, type ChatRequest, type ProviderMessage, type ProviderStreamEvent, type ProviderToolDef } from "./protocol";
 import { assertCanonicalToolName, canonicalToolName } from "../../tool-names";
-import { logDebugEntry, parseRetryAfterMs, planRequestSignal } from "./http";
+import { createProviderDebugCapture, iterateSseData, logDebugEntry, parseRetryAfterMs, planRequestSignal, providerHttpError, readResponseTextBounded, readResponseTextPreview } from "./http";
+import { BoundedTextAccumulator, PROVIDER_ERROR_BODY_MAX_BYTES, providerResponseLimits, type ProviderResponseLimits } from "./stream-bounds";
 import type { ModelPricingSnapshot } from "../../types";
+import { materializeToolAttachment } from "../../tool-attachment";
+import { OPENAI_REQUEST_LIMITS, prepareProviderMessages, serializeProviderRequestBody } from "./request-bounds";
 
 type OpenAiContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 type OpenAiChatMessage =
@@ -41,16 +44,19 @@ export class OpenAiChatProvider implements ChatProvider {
   }
 
   async *stream(request: ChatRequest): AsyncIterable<ProviderStreamEvent> {
+    const messages = prepareProviderMessages(request.messages, OPENAI_REQUEST_LIMITS);
     const toolsPayload = toToolsPayload(request.tools);
+    const requestMaxOutputTokens = resolveRequestMaxOutputTokens({
+      estimatedInputTokens: estimateChatRequestInputTokens({ ...request, messages }),
+      ...(this.options.contextWindow !== undefined ? { contextWindow: this.options.contextWindow } : {}),
+      ...(this.options.maxOutputTokens !== undefined ? { modelMaxOutputTokens: this.options.maxOutputTokens } : {}),
+      ...(request.maxOutputTokens !== undefined ? { requestedMaxOutputTokens: request.maxOutputTokens } : {})
+    });
+    const limits = providerResponseLimits(requestMaxOutputTokens);
     const requestBody = {
       model: this.options.model,
       temperature: request.temperature ?? 0.2,
-      max_tokens: resolveRequestMaxOutputTokens({
-        estimatedInputTokens: estimateChatRequestInputTokens(request),
-        ...(this.options.contextWindow !== undefined ? { contextWindow: this.options.contextWindow } : {}),
-        ...(this.options.maxOutputTokens !== undefined ? { modelMaxOutputTokens: this.options.maxOutputTokens } : {}),
-        ...(request.maxOutputTokens !== undefined ? { requestedMaxOutputTokens: request.maxOutputTokens } : {})
-      }),
+      max_tokens: requestMaxOutputTokens,
       user: request.sessionId,
       stream: true,
       stream_options: { include_usage: true },
@@ -58,33 +64,34 @@ export class OpenAiChatProvider implements ChatProvider {
       ...(toolsPayload.length > 0 ? { tools: toolsPayload, tool_choice: request.toolChoice ?? "auto" } : {}),
       messages: [
         { role: "system", content: request.system },
-        ...toOpenAiMessages(request.messages)
+        ...toOpenAiMessages(messages)
       ]
     };
+    const requestJson = serializeProviderRequestBody(requestBody, OPENAI_REQUEST_LIMITS.bodyBytes, "openai-compatible provider request");
     const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {})
       },
-      body: JSON.stringify(requestBody),
+      body: requestJson,
       signal: planRequestSignal(request.signal)
     });
     if (!response.ok) {
-      const responseText = await response.text();
+      const responseText = await readResponseTextPreview(response, PROVIDER_ERROR_BODY_MAX_BYTES);
       logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText });
-      yield { type: "error", message: `Planner provider failed: ${response.status} ${responseText}`, status: response.status, ...(parseRetryAfterMs(response.headers) !== undefined ? { retryAfterMs: parseRetryAfterMs(response.headers)! } : {}) };
+      yield { type: "error", message: providerHttpError(response.status, responseText, Boolean(this.options.apiKey)), status: response.status, ...(parseRetryAfterMs(response.headers) !== undefined ? { retryAfterMs: parseRetryAfterMs(response.headers)! } : {}) };
       return;
     }
     if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
-      yield* this.streamSse(response, requestBody);
+      yield* this.streamSse(response, requestBody, limits);
     } else {
-      yield* this.streamBuffered(response, requestBody);
+      yield* this.streamBuffered(response, requestBody, limits);
     }
   }
 
-  private async *streamBuffered(response: Response, requestBody: unknown): AsyncIterable<ProviderStreamEvent> {
-    const rawText = await response.text();
+  private async *streamBuffered(response: Response, requestBody: unknown, limits: ProviderResponseLimits): AsyncIterable<ProviderStreamEvent> {
+    const rawText = await readResponseTextBounded(response, limits.bufferedBodyBytes, "provider buffered response");
     logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText: rawText });
     let json: { choices?: Array<{ message?: { content?: string | null; reasoning?: string | null; reasoning_content?: string | null; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string }>; usage?: OpenAiUsage };
     try { json = JSON.parse(rawText); } catch { yield { type: "error", message: `Planner provider returned non-JSON body: ${rawText.slice(0, 500)}` }; return; }
@@ -94,16 +101,25 @@ export class OpenAiChatProvider implements ChatProvider {
     const choice = json.choices?.[0];
     const message = choice?.message;
     const reasoning = typeof message?.reasoning === "string" ? message.reasoning : typeof message?.reasoning_content === "string" ? message.reasoning_content : "";
-    if (reasoning) yield { type: "reasoning_delta", delta: reasoning };
+    if (reasoning) {
+      new BoundedTextAccumulator(limits.reasoningBytes, "provider reasoning").append(reasoning);
+      yield { type: "reasoning_delta", delta: reasoning };
+    }
     const content = typeof message?.content === "string" ? message.content : "";
-    if (content) yield { type: "text_delta", delta: content };
+    if (content) {
+      new BoundedTextAccumulator(limits.contentBytes, "provider content").append(content);
+      yield { type: "text_delta", delta: content };
+    }
     const nativeCalls = message?.tool_calls ?? [];
+    if (nativeCalls.length > limits.toolCalls) throw new Error(`provider response exceeded the ${limits.toolCalls}-tool-call limit`);
     let index = 0;
     if (nativeCalls.length > 0) {
       for (const call of nativeCalls) {
         const name = call.function?.name;
         if (!name) continue;
-        yield { type: "tool_call_complete", index: index++, id: call.id ?? "", name, arguments: call.function?.arguments ?? "{}" };
+        const argumentsText = call.function?.arguments ?? "{}";
+        new BoundedTextAccumulator(limits.toolArgumentsBytes, "provider tool arguments").append(argumentsText);
+        yield { type: "tool_call_complete", index: index++, id: call.id ?? "", name, arguments: argumentsText };
       }
     } else if (content.includes("<function=")) {
       for (const call of parseXmlToolCalls(content).calls) {
@@ -113,38 +129,29 @@ export class OpenAiChatProvider implements ChatProvider {
     yield { type: "message_complete", ...(choice?.finish_reason ? { finishReason: choice.finish_reason } : {}) };
   }
 
-  private async *streamSse(response: Response, requestBody: unknown): AsyncIterable<ProviderStreamEvent> {
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let fullContent = "";
+  private async *streamSse(response: Response, requestBody: unknown, limits: ProviderResponseLimits): AsyncIterable<ProviderStreamEvent> {
+    const fullContent = new BoundedTextAccumulator(limits.contentBytes, "provider content", limits.sseEvents);
+    const reasoning = new BoundedTextAccumulator(limits.reasoningBytes, "provider reasoning", limits.sseEvents);
     let suppressText = false;
+    let xmlProbe = "";
     let finishReason: string | undefined;
-    const slots: Array<{ id?: string; name: string; arguments: string; emitted?: boolean }> = [];
+    const slots: Array<{ id?: string; name: string; arguments: BoundedTextAccumulator; emitted?: boolean }> = [];
     let activeIndex = -1;
-    const raw: string[] = [];
+    const capture = createProviderDebugCapture();
 
     const emitComplete = function* (idx: number): Iterable<ProviderStreamEvent> {
       const slot = slots[idx];
       if (!slot || slot.emitted || !slot.name) return;
       slot.emitted = true;
-      yield { type: "tool_call_complete", index: idx, id: slot.id ?? "", name: slot.name, arguments: slot.arguments || "{}" };
+      yield { type: "tool_call_complete", index: idx, id: slot.id ?? "", name: slot.name, arguments: slot.arguments.text() || "{}" };
     };
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let newline: number;
-      while ((newline = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        raw.push(data);
+    try {
+      for await (const data of iterateSseData(response, limits, capture)) {
+        if (!data) continue;
+        if (data === "[DONE]") break;
         let chunk: { choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: string | null }>; usage?: OpenAiUsage };
-        try { chunk = JSON.parse(data); } catch { continue; }
+        try { chunk = JSON.parse(data); } catch { throw new Error("provider returned malformed sse json"); }
         if (hasUsage(chunk.usage)) {
           yield usageEvent(chunk.usage);
         }
@@ -153,24 +160,29 @@ export class OpenAiChatProvider implements ChatProvider {
         if (choice.finish_reason) finishReason = choice.finish_reason;
         const delta = choice.delta ?? {};
         if (typeof delta.content === "string" && delta.content) {
-          fullContent += delta.content;
-          if (!suppressText && fullContent.includes("<function=")) suppressText = true;
+          fullContent.append(delta.content);
+          xmlProbe = `${xmlProbe}${delta.content}`.slice(-64);
+          if (!suppressText && xmlProbe.includes("<function=")) suppressText = true;
           else if (!suppressText) yield { type: "text_delta", delta: delta.content };
         }
         const reasoningDelta = typeof delta.reasoning_content === "string" ? delta.reasoning_content : typeof delta.reasoning === "string" ? delta.reasoning : "";
-        if (reasoningDelta) yield { type: "reasoning_delta", delta: reasoningDelta };
+        if (reasoningDelta) {
+          reasoning.append(reasoningDelta);
+          yield { type: "reasoning_delta", delta: reasoningDelta };
+        }
         if (Array.isArray(delta.tool_calls)) {
           for (const rawCall of delta.tool_calls) {
             const call = rawCall as { index?: number; id?: string; function?: { name?: string; arguments?: string } };
             const idx = typeof call.index === "number" ? call.index : slots.length ? slots.length - 1 : 0;
+            if (!Number.isInteger(idx) || idx < 0 || idx >= limits.toolCalls) throw new Error(`provider tool call index must be between 0 and ${limits.toolCalls - 1}`);
             if (idx !== activeIndex && activeIndex >= 0) yield* emitComplete(activeIndex);
             activeIndex = idx;
-            const slot = (slots[idx] ??= { name: "", arguments: "" });
+            const slot = (slots[idx] ??= { name: "", arguments: new BoundedTextAccumulator(limits.toolArgumentsBytes, "provider tool arguments", limits.sseEvents) });
             if (call.id) slot.id = call.id;
             if (call.function?.name) slot.name = call.function.name;
             const argChunk = call.function?.arguments;
             if (typeof argChunk === "string") {
-              slot.arguments += argChunk;
+              slot.arguments.append(argChunk);
               yield { type: "tool_call_delta", index: idx, ...(call.id ? { id: call.id } : {}), ...(call.function?.name ? { name: call.function.name } : {}), argumentsDelta: argChunk };
             } else if (call.id || call.function?.name) {
               yield { type: "tool_call_delta", index: idx, ...(call.id ? { id: call.id } : {}), ...(call.function?.name ? { name: call.function.name } : {}) };
@@ -178,16 +190,19 @@ export class OpenAiChatProvider implements ChatProvider {
           }
         }
       }
+    } finally {
+      logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText: capture?.text() ?? "" });
     }
 
     for (let i = 0; i < slots.length; i++) yield* emitComplete(i);
-    if (slots.length === 0 && fullContent.includes("<function=")) {
+    const content = fullContent.text();
+    if (slots.length === 0 && content.includes("<function=")) {
       let index = 0;
-      for (const call of parseXmlToolCalls(fullContent).calls) {
+      for (const call of parseXmlToolCalls(content).calls) {
+        if (index >= limits.toolCalls) throw new Error(`provider response exceeded the ${limits.toolCalls}-tool-call limit`);
         yield { type: "tool_call_complete", index: index++, id: "", name: call.name, arguments: JSON.stringify(coerceXmlArgs(call.args)) };
       }
     }
-    logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText: raw.join("\n") });
     yield { type: "message_complete", ...(finishReason ? { finishReason } : {}) };
   }
 }
@@ -241,7 +256,7 @@ function openAiUserContent(text: string, attachments: import("../../types").Tool
   if (!attachments?.length) return text;
   return [
     { type: "text", text },
-    ...attachments.map((item): OpenAiContentPart => ({
+    ...attachments.map(materializeToolAttachment).map((item): OpenAiContentPart => ({
       type: "image_url",
       image_url: {
         url: `data:${item.mediaType};base64,${item.data}`,

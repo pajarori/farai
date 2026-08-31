@@ -150,6 +150,7 @@ export type BenchmarkResult = {
   frozen: {
     faraiCommit?: string;
     dirtyStateHash: string;
+    dirtyStateAlgorithm: "git-worktree-v2";
     schemaVersion: 1;
     suiteId: string;
     suiteVersion: string;

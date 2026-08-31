@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
+import { forEachFileLine } from "../../../file-read";
 
 export type ProxyFlowKind = "http" | "websocket" | "tcp" | "udp" | "dns";
 
@@ -127,36 +127,47 @@ export type ProxyFlowQuery = {
 
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1_000;
+const MAX_FLOW_LINE_BYTES = 32 * 1024 * 1024;
 
 export async function readProxyFlows(file: string, query: ProxyFlowQuery = {}): Promise<ProxyFlowSummary[]> {
   if (!existsSync(file)) return [];
-  const text = await readFile(file, "utf8");
+  const limit = proxyFlowLimit(query.limit);
   const flows: ProxyFlowSummary[] = [];
-  for (const line of text.split("\n")) {
+  let sinceFound = !query.sinceId;
+  await forEachFileLine(file, { label: "proxy flow log", maxLineBytes: MAX_FLOW_LINE_BYTES, noFollow: true }, (line) => {
     const trimmed = line.trim();
-    if (!trimmed) continue;
+    if (!trimmed) return;
     try {
       const parsed = normalizeFlow(JSON.parse(trimmed));
-      if (parsed) flows.push(parsed);
+      if (!parsed) return;
+      if (!sinceFound && parsed.id === query.sinceId) {
+        sinceFound = true;
+        flows.length = 0;
+        return;
+      }
+      if (!matchesProxyFlow(parsed, query)) return;
+      flows.push(parsed);
+      if (flows.length > limit) flows.shift();
     } catch {
     }
-  }
-  return filterProxyFlows(flows, query);
+  });
+  return flows;
 }
 
 export async function readProxyFlowDetail(file: string, id: string): Promise<ProxyFlowDetail | undefined> {
   if (!existsSync(file)) return undefined;
-  const text = await readFile(file, "utf8");
-  for (const line of text.split("\n")) {
+  let found: ProxyFlowDetail | undefined;
+  await forEachFileLine(file, { label: "proxy flow log", maxLineBytes: MAX_FLOW_LINE_BYTES, noFollow: true }, (line) => {
+    if (found) return;
     const trimmed = line.trim();
-    if (!trimmed) continue;
+    if (!trimmed) return;
     try {
       const parsed = normalizeFlowDetail(JSON.parse(trimmed));
-      if (parsed?.id === id) return parsed;
+      if (parsed?.id === id) found = parsed;
     } catch {
     }
-  }
-  return undefined;
+  });
+  return found;
 }
 
 export function filterProxyFlows(flows: ProxyFlowSummary[], query: ProxyFlowQuery = {}): ProxyFlowSummary[] {
@@ -165,20 +176,19 @@ export function filterProxyFlows(flows: ProxyFlowSummary[], query: ProxyFlowQuer
     const index = selected.findIndex((flow) => flow.id === query.sinceId);
     if (index !== -1) selected = selected.slice(index + 1);
   }
-  if (query.kind) selected = selected.filter((flow) => flow.kind === query.kind);
-  if (query.method) {
-    const method = query.method.toUpperCase();
-    selected = selected.filter((flow) => flow.method.toUpperCase() === method);
-  }
-  if (query.statusClass) {
-    selected = selected.filter((flow) => flow.kind === "http" && typeof flow.status === "number" && Math.floor(flow.status / 100) === query.statusClass);
-  }
-  if (query.filter?.trim()) {
-    const needle = query.filter.toLowerCase();
-    selected = selected.filter((flow) => flowSearchText(flow).includes(needle));
-  }
-  const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(query.limit ?? DEFAULT_LIMIT)));
-  return selected.slice(-limit);
+  selected = selected.filter((flow) => matchesProxyFlow(flow, query));
+  return selected.slice(-proxyFlowLimit(query.limit));
+}
+
+function matchesProxyFlow(flow: ProxyFlowSummary, query: ProxyFlowQuery): boolean {
+  if (query.kind && flow.kind !== query.kind) return false;
+  if (query.method && flow.method.toUpperCase() !== query.method.toUpperCase()) return false;
+  if (query.statusClass && (flow.kind !== "http" || typeof flow.status !== "number" || Math.floor(flow.status / 100) !== query.statusClass)) return false;
+  return !query.filter?.trim() || flowSearchText(flow).includes(query.filter.toLowerCase());
+}
+
+function proxyFlowLimit(value: number | undefined): number {
+  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(value ?? DEFAULT_LIMIT)));
 }
 
 export function proxyFlowsFromMcpTrafficSummary(result: unknown, query: ProxyFlowQuery = {}): ProxyFlowSummary[] {

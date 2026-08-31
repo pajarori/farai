@@ -1,34 +1,13 @@
 import { decodeHTML } from "entities";
+import { readBoundedResponseBytes, ResponseSizeLimitError } from "../../http-response";
 
 export async function readBoundedBody(response: Response, maxBytes: number): Promise<Uint8Array> {
-  const declared = Number(response.headers.get("content-length") ?? 0);
-  if (Number.isFinite(declared) && declared > maxBytes) throw new Error(`response is too large (${declared} bytes; limit ${maxBytes})`);
-  if (!response.body) return new Uint8Array();
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value?.byteLength) continue;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel(`response exceeded ${maxBytes} bytes`).catch(() => {});
-        throw new Error(`response exceeded ${maxBytes} bytes`);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
+    return await readBoundedResponseBytes(response, maxBytes);
+  } catch (error) {
+    if (error instanceof ResponseSizeLimitError) throw new Error(`response exceeded ${maxBytes} bytes`);
+    throw error;
   }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return body;
 }
 
 export function decodeBody(bytes: Uint8Array, charset = "utf-8"): string {

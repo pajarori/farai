@@ -1,6 +1,7 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, rmdirSync } from "node:fs";
 import { arch, platform, tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { AgentRuntime } from "../agent-core/runtime";
 import { buildSystemPrompt } from "../agent-core/provider/system-prompt";
 import { buildToolsPayload, createChatProviderForSession, type PlannerProvider } from "../agent-core/provider";
@@ -8,6 +9,8 @@ import type { ChatProvider } from "../agent-core/provider/protocol";
 import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT } from "../agent-container/kali";
 import { KALI_TOOL_MANIFEST_PATH } from "../agent-container/kali-tool-manifest";
 import { HostProcessBackend } from "../agent-tools/backends/host-process";
+import { runCapturedProcess } from "../agent-tools/backends/captured-process";
+import { DEFAULT_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
 import type { BackendExecResult, BackendSessionResult, SessionKind } from "../agent-tools/backends/types";
 import { baseTools } from "../agent-tools/registry";
 import type { ToolExecutionBackend } from "../agent-tools/shared/backend";
@@ -16,6 +19,7 @@ import { id } from "../utils";
 import { writeBenchmarkBundle, writeBenchmarkResult } from "./bundle";
 import { BenchmarkDockerLifecycle, type BenchmarkDockerState, type BenchmarkProcessRunner } from "./docker-lifecycle";
 import { benchmarkManifestHash, hashPath, sha256, stableStringify } from "./hash";
+import { freezeGitSourceState } from "./git-state";
 import { loadBenchmarkManifest, normalizeBenchmarkManifest } from "./manifest";
 import type { BenchmarkBundle, BenchmarkManifest, BenchmarkResult, BenchmarkStopReason } from "./types";
 
@@ -79,7 +83,7 @@ export async function runBenchmark(input: BenchmarkManifest, options: BenchmarkR
     const activeTools = resolveBenchmarkTools(manifest.toolScope);
     session = runtime.updateSession(session.id, { toolScope: activeTools.map((tool) => tool.name) });
     const faraiRoot = options.faraiRoot ?? resolve(import.meta.dir, "..", "..");
-    const frozen = freezeRun(manifest, session, activeTools, faraiRoot, provider, dockerState?.agentImageId);
+    const frozen = await freezeRun(manifest, session, activeTools, faraiRoot, provider, dockerState?.agentImageId);
     const promptPromise = runtime.prompt(session, manifest.challenge.prompt)
       .then((result) => {
         response = result.response;
@@ -285,23 +289,105 @@ function collectRunData(runtime: AgentRuntime, rootSessionId: string): Omit<Benc
 }
 
 function stageFiles(manifest: BenchmarkManifest, workspace: string): void {
-  for (const file of manifest.files ?? []) {
+  const root = resolve(workspace);
+  const workspaceStat = lstatSync(root);
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink()) throw new Error("benchmark workspace must be a real directory");
+  const inputs = (manifest.files ?? []).map((file) => {
     const source = resolve(file.source);
     if (!existsSync(source)) throw new Error(`benchmark input does not exist: ${file.source}`);
-    if (file.sha256 && hashPath(source) !== file.sha256.toLowerCase()) throw new Error(`benchmark input hash mismatch: ${file.source}`);
-    const target = resolve(workspace, file.destination);
-    if (relative(workspace, target).startsWith("..")) throw new Error(`benchmark destination escapes scratch workspace: ${file.destination}`);
-    mkdirSync(dirname(target), { recursive: true });
-    cpSync(source, target, { recursive: statSync(source).isDirectory() });
-    if (!existsSync(target)) throw new Error(`benchmark input was not staged: ${file.destination}`);
-    if (statSync(target).isDirectory() && !listFiles(target).length) throw new Error(`benchmark input staged an empty directory: ${file.destination}`);
+    const expectedHash = file.sha256?.toLowerCase() ?? hashPath(source);
+    if (hashPath(source) !== expectedHash) throw new Error(`benchmark input hash mismatch: ${file.source}`);
+    const target = resolve(root, file.destination);
+    if (!isDescendantPath(relative(root, target))) throw new Error(`benchmark destination escapes scratch workspace: ${file.destination}`);
+    return { file, source, target, expectedHash };
+  });
+
+  for (let index = 0; index < inputs.length; index += 1) {
+    const input = inputs[index]!;
+    if (inputs.some((candidate, candidateIndex) => candidateIndex !== index && pathsOverlap(candidate.target, input.target))) {
+      throw new Error(`benchmark destinations must not overlap: ${input.file.destination}`);
+    }
+    if (pathExists(input.target)) throw new Error(`benchmark destinations must not overlap: ${input.file.destination}`);
   }
+
+  const published: string[] = [];
+  const createdDirectories: string[] = [];
+  try {
+    for (const input of inputs) {
+      ensureStagingParent(root, dirname(input.target), createdDirectories);
+      const staged = join(dirname(input.target), `.${randomUUID()}.farai-stage`);
+      try {
+        const sourceStat = lstatSync(input.source);
+        cpSync(input.source, staged, {
+          recursive: sourceStat.isDirectory(),
+          dereference: false,
+          verbatimSymlinks: true,
+          force: false,
+          errorOnExist: true
+        });
+        if (!pathExists(staged)) throw new Error(`benchmark input was not staged: ${input.file.destination}`);
+        if (hashPath(staged) !== input.expectedHash) throw new Error(`benchmark input changed while staging: ${input.file.source}`);
+        if (lstatSync(staged).isDirectory() && !listFiles(staged).length) throw new Error(`benchmark input staged an empty directory: ${input.file.destination}`);
+        if (pathExists(input.target)) throw new Error(`benchmark destinations must not overlap: ${input.file.destination}`);
+        renameSync(staged, input.target);
+        published.push(input.target);
+      } finally {
+        rmSync(staged, { recursive: true, force: true });
+      }
+    }
+  } catch (error) {
+    for (const target of published.reverse()) rmSync(target, { recursive: true, force: true });
+    for (const directory of createdDirectories.reverse()) {
+      try { rmdirSync(directory); } catch {}
+    }
+    throw error;
+  }
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  if (left === right) return true;
+  const leftToRight = relative(left, right);
+  const rightToLeft = relative(right, left);
+  return isDescendantPath(leftToRight) || isDescendantPath(rightToLeft);
+}
+
+function isDescendantPath(value: string): boolean {
+  return Boolean(value) && value !== ".." && !value.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(value);
 }
 
 function listFiles(rootPath: string): string[] {
   if (!existsSync(rootPath)) return [];
-  if (!statSync(rootPath).isDirectory()) return [rootPath];
+  const stat = lstatSync(rootPath);
+  if (stat.isFile()) return [rootPath];
+  if (!stat.isDirectory()) throw new Error(`unsupported staged benchmark input type: ${rootPath}`);
   return readdirSync(rootPath).flatMap((name) => listFiles(join(rootPath, name)));
+}
+
+function ensureStagingParent(workspace: string, parent: string, createdDirectories: string[]): void {
+  const root = resolve(workspace);
+  const local = relative(root, resolve(parent));
+  if (local === "") return;
+  if (!isDescendantPath(local)) throw new Error("benchmark staging parent escapes scratch workspace");
+  let current = root;
+  for (const segment of local.split(/[\\/]+/).filter(Boolean)) {
+    current = join(current, segment);
+    if (!pathExists(current)) {
+      mkdirSync(current, { mode: 0o700 });
+      createdDirectories.push(current);
+    }
+    const stat = lstatSync(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`benchmark staging parent must be a real directory: ${current}`);
+  }
+}
+
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 class BenchmarkHostBackend implements ToolExecutionBackend {
@@ -352,16 +438,16 @@ class BenchmarkHostBackend implements ToolExecutionBackend {
   }
 }
 
-function freezeRun(manifest: BenchmarkManifest, session: Session, tools: ToolDefinition[], faraiRoot: string, provider: PlannerProvider | ChatProvider, kaliImageId?: string): BenchmarkResult["frozen"] {
-  const faraiCommit = gitOutput(faraiRoot, ["rev-parse", "HEAD"]);
-  const dirty = [gitOutput(faraiRoot, ["status", "--short", "--untracked-files=all"]) ?? "", gitOutput(faraiRoot, ["diff", "--no-ext-diff", "HEAD"]) ?? ""].join("\n");
+async function freezeRun(manifest: BenchmarkManifest, session: Session, tools: ToolDefinition[], faraiRoot: string, provider: PlannerProvider | ChatProvider, kaliImageId?: string): Promise<BenchmarkResult["frozen"]> {
+  const source = await freezeGitSourceState(faraiRoot);
   const system = buildSystemPrompt({ session });
   const catalog = buildToolsPayload(tools.map((tool) => tool.name), tools);
   const providerProtocol = "protocol" in provider ? provider.protocol : manifest.model.protocol;
   const providerModel = "stream" in provider ? provider.model ?? manifest.model.selection : manifest.model.selection;
   return {
-    ...(faraiCommit ? { faraiCommit } : {}),
-    dirtyStateHash: sha256(dirty),
+    ...(source.commit ? { faraiCommit: source.commit } : {}),
+    dirtyStateHash: source.dirtyStateHash,
+    dirtyStateAlgorithm: source.algorithm,
     schemaVersion: 1,
     suiteId: manifest.suite.id,
     suiteVersion: manifest.suite.version,
@@ -381,7 +467,7 @@ function freezeRun(manifest: BenchmarkManifest, session: Session, tools: ToolDef
     configHash: sha256(stableStringify({ model: manifest.model, limits: manifest.limits, isolation: manifest.isolation, toolScope: manifest.toolScope })),
     kaliImage: kaliImageId ?? DEFAULT_KALI_IMAGE,
     kaliContract: KALI_IMAGE_CONTRACT,
-    kaliToolManifestHash: sha256(readFileSync(KALI_TOOL_MANIFEST_PATH)),
+    kaliToolManifestHash: hashPath(KALI_TOOL_MANIFEST_PATH),
     ...(manifest.challenge.targetImage ? { targetImage: manifest.challenge.targetImage } : {}),
     ...(manifest.challenge.targetImageDigest ? { targetImageDigest: manifest.challenge.targetImageDigest } : {}),
     ...(manifest.oracle?.executableSha256 ? { oracleExecutableHash: manifest.oracle.executableSha256 } : {}),
@@ -441,22 +527,18 @@ async function runOracle(oracle: NonNullable<BenchmarkManifest["oracle"]>, candi
     if (!existsSync(oracle.command[0]!)) return { ok: false, error: "oracle executable missing" };
     if (hashPath(oracle.command[0]!) !== oracle.executableSha256) return { ok: false, error: "oracle executable hash mismatch" };
   }
-  const child = Bun.spawn(oracle.command, {
+  const timeoutMs = oracle.timeoutSeconds ? oracle.timeoutSeconds * 1_000 : 10_000;
+  const result = await runCapturedProcess(oracle.command[0]!, oracle.command.slice(1), {
     cwd: workspace,
     env: { ...processEnv(), ...(oracle.env ?? {}), FARAI_CHALLENGE_ID: challengeId },
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe"
+    input: candidate,
+    timeoutMs,
+    maxOutputBytes: DEFAULT_PROCESS_OUTPUT_MAX_BYTES
   });
-  child.stdin.write(candidate);
-  child.stdin.end();
-  const outcome = await Promise.race([child.exited, delay(oracle.timeoutSeconds ? oracle.timeoutSeconds * 1_000 : 10_000).then(() => "timeout" as const)]);
-  if (outcome === "timeout") {
-    child.kill();
-    return { ok: false, error: "oracle timeout" };
-  }
-  const stderr = await new Response(child.stderr).text();
-  return outcome === 0 ? { ok: true } : { ok: false, ...(stderr.trim() ? { error: stderr.trim().slice(0, 500) } : {}) };
+  if (result.timedOut) return { ok: false, error: "oracle timeout" };
+  return result.exitCode === 0
+    ? { ok: true }
+    : { ok: false, ...(result.stderr.trim() ? { error: result.stderr.trim().slice(0, 500) } : {}) };
 }
 
 function activitySummary(toolCalls: ToolCallRecord[], events: SessionEvent[], jobs: BackgroundJob[], compactions: number): BenchmarkResult["activity"] {
@@ -503,12 +585,6 @@ function latestAssistantText(messages: BenchmarkBundle["messages"]): string | un
     .map((part) => (part.payload as { text?: unknown }).text)
     .filter((text): text is string => typeof text === "string" && Boolean(text.trim()))
     .at(-1);
-}
-
-function gitOutput(root: string, args: string[]): string | undefined {
-  const result = Bun.spawnSync(["git", "-C", root, ...args], { stdout: "pipe", stderr: "pipe" });
-  if (result.exitCode !== 0) return undefined;
-  return result.stdout.toString("utf8").trim();
 }
 
 function safeName(value: string): string {

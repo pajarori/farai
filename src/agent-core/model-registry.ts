@@ -1,12 +1,15 @@
 import { loadGlobalConfig } from "./global-config";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_STEPS, DEFAULT_MAX_TURN_SECONDS, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, DEFAULT_MODEL_PUBLIC_API_KEY } from "./default-model";
 import type { ModelPricingSnapshot } from "../types";
+import { discardResponseBody, readBoundedResponseJson } from "../http-response";
 
 export const HEURISTIC_MODEL_ID = "heuristic";
 const MODEL_DISCOVERY_TIMEOUT_MS = 4_000;
+const MODEL_DISCOVERY_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_CONTEXT_SAFETY_TOKENS = 13_000;
 
 export type ResolvedModel = {
+  name?: string;
   baseUrl: string;
   model?: string;
   apiKey?: string;
@@ -87,8 +90,11 @@ export async function fetchAvailableModelIds(
         : apiKey ? { authorization: `Bearer ${apiKey}` } : {},
       signal: controller.signal
     });
-    if (!response.ok) return undefined;
-    return modelIDsFromDiscoveryResponse(await response.json());
+    if (!response.ok) {
+      await discardResponseBody(response);
+      return undefined;
+    }
+    return modelIDsFromDiscoveryResponse(await readBoundedResponseJson(response, MODEL_DISCOVERY_MAX_BYTES, "model discovery response"));
   } catch {
     return undefined;
   } finally {

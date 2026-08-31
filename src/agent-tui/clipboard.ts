@@ -7,6 +7,9 @@ export type ClipboardResult =
   | { ok: true; method: string }
   | { ok: false; error: string };
 
+const CLIPBOARD_COMMAND_TIMEOUT_MS = 2_000;
+const CLIPBOARD_ERROR_MAX_BYTES = 64 * 1024;
+
 export function writeClipboard(text: string): ClipboardResult {
   if (!text) return { ok: false, error: "clipboard text is empty" };
   for (const command of clipboardCommands()) {
@@ -30,7 +33,13 @@ function runClipboardCommand(command: string[], text: string): ClipboardResult {
   const [bin, ...args] = command;
   if (!bin) return { ok: false, error: "empty clipboard command" };
   if (bin === "osascript") return writeClipboardWithAppleScript(text);
-  const result = spawnSync(bin, args, { input: Buffer.from(text), stdio: ["pipe", "ignore", "pipe"] });
+  const result = spawnSync(bin, args, {
+    input: Buffer.from(text),
+    stdio: ["pipe", "ignore", "pipe"],
+    timeout: CLIPBOARD_COMMAND_TIMEOUT_MS,
+    maxBuffer: CLIPBOARD_ERROR_MAX_BYTES,
+    killSignal: "SIGKILL"
+  });
   if (result.status === 0) return { ok: true, method: bin };
   const detail = result.error?.message || result.stderr?.toString().trim() || `exit ${result.status ?? "unknown"}`;
   return { ok: false, error: `${bin}: ${detail}` };
@@ -40,9 +49,14 @@ function writeClipboardWithAppleScript(text: string): ClipboardResult {
   const dir = mkdtempSync(join(tmpdir(), "farai-clipboard-"));
   const path = join(dir, "clipboard.txt");
   try {
-    writeFileSync(path, text);
+    writeFileSync(path, text, { encoding: "utf8", mode: 0o600 });
     const script = `set the clipboard to (do shell script "cat " & quoted form of ${JSON.stringify(path)})`;
-    const result = spawnSync("osascript", ["-e", script], { stdio: ["ignore", "ignore", "pipe"] });
+    const result = spawnSync("osascript", ["-e", script], {
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: CLIPBOARD_COMMAND_TIMEOUT_MS,
+      maxBuffer: CLIPBOARD_ERROR_MAX_BYTES,
+      killSignal: "SIGKILL"
+    });
     if (result.status === 0) return { ok: true, method: "osascript" };
     const detail = result.error?.message || result.stderr?.toString().trim() || `exit ${result.status ?? "unknown"}`;
     return { ok: false, error: `osascript: ${detail}` };

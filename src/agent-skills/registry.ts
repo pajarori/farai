@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync, type Dirent } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync, type Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readBoundedFileTextSync } from "../file-read";
 
 export type SkillSource = "builtin" | "user" | "environment" | "project";
 
@@ -96,7 +97,7 @@ export function loadSkill(name: string, options: SkillDiscoveryOptions & { resou
   if (!inside(skill.directory, canonical)) return undefined;
   const stats = statSync(canonical);
   if (!stats.isFile() || stats.size > MAX_RESOURCE_BYTES) return undefined;
-  const content = readFileSync(canonical, "utf8");
+  const content = readBoundedFileTextSync(canonical, MAX_RESOURCE_BYTES, "skill resource");
   if (content.includes("\0")) return undefined;
   return {
     ...loaded,
@@ -175,13 +176,9 @@ function resolveBuiltinSkillDir(): string {
 function parseSkill(file: string, directory: string, directoryName: string, root: SkillRoot, diagnostics: SkillDiagnostic[]): InternalSkill | undefined {
   let raw: string;
   try {
-    raw = readFileSync(file, "utf8");
+    raw = readBoundedFileTextSync(file, MAX_SKILL_BYTES, "SKILL.md");
   } catch (error) {
     diagnostics.push({ path: file, severity: "error", message: errorMessage(error) });
-    return undefined;
-  }
-  if (Buffer.byteLength(raw, "utf8") > MAX_SKILL_BYTES) {
-    diagnostics.push({ path: file, severity: "error", message: `SKILL.md exceeds ${MAX_SKILL_BYTES} bytes` });
     return undefined;
   }
   const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);

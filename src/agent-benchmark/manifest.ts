@@ -1,12 +1,15 @@
 import { isAbsolute, normalize } from "node:path";
 import type { BenchmarkManifest, BenchmarkSuiteManifest } from "./types";
+import { readBoundedFileText } from "../file-read";
+
+const BENCHMARK_MANIFEST_MAX_BYTES = 32 * 1024 * 1024;
 
 export async function loadBenchmarkManifest(path: string): Promise<BenchmarkManifest> {
-  return normalizeBenchmarkManifest(JSON.parse(await Bun.file(path).text()));
+  return normalizeBenchmarkManifest(JSON.parse(await readBoundedFileText(path, BENCHMARK_MANIFEST_MAX_BYTES, "benchmark manifest")));
 }
 
 export async function loadBenchmarkSuiteManifest(path: string): Promise<BenchmarkSuiteManifest> {
-  return normalizeBenchmarkSuiteManifest(JSON.parse(await Bun.file(path).text()));
+  return normalizeBenchmarkSuiteManifest(JSON.parse(await readBoundedFileText(path, BENCHMARK_MANIFEST_MAX_BYTES, "benchmark suite manifest")));
 }
 
 export function normalizeBenchmarkManifest(value: unknown): BenchmarkManifest {

@@ -5,6 +5,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 import { takeBytes } from "../shared/output-bound";
 import { boundedLimit, cleanHtml, collapse, decodeBody, readBoundedBody, stripTags } from "./shared";
 import { decodeHTML } from "entities";
+import { discardResponseBody } from "../../http-response";
 
 type SearchHit = { title: string; url: string; snippet: string; source: string };
 type SearchProvider = "searxng" | "duckduckgo" | "yahoo" | "bing";
@@ -91,7 +92,10 @@ async function searxng(base: string, query: string, limit: number, signal?: Abor
   url.searchParams.set("q", query);
   url.searchParams.set("format", "json");
   const response = await fetch(url, { headers: { accept: "application/json" }, ...(signal ? { signal } : {}) });
-  if (!response.ok) throw new Error(`searxng search failed: HTTP ${response.status}`);
+  if (!response.ok) {
+    await discardResponseBody(response);
+    throw new Error(`searxng search failed: HTTP ${response.status}`);
+  }
   const body = JSON.parse(decodeBody(await readBoundedBody(response, MAX_SEARCH_RESPONSE_BYTES))) as { results?: Array<Record<string, unknown>> };
   return (body.results ?? []).flatMap((item) => {
     const url = typeof item.url === "string" ? item.url : undefined;
@@ -104,7 +108,10 @@ async function duckduckgo(query: string, limit: number, signal?: AbortSignal): P
   const url = new URL("https://html.duckduckgo.com/html/");
   url.searchParams.set("q", query);
   const response = await fetch(url, { headers: SEARCH_HEADERS, ...(signal ? { signal } : {}) });
-  if (!response.ok) throw new Error(`duckduckgo search failed: HTTP ${response.status}`);
+  if (!response.ok) {
+    await discardResponseBody(response);
+    throw new Error(`duckduckgo search failed: HTTP ${response.status}`);
+  }
   const html = decodeBody(await readBoundedBody(response, MAX_SEARCH_RESPONSE_BYTES));
   return parseDuckDuckGoResults(html, limit);
 }
@@ -138,7 +145,10 @@ async function yahoo(query: string, limit: number, signal?: AbortSignal): Promis
   url.searchParams.set("p", query);
   url.searchParams.set("nojs", "1");
   const response = await fetch(url, { headers: SEARCH_HEADERS, ...(signal ? { signal } : {}) });
-  if (!response.ok) throw new Error(`yahoo search failed: HTTP ${response.status}`);
+  if (!response.ok) {
+    await discardResponseBody(response);
+    throw new Error(`yahoo search failed: HTTP ${response.status}`);
+  }
   const html = decodeBody(await readBoundedBody(response, MAX_SEARCH_RESPONSE_BYTES));
   return parseYahooResults(html, limit);
 }
@@ -172,7 +182,10 @@ async function bing(query: string, limit: number, signal?: AbortSignal): Promise
   url.searchParams.set("q", query);
   url.searchParams.set("count", String(limit));
   const response = await fetch(url, { headers: SEARCH_HEADERS, ...(signal ? { signal } : {}) });
-  if (!response.ok) throw new Error(`bing search failed: HTTP ${response.status}`);
+  if (!response.ok) {
+    await discardResponseBody(response);
+    throw new Error(`bing search failed: HTTP ${response.status}`);
+  }
   const html = decodeBody(await readBoundedBody(response, MAX_SEARCH_RESPONSE_BYTES));
   return parseBingResults(html, limit);
 }

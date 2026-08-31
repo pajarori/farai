@@ -6,12 +6,16 @@ import type { Socket } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { ElicitRequestSchema, GetPromptResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { isMcpBackboneServer } from "./mcp-builtins";
 import { takeBytes } from "./shared/output-bound";
 import { FARAI_VERSION } from "../version";
 import { deleteMcpHeader, mergeMcpHeaders } from "../agent-core/mcp-headers";
+import { BoundedOutputBuffer } from "./backends/output-buffer";
+import { isolatedProcessGroup, terminateProcessTree } from "./backends/process-tree";
+import { readBoundedFileText } from "../file-read";
+import { ResponseSizeLimitError } from "../http-response";
 
 type ExternalMcpServerCommon = {
   name: string;
@@ -177,17 +181,28 @@ const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
 export const DEFAULT_MITMPROXY_PORT = 31_337;
 const MAX_TCP_PORT = 65_535;
 const MAX_STDIO_BUFFER_BYTES = 10 * 1024 * 1024;
+const MCP_CONFIG_MAX_BYTES = 4 * 1024 * 1024;
 const MCP_MODEL_METADATA_MAX_BYTES = 2 * 1024;
+const MCP_SCHEMA_MAX_BYTES = 256 * 1024;
+const MCP_SCHEMA_MAX_DEPTH = 32;
+const MCP_SCHEMA_MAX_NODES = 20_000;
+const MCP_SCHEMA_MAX_ITEMS = 1_000;
+const MCP_PROMPT_RESULT_MAX_BYTES = 8 * 1024 * 1024;
+const MCP_PROMPT_MESSAGE_MAX_COUNT = 256;
+const MCP_HTTP_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
+const MCP_HTTP_SSE_MAX_BYTES = 256 * 1024 * 1024;
+const MCP_MAX_CURSOR_BYTES = 64 * 1024;
 const STDIO_CLOSE_GRACE_MS = 250;
 const STDIO_TERM_GRACE_MS = 500;
 const STDIO_KILL_GRACE_MS = 1_000;
+const HTTP_TERMINATE_GRACE_MS = 250;
 export const MCP_LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const MCP_LEGACY_PROTOCOL_VERSIONS = [MCP_LEGACY_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"] as const;
 
 type McpProcessState = {
   proc: ChildProcessWithoutNullStreams;
   buffer: Buffer;
-  stderr: string;
+  stderr: BoundedOutputBuffer;
   closing: boolean;
   ended: boolean;
   closed: boolean;
@@ -207,6 +222,40 @@ type PendingMcpRequest = {
   timeout: ReturnType<typeof setTimeout>;
   removeAbort?: () => void;
 };
+
+class McpPaginationGuard {
+  private readonly seen = new Set<string>();
+  private pages = 0;
+  private items = 0;
+  private bytes = 0;
+
+  constructor(private readonly limits: { pages: number; items: number; bytes: number }) {}
+
+  next(value: unknown, addedItems: number, addedBytes: number, method: string): string | undefined {
+    this.pages += 1;
+    this.items += addedItems;
+    this.bytes += addedBytes;
+    if (this.items > this.limits.items) throw new Error(`MCP ${method} exceeded ${this.limits.items} items`);
+    if (this.bytes > this.limits.bytes) throw new Error(`MCP ${method} exceeded ${this.limits.bytes} bytes`);
+    if (value === undefined || value === null || value === "") return undefined;
+    if (typeof value !== "string") throw new Error(`MCP ${method} returned an invalid cursor`);
+    if (Buffer.byteLength(value, "utf8") > MCP_MAX_CURSOR_BYTES) throw new Error(`MCP ${method} cursor exceeded ${MCP_MAX_CURSOR_BYTES} bytes`);
+    if (this.seen.has(value)) throw new Error(`MCP ${method} repeated a pagination cursor`);
+    if (this.pages >= this.limits.pages) throw new Error(`MCP ${method} exceeded ${this.limits.pages} pages`);
+    this.seen.add(value);
+    return value;
+  }
+}
+
+export function mcpCatalogLimits(method: string): { pages: number; items: number; bytes: number } {
+  if (method === "tools/list") return { pages: 25, items: 512, bytes: 8 * 1024 * 1024 };
+  if (method === "prompts/list") return { pages: 25, items: 1_024, bytes: 8 * 1024 * 1024 };
+  return { pages: 50, items: 4_096, bytes: 16 * 1024 * 1024 };
+}
+
+function mcpCatalogPageBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
 
 export interface McpClientTransport {
   start(): Promise<void>;
@@ -290,7 +339,7 @@ export function mcpServersFromConfig(servers: Record<string, Record<string, unkn
 
 export async function loadExternalMcpConfig(path = ".farai/mcp.json"): Promise<ExternalMcpServer[]> {
   if (!existsSync(path)) return [];
-  const parsed = JSON.parse(await Bun.file(path).text()) as unknown;
+  const parsed = JSON.parse(await readBoundedFileText(path, MCP_CONFIG_MAX_BYTES, "mcp config")) as unknown;
   return normalizeMcpConfigEntries(parsed).map((entry) => {
     if (!entry || typeof entry !== "object") throw new Error("Invalid MCP server config");
     return normalizeMcpServerEntry(entry as Record<string, unknown>);
@@ -305,24 +354,137 @@ export function sanitizeMcpTool(
   const mutates = (tool.annotations?.readOnlyHint === true ? false : undefined) ?? /add|append|click|create|delete|edit|fill|patch|press|remove|save|select|set|submit|type|update|upload|write|run/.test(text);
   return {
     server,
-    name: tool.name,
-    ...(tool.description ? { description: boundedMcpMetadata(tool.description) } : {}),
-    ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
+    name: boundedMcpIdentifier(tool.name, "mcp tool name"),
+    ...(typeof tool.description === "string" && tool.description ? { description: boundedMcpMetadata(tool.description) } : {}),
+    ...(tool.inputSchema ? { inputSchema: boundedMcpInputSchema(tool.inputSchema) } : {}),
     mutates
   };
 }
 
+export async function boundedMcpFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  return boundMcpHttpResponse(await fetch(input, init));
+}
+
+export function boundMcpHttpResponse(response: Response, overrideMaxBytes?: number): Response {
+  const maxBytes = overrideMaxBytes ?? ((response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream")
+    ? MCP_HTTP_SSE_MAX_BYTES
+    : MCP_HTTP_RESPONSE_MAX_BYTES);
+  const contentLength = response.headers.get("content-length");
+  if (contentLength) {
+    const declared = Number(contentLength);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new ResponseSizeLimitError("mcp http response", maxBytes);
+    }
+  }
+  if (!response.body) return response;
+  const reader = response.body.getReader();
+  let observed = 0;
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    reader.releaseLock();
+  };
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          release();
+          controller.close();
+          return;
+        }
+        observed += next.value.byteLength;
+        if (observed > maxBytes) {
+          const error = new ResponseSizeLimitError("mcp http response", maxBytes);
+          await reader.cancel(error).catch(() => undefined);
+          release();
+          controller.error(error);
+          return;
+        }
+        controller.enqueue(next.value);
+      } catch (error) {
+        release();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+      release();
+    }
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
+}
+
+function boundedMcpInputSchema(value: unknown): Record<string, unknown> {
+  const cloned = cloneBoundedMcpJson(value, "mcp tool input schema", {
+    bytes: MCP_SCHEMA_MAX_BYTES,
+    depth: MCP_SCHEMA_MAX_DEPTH,
+    nodes: MCP_SCHEMA_MAX_NODES,
+    items: MCP_SCHEMA_MAX_ITEMS
+  });
+  if (!isRecord(cloned)) throw new Error("mcp tool input schema must be an object");
+  return cloned;
+}
+
+function cloneBoundedMcpJson(
+  value: unknown,
+  label: string,
+  limits: { bytes: number; depth: number; nodes: number; items: number }
+): unknown {
+  const cloned = cloneMcpJsonValue(value, 0, { nodes: 0, seen: new WeakSet<object>() }, label, limits);
+  const bytes = Buffer.byteLength(JSON.stringify(cloned), "utf8");
+  if (bytes > limits.bytes) throw new Error(`${label} exceeded ${limits.bytes} bytes`);
+  return cloned;
+}
+
+function cloneMcpJsonValue(
+  value: unknown,
+  depth: number,
+  state: { nodes: number; seen: WeakSet<object> },
+  label: string,
+  limits: { bytes: number; depth: number; nodes: number; items: number }
+): unknown {
+  state.nodes += 1;
+  if (state.nodes > limits.nodes) throw new Error(`${label} exceeded ${limits.nodes} nodes`);
+  if (depth > limits.depth) throw new Error(`${label} exceeded depth ${limits.depth}`);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${label} contains a non-finite number`);
+    return value;
+  }
+  if (!value || typeof value !== "object") throw new Error(`${label} contains a non-json value`);
+  if (state.seen.has(value)) throw new Error(`${label} contains a cycle`);
+  state.seen.add(value);
+  if (Array.isArray(value)) {
+    if (value.length > limits.items) throw new Error(`${label} array exceeded ${limits.items} items`);
+    const cloned = value.map((item) => cloneMcpJsonValue(item, depth + 1, state, label, limits));
+    state.seen.delete(value);
+    return cloned;
+  }
+  const entries = Object.entries(value);
+  if (entries.length > limits.items) throw new Error(`${label} object exceeded ${limits.items} properties`);
+  const cloned = Object.fromEntries(entries.map(([key, child]) => [key, cloneMcpJsonValue(child, depth + 1, state, label, limits)]));
+  state.seen.delete(value);
+  return cloned;
+}
+
 export function normalizeMcpPrompt(prompt: RawMcpPrompt): McpPromptDescriptor {
   return {
-    name: prompt.name,
-    ...(prompt.title ? { title: boundedMcpMetadata(prompt.title) } : {}),
-    ...(prompt.description ? { description: boundedMcpMetadata(prompt.description) } : {}),
+    name: boundedMcpIdentifier(prompt.name, "mcp prompt name"),
+    ...(typeof prompt.title === "string" && prompt.title ? { title: boundedMcpMetadata(prompt.title) } : {}),
+    ...(typeof prompt.description === "string" && prompt.description ? { description: boundedMcpMetadata(prompt.description) } : {}),
     arguments: Array.isArray(prompt.arguments)
       ? prompt.arguments
         .filter((argument): argument is NonNullable<RawMcpPrompt["arguments"]>[number] & { name: string } => Boolean(argument) && typeof argument.name === "string")
         .map((argument) => ({
-          name: argument.name,
-          ...(argument.description ? { description: boundedMcpMetadata(argument.description) } : {}),
+          name: boundedMcpIdentifier(argument.name, "mcp prompt argument name"),
+          ...(typeof argument.description === "string" && argument.description ? { description: boundedMcpMetadata(argument.description) } : {}),
           required: argument.required === true
         }))
       : []
@@ -330,14 +492,20 @@ export function normalizeMcpPrompt(prompt: RawMcpPrompt): McpPromptDescriptor {
 }
 
 export function normalizeMcpPromptResult(value: unknown): McpPromptResult {
-  if (!isRecord(value) || !Array.isArray(value.messages)) throw new Error("MCP server returned an invalid prompt result");
-  const messages = value.messages
-    .filter((message): message is Record<string, unknown> => isRecord(message) && (message.role === "user" || message.role === "assistant") && isRecord(message.content))
-    .map((message) => ({ role: message.role as "user" | "assistant", content: message.content }));
-  if (messages.length !== value.messages.length) throw new Error("MCP server returned an invalid prompt message");
+  const cloned = cloneBoundedMcpJson(value, "mcp prompt result", {
+    bytes: MCP_PROMPT_RESULT_MAX_BYTES,
+    depth: 32,
+    nodes: 100_000,
+    items: 4_096
+  });
+  const parsed = GetPromptResultSchema.safeParse(cloned);
+  if (!parsed.success) throw new Error("MCP server returned an invalid prompt result");
+  if (parsed.data.messages.length > MCP_PROMPT_MESSAGE_MAX_COUNT) {
+    throw new Error(`MCP prompt result exceeded ${MCP_PROMPT_MESSAGE_MAX_COUNT} messages`);
+  }
   return {
-    ...(typeof value.description === "string" ? { description: boundedMcpMetadata(value.description) } : {}),
-    messages
+    ...(typeof parsed.data.description === "string" ? { description: boundedMcpMetadata(parsed.data.description) } : {}),
+    messages: parsed.data.messages.map((message) => ({ role: message.role, content: message.content }))
   };
 }
 
@@ -347,7 +515,7 @@ export function normalizeMcpFormElicitationRequest(value: unknown): McpFormElici
   if (mode !== "form") throw new Error(`unsupported MCP elicitation mode: ${String(mode)}`);
   if (typeof value.message !== "string" || !value.message.trim()) throw new Error("MCP elicitation message is required");
   if (!isRecord(value.requestedSchema)) throw new Error("MCP elicitation requestedSchema is required");
-  return { mode: "form", message: boundedMcpMetadata(value.message), requestedSchema: value.requestedSchema };
+  return { mode: "form", message: boundedMcpMetadata(value.message), requestedSchema: boundedMcpInputSchema(value.requestedSchema) };
 }
 
 export class McpStdioClient implements McpClientTransport {
@@ -436,12 +604,12 @@ export class McpStdioClient implements McpClientTransport {
     const resources = await this.listPagesOnState(state, "resources/list", "resources", this.server.startupTimeoutMs, signal);
     return resources
       .filter((resource): resource is RawMcpResource => isRecord(resource) && typeof resource.name === "string" && typeof resource.uri === "string")
-      .map((resource) => ({
+      .map((resource) => normalizeMcpResource({
         name: resource.name,
-        ...(resource.title ? { title: resource.title } : {}),
         uri: resource.uri,
-        ...(resource.mimeType || resource.mime_type ? { mimeType: resource.mimeType ?? resource.mime_type } : {}),
-        ...(resource.description ? { description: resource.description } : {})
+        title: resource.title,
+        description: resource.description,
+        mimeType: resource.mimeType ?? resource.mime_type
       }));
   }
 
@@ -454,12 +622,12 @@ export class McpStdioClient implements McpClientTransport {
         if (!isRecord(template) || typeof template.name !== "string") return false;
         return typeof template.uriTemplate === "string" || typeof template.uri_template === "string";
       })
-      .map((template) => ({
+      .map((template) => normalizeMcpResourceTemplate({
         name: template.name,
-        ...(template.title ? { title: template.title } : {}),
         uriTemplate: template.uriTemplate ?? template.uri_template!,
-        ...(template.mimeType || template.mime_type ? { mimeType: template.mimeType ?? template.mime_type } : {}),
-        ...(template.description ? { description: template.description } : {})
+        title: template.title,
+        description: template.description,
+        mimeType: template.mimeType ?? template.mime_type
       }));
   }
 
@@ -500,7 +668,8 @@ export class McpStdioClient implements McpClientTransport {
       shell: false,
       windowsHide: process.platform === "win32",
       ...(this.server.cwd ? { cwd: this.server.cwd } : {}),
-      env: { ...defaultMcpEnvironment(), ...forwardedMcpEnvironment(this.server.envVars), ...(this.server.env ?? {}) }
+      env: { ...defaultMcpEnvironment(), ...forwardedMcpEnvironment(this.server.envVars), ...(this.server.env ?? {}) },
+      detached: isolatedProcessGroup()
     });
     let resolveExit = () => {};
     let resolveClose = () => {};
@@ -509,7 +678,7 @@ export class McpStdioClient implements McpClientTransport {
     const state: McpProcessState = {
       proc,
       buffer: Buffer.alloc(0),
-      stderr: "",
+      stderr: new BoundedOutputBuffer(8_000, 0),
       closing: false,
       ended: false,
       closed: false,
@@ -524,7 +693,7 @@ export class McpStdioClient implements McpClientTransport {
     proc.stdout.on("error", (error) => this.failProcess(state, error));
     proc.stdin.on("error", (error) => this.failProcess(state, error));
     proc.stderr.on("data", (chunk: Buffer) => {
-      state.stderr = `${state.stderr}${chunk.toString()}`.slice(-8_000);
+      state.stderr.push(chunk);
     });
     proc.on("exit", (code, signal) => this.onProcessExit(state, code, signal));
     proc.on("close", (code, signal) => this.onProcessClose(state, code, signal));
@@ -564,12 +733,8 @@ export class McpStdioClient implements McpClientTransport {
     this.abortServerRequests(state, error);
     this.rejectPending(state, error);
     try { state.proc.stdin.end(); } catch { }
-    if (!(await this.waitForExit(state, STDIO_CLOSE_GRACE_MS))) {
-      try { state.proc.kill("SIGTERM"); } catch { }
-    }
-    if (!(await this.waitForExit(state, STDIO_TERM_GRACE_MS))) {
-      try { state.proc.kill("SIGKILL"); } catch { }
-    }
+    await this.waitForExit(state, STDIO_CLOSE_GRACE_MS);
+    await terminateProcessTree(state.proc, Promise.race([state.exitPromise, state.closePromise]), STDIO_TERM_GRACE_MS);
     await this.waitForExit(state, STDIO_KILL_GRACE_MS);
     this.destroyProcessStreams(state);
   }
@@ -617,8 +782,8 @@ export class McpStdioClient implements McpClientTransport {
         };
         const serverInfo = isRecord(result.serverInfo) ? result.serverInfo : {};
         this.initializedInfo = {
-          ...(typeof serverInfo.name === "string" ? { name: serverInfo.name } : {}),
-          ...(typeof serverInfo.version === "string" ? { version: serverInfo.version } : {}),
+          ...(typeof serverInfo.name === "string" ? { name: boundedMcpIdentifier(serverInfo.name, "mcp server name") } : {}),
+          ...(typeof serverInfo.version === "string" ? { version: boundedMcpIdentifier(serverInfo.version, "mcp server version") } : {}),
           ...(typeof result.instructions === "string" ? { instructions: boundedMcpMetadata(result.instructions) } : {})
         };
         this.initializedState = state;
@@ -701,13 +866,15 @@ export class McpStdioClient implements McpClientTransport {
     signal?: AbortSignal
   ): Promise<unknown[]> {
     const items: unknown[] = [];
+    const guard = new McpPaginationGuard(mcpCatalogLimits(method));
     let cursor: string | undefined;
     do {
       const result = await this.requestOnState(state, method, cursor ? { cursor } : {}, timeoutMs, signal);
       if (!isRecord(result)) break;
       const page = result[resultKey];
-      if (Array.isArray(page)) items.push(...page);
-      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+      const pageItems = Array.isArray(page) ? page : [];
+      cursor = guard.next(result.nextCursor, pageItems.length, mcpCatalogPageBytes(pageItems), method);
+      items.push(...pageItems);
     } while (cursor);
     return items;
   }
@@ -721,7 +888,7 @@ export class McpStdioClient implements McpClientTransport {
     if (state.buffer.length + chunk.length > MAX_STDIO_BUFFER_BYTES) {
       state.buffer = Buffer.alloc(0);
       this.failProcess(state, new Error(`MCP stdout exceeded ${MAX_STDIO_BUFFER_BYTES} bytes without a complete message`));
-      try { state.proc.kill("SIGTERM"); } catch { }
+      void terminateProcessTree(state.proc, Promise.race([state.exitPromise, state.closePromise]), STDIO_TERM_GRACE_MS);
       return;
     }
     state.buffer = state.buffer.length === 0 ? chunk : Buffer.concat([state.buffer, chunk]);
@@ -739,7 +906,7 @@ export class McpStdioClient implements McpClientTransport {
         if (!Number.isSafeInteger(length) || length < 0 || length > MAX_STDIO_BUFFER_BYTES) {
           state.buffer = Buffer.alloc(0);
           this.failProcess(state, new Error(`MCP Content-Length exceeds ${MAX_STDIO_BUFFER_BYTES} bytes`));
-          try { state.proc.kill("SIGTERM"); } catch { }
+          void terminateProcessTree(state.proc, Promise.race([state.exitPromise, state.closePromise]), STDIO_TERM_GRACE_MS);
           return;
         }
         const bodyStart = headerEnd + 4;
@@ -909,14 +1076,14 @@ export class McpStdioClient implements McpClientTransport {
   private processError(state: McpProcessState, error: unknown): Error {
     if (error instanceof Error && error.message.startsWith("MCP ")) return error;
     const message = error instanceof Error ? error.message : String(error);
-    const stderr = state.stderr.trim();
+    const stderr = state.stderr.text().trim();
     return new Error(`MCP ${this.server.name} transport error: ${message}${stderr ? `: ${stderr}` : ""}`);
   }
 
   private exitError(state: McpProcessState, code: number | null, signal: NodeJS.Signals | null): Error {
     if (state.failure) return state.failure;
     const status = code !== null ? ` with code ${code}` : signal ? ` from ${signal}` : "";
-    const stderr = state.stderr.trim();
+    const stderr = state.stderr.text().trim();
     return new Error(`MCP process exited${status}${stderr ? `: ${stderr}` : ""}`);
   }
 
@@ -937,6 +1104,7 @@ export class McpStdioClient implements McpClientTransport {
     try { state.proc.stdin.destroy(); } catch { }
     try { state.proc.stderr.destroy(); } catch { }
     state.buffer = Buffer.alloc(0);
+    state.stderr.clear();
   }
 }
 
@@ -1014,6 +1182,7 @@ export class McpHttpClient implements McpClientTransport {
   async listTools(signal?: AbortSignal): Promise<McpToolDescriptor[]> {
     const client = await this.readyClient(signal);
     const tools: McpToolDescriptor[] = [];
+    const guard = new McpPaginationGuard(mcpCatalogLimits("tools/list"));
     let cursor: string | undefined;
     do {
       if (signal?.aborted) throw mcpAbortError("tools/list", signal);
@@ -1021,6 +1190,7 @@ export class McpHttpClient implements McpClientTransport {
         ...(signal ? { signal } : {}),
         timeout: this.server.toolTimeoutMs
       });
+      cursor = guard.next(result.nextCursor, result.tools.length, mcpCatalogPageBytes(result.tools), "tools/list");
       tools.push(...result.tools.map((tool) => {
         const annotations = tool.annotations ? {
           ...(typeof tool.annotations.readOnlyHint === "boolean" ? { readOnlyHint: tool.annotations.readOnlyHint } : {}),
@@ -1033,7 +1203,6 @@ export class McpHttpClient implements McpClientTransport {
           ...(annotations && Object.keys(annotations).length ? { annotations } : {})
         });
       }));
-      cursor = result.nextCursor;
     } while (cursor);
     return tools;
   }
@@ -1052,6 +1221,7 @@ export class McpHttpClient implements McpClientTransport {
     const client = await this.readyClient(signal);
     if (!client.getServerCapabilities()?.prompts) return [];
     const prompts: McpPromptDescriptor[] = [];
+    const guard = new McpPaginationGuard(mcpCatalogLimits("prompts/list"));
     let cursor: string | undefined;
     do {
       if (signal?.aborted) throw mcpAbortError("prompts/list", signal);
@@ -1059,6 +1229,7 @@ export class McpHttpClient implements McpClientTransport {
         ...(signal ? { signal } : {}),
         timeout: this.server.toolTimeoutMs
       });
+      cursor = guard.next(result.nextCursor, result.prompts.length, mcpCatalogPageBytes(result.prompts), "prompts/list");
       prompts.push(...result.prompts.map((prompt) => normalizeMcpPrompt({
         name: prompt.name,
         ...(prompt.title ? { title: prompt.title } : {}),
@@ -1071,7 +1242,6 @@ export class McpHttpClient implements McpClientTransport {
           }))
         } : {})
       })));
-      cursor = result.nextCursor;
     } while (cursor);
     return prompts;
   }
@@ -1088,6 +1258,7 @@ export class McpHttpClient implements McpClientTransport {
   async listResources(signal?: AbortSignal): Promise<McpResourceDescriptor[]> {
     const client = await this.readyClient(signal);
     const resources: McpResourceDescriptor[] = [];
+    const guard = new McpPaginationGuard(mcpCatalogLimits("resources/list"));
     let cursor: string | undefined;
     do {
       if (signal?.aborted) throw mcpAbortError("resources/list", signal);
@@ -1095,14 +1266,8 @@ export class McpHttpClient implements McpClientTransport {
         ...(signal ? { signal } : {}),
         timeout: this.server.toolTimeoutMs
       });
-      resources.push(...result.resources.map((resource) => ({
-        name: resource.name,
-        ...(resource.title ? { title: resource.title } : {}),
-        uri: resource.uri,
-        ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
-        ...(resource.description ? { description: resource.description } : {})
-      })));
-      cursor = result.nextCursor;
+      cursor = guard.next(result.nextCursor, result.resources.length, mcpCatalogPageBytes(result.resources), "resources/list");
+      resources.push(...result.resources.map((resource) => normalizeMcpResource(resource)));
     } while (cursor);
     return resources;
   }
@@ -1110,6 +1275,7 @@ export class McpHttpClient implements McpClientTransport {
   async listResourceTemplates(signal?: AbortSignal): Promise<McpResourceTemplateDescriptor[]> {
     const client = await this.readyClient(signal);
     const templates: McpResourceTemplateDescriptor[] = [];
+    const guard = new McpPaginationGuard(mcpCatalogLimits("resources/templates/list"));
     let cursor: string | undefined;
     do {
       if (signal?.aborted) throw mcpAbortError("resources/templates/list", signal);
@@ -1117,14 +1283,8 @@ export class McpHttpClient implements McpClientTransport {
         ...(signal ? { signal } : {}),
         timeout: this.server.toolTimeoutMs
       });
-      templates.push(...result.resourceTemplates.map((template) => ({
-        name: template.name,
-        ...(template.title ? { title: template.title } : {}),
-        uriTemplate: template.uriTemplate,
-        ...(template.mimeType ? { mimeType: template.mimeType } : {}),
-        ...(template.description ? { description: template.description } : {})
-      })));
-      cursor = result.nextCursor;
+      cursor = guard.next(result.nextCursor, result.resourceTemplates.length, mcpCatalogPageBytes(result.resourceTemplates), "resources/templates/list");
+      templates.push(...result.resourceTemplates.map((template) => normalizeMcpResourceTemplate(template)));
     } while (cursor);
     return templates;
   }
@@ -1141,8 +1301,8 @@ export class McpHttpClient implements McpClientTransport {
     const info = this.client?.getServerVersion();
     const instructions = this.client?.getInstructions();
     return {
-      ...(info?.name ? { name: info.name } : {}),
-      ...(info?.version ? { version: info.version } : {}),
+      ...(info?.name ? { name: boundedMcpIdentifier(info.name, "mcp server name") } : {}),
+      ...(info?.version ? { version: boundedMcpIdentifier(info.version, "mcp server version") } : {}),
       ...(instructions ? { instructions: boundedMcpMetadata(instructions) } : {})
     };
   }
@@ -1236,7 +1396,8 @@ export class McpHttpClient implements McpClientTransport {
       }
       const transport = new StreamableHTTPClientTransport(new URL(this.server.url), {
         ...(Object.keys(headers).length ? { requestInit: { headers } } : {}),
-        ...(provider ? { authProvider: provider } : {})
+        ...(provider ? { authProvider: provider } : {}),
+        fetch: boundedMcpFetch
       });
       this.connectingClient = client;
       this.connectingTransport = transport;
@@ -1299,9 +1460,27 @@ function uniqueHttpConnections(entries: Array<[Client | undefined, StreamableHTT
 }
 
 async function closeHttpConnection(client: Client, transport: StreamableHTTPClientTransport, terminate: boolean): Promise<void> {
-  if (terminate && transport.sessionId) await transport.terminateSession().catch(() => undefined);
+  const termination = terminate && transport.sessionId
+    ? transport.terminateSession().catch(() => undefined)
+    : undefined;
+  if (termination) await settleWithin(termination, HTTP_TERMINATE_GRACE_MS);
   await client.close().catch(() => undefined);
   await transport.close().catch(() => undefined);
+}
+
+async function settleWithin(task: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      task,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 class PersistentMcpOAuthProvider implements OAuthClientProvider {
@@ -1591,6 +1770,38 @@ function mcpAbortError(method: string, signal: AbortSignal): Error {
   const reason = signal.reason;
   if (reason instanceof Error) return reason;
   return new Error(`MCP request cancelled: ${method}${reason === undefined ? "" : `: ${String(reason)}`}`);
+}
+
+export function normalizeMcpResource(resource: { name: string; uri: string; title?: unknown; description?: unknown; mimeType?: unknown }): McpResourceDescriptor {
+  return {
+    name: boundedMcpIdentifier(resource.name, "mcp resource name"),
+    ...(typeof resource.title === "string" && resource.title ? { title: boundedMcpMetadata(resource.title) } : {}),
+    uri: boundedMcpUri(resource.uri, "mcp resource uri"),
+    ...(typeof resource.mimeType === "string" && resource.mimeType ? { mimeType: boundedMcpIdentifier(resource.mimeType, "mcp resource mime type") } : {}),
+    ...(typeof resource.description === "string" && resource.description ? { description: boundedMcpMetadata(resource.description) } : {})
+  };
+}
+
+export function normalizeMcpResourceTemplate(template: { name: string; uriTemplate: string; title?: unknown; description?: unknown; mimeType?: unknown }): McpResourceTemplateDescriptor {
+  return {
+    name: boundedMcpIdentifier(template.name, "mcp resource template name"),
+    ...(typeof template.title === "string" && template.title ? { title: boundedMcpMetadata(template.title) } : {}),
+    uriTemplate: boundedMcpUri(template.uriTemplate, "mcp resource uri template"),
+    ...(typeof template.mimeType === "string" && template.mimeType ? { mimeType: boundedMcpIdentifier(template.mimeType, "mcp resource mime type") } : {}),
+    ...(typeof template.description === "string" && template.description ? { description: boundedMcpMetadata(template.description) } : {})
+  };
+}
+
+function boundedMcpIdentifier(value: string, label: string): string {
+  if (!value) throw new Error(`${label} must not be empty`);
+  if (Buffer.byteLength(value, "utf8") > 1_024) throw new Error(`${label} exceeded 1024 bytes`);
+  return value;
+}
+
+function boundedMcpUri(value: string, label: string): string {
+  if (!value) throw new Error(`${label} must not be empty`);
+  if (Buffer.byteLength(value, "utf8") > 64 * 1024) throw new Error(`${label} exceeded ${64 * 1024} bytes`);
+  return value;
 }
 
 function boundedMcpMetadata(value: string): string {

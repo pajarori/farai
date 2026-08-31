@@ -1,12 +1,12 @@
 import { writeTaxonomy } from "./taxonomy-pack";
 import type { KnowledgeEdge, KnowledgeNode } from "../types";
+import { fetchKnowledgeText } from "./http";
 
 const URL = "https://capec.mitre.org/data/xml/capec_latest.xml";
+const CAPEC_XML_MAX_BYTES = 32 * 1024 * 1024;
 
 export async function ingestCapec(): Promise<{ dir: string; nodes: number; edges: number }> {
-  const response = await fetch(URL);
-  if (!response.ok) throw new Error(`fetch failed ${response.status}: ${URL}`);
-  const xml = await response.text();
+  const xml = await fetchKnowledgeText(URL, CAPEC_XML_MAX_BYTES, "capec xml");
   const version = /Version="([\d.]+)"/.exec(xml)?.[1] ?? "unknown";
   const nodes: KnowledgeNode[] = [];
   const edges: KnowledgeEdge[] = [];
@@ -17,6 +17,8 @@ export async function ingestCapec(): Promise<{ dir: string; nodes: number; edges
     for (const cwe of unique(relatedCwe(block.body))) edges.push({ src: id, rel: "exploits_weakness", dst: `CWE-${cwe}`, authoritative: true });
     for (const technique of unique(attackTechniques(block.body))) edges.push({ src: id, rel: "maps_to_technique", dst: technique, authoritative: true });
   }
+
+  if (nodes.length === 0) throw new Error("capec xml contained no attack patterns");
 
   const dir = writeTaxonomy({
     id: "capec",

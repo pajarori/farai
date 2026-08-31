@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, Message, MessageWithParts, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
@@ -15,10 +15,13 @@ import { DockerContainerLifecycle, type ContainerLifecyclePort } from "../agent-
 import type { ToolExecutionBackend } from "../agent-tools/shared/backend";
 import { id, nowIso } from "../utils";
 import { takeBytes } from "../agent-tools/shared/output-bound";
+import { runCapturedProcess } from "../agent-tools/backends/captured-process";
+import { INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
 import { renderModelToolResultEnvelope } from "./context-builder";
 import { sanitizeToolOutput } from "../agent-tools/shared/output-sanitize";
 import { buildChatRequest, ChatProviderPlanner, createChatProviderForSession, createPlannerForSessionAsync, PlannerHttpError, type ConversationEntry, type PlanStreamEvent, type PlannerAction, type PlannerInput, type PlannerProvider } from "./provider";
 import type { ChatProvider, ProviderToolDef } from "./provider/protocol";
+import { BoundedTextAccumulator, PROVIDER_TOOL_PREVIEW_MAX_BYTES, providerResponseLimits, utf8Prefix } from "./provider/stream-bounds";
 import { buildSystemPrompt } from "./provider/system-prompt";
 import { resolveContextWindow, resolveMaxOutputTokens, resolveMaxSteps, resolveMaxTurnMs } from "./model-registry";
 import { defaultModelSelection } from "./model-catalog";
@@ -69,6 +72,7 @@ import {
 } from "./tool-execution-control";
 import { validateToolArgs } from "./tool-input-validation";
 import { normalizeToolResult } from "./tool-result-normalization";
+import { atomicWriteFile } from "./atomic-file";
 import { ToolCallJournal, type ToolErrorState } from "./tool-call-journal";
 
 export { activeBackgroundJobs } from "./loop/background";
@@ -87,11 +91,17 @@ const PROGRESS_ACTION_TOOLS = new Set(["http_request", "subdomain_enum", "dir_en
 const AUTO_COMPACTION_CONTINUATION = "[internal continuation after context compaction: Continue the active user task from the compacted prior context. Do not repeat, regenerate, or explain the summary. Resume with the exact next useful action.]";
 const WRAPUP_MODEL_TIMEOUT_MS = 15_000;
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 2_000;
+const SHUTDOWN_OPERATION_TIMEOUT_MS = 1_500;
 const RUNTIME_LEASE_MS = 60_000;
 const RUNTIME_HEARTBEAT_MS = 15_000;
 const RESTART_TOOL_ERROR = "Interrupted by runtime restart; tool execution was not replayed.";
 const STEP_LIMIT_WRAPUP_DIRECTIVE = "You have reached the maximum number of steps allowed for this turn, so tools are no longer available. Do not attempt to call any tool. In a few sentences, summarize what you accomplished, the key findings or evidence so far, any blockers, and the single most useful next step. This is your final message for this turn.";
 const TIME_LIMIT_WRAPUP_DIRECTIVE = "You have reached the interactive wall-clock budget for this turn, so tools are no longer available. Do not attempt to call any tool. Concisely summarize completed work, proven evidence, active background jobs, remaining uncertainty, and the single best next action. This is your final message for this turn.";
+
+function assertProviderToolIndex(index: number, max: number): void {
+  if (!Number.isInteger(index) || index < 0 || index >= max) throw new Error(`provider tool call index must be between 0 and ${max - 1}`);
+}
+
 const INTERNAL_META_STREAM_PREFIXES = [
   "the user",
   "user asked",
@@ -205,7 +215,7 @@ export class AgentRuntime {
   private readonly modelCallsByTurn = new Map<string, number>();
   private readonly providerCatalogs = new Map<string, ProviderToolDef[]>();
   private readonly streamingParts = new Map<string, StreamingPartsState>();
-  private readonly toolInputPreviews = new Map<string, { id?: string; name: string; arguments: string }>();
+  private readonly toolInputPreviews = new Map<string, { id?: string; name: string; arguments: string; bytes: number; truncated: boolean }>();
   private readonly toolExecutionGate = new ToolExecutionGate();
   private readonly workspaceBindingGate = new ToolExecutionGate();
   private readonly subagentGate: SubagentGate;
@@ -216,6 +226,7 @@ export class AgentRuntime {
   private hooks: HookDefinition[] | undefined;
   private readonly firedSessionStart = new Set<string>();
   private readonly pendingHookContext = new Map<string, string[]>();
+  private readonly resourceSessionIds = new Set<string>();
   private readonly autoCompactFailures = new Map<string, number>();
   private readonly compactionControllers = new Map<string, AbortController>();
   private readonly runtimeId = id();
@@ -316,6 +327,7 @@ export class AgentRuntime {
 
   async shutdown(options: ShutdownOptions = {}): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
+    const shutdownSessionIds = new Set([...this.resourceSessionIds, ...this.actors.keys()]);
     this.shuttingDown = true;
     for (const actor of this.actors.values()) actor.close();
     this.shutdownController.abort("runtime shutdown");
@@ -339,38 +351,53 @@ export class AgentRuntime {
       ...(this.recoveryPromise ? [this.recoveryPromise] : [])
     ]);
     this.shutdownFinalizationPromise = (async () => {
-      let shutdownError: unknown;
+      const failures: Error[] = [];
+      const attempt = async (label: string, operation: () => Promise<unknown> | unknown): Promise<void> => {
+        try {
+          await withDeadlineMs(Promise.resolve().then(operation), SHUTDOWN_OPERATION_TIMEOUT_MS, label);
+        } catch (error) {
+          failures.push(new Error(`${label}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }));
+        }
+      };
       try {
         await drain;
         this.activeToolControllers.clear();
         this.activeToolLeases.clear();
         this.subagentControllers.clear();
         this.actors.clear();
-        await this.lsp.shutdown();
+        await attempt("lsp shutdown", () => this.lsp.shutdown());
+        let ownedJobs: BackgroundJob[] = [];
         if (this.store.isOpen()) {
-          const ownedJobs = this.store.listJobsByRuntime(this.runtimeId)
-            .filter((job) => !["succeeded", "failed", "cancelled", "lost"].includes(job.status));
-          await Promise.allSettled(ownedJobs.map((job) => this.jobs.cancel(job.id, false)));
-        }
-        if (this.store.isOpen()) {
-          for (const session of this.store.listSessions(10_000, { includeArchived: true })) {
-            await stopBrowserContextsForSession(session.id);
-            await this.stopSessionEmail(session.id);
-            await stopMcpToolsForSession(session.id);
-            serviceRegistry.unregisterSession(session.id);
+          await attempt("background job discovery", () => {
+            ownedJobs = this.store.listJobsByRuntime(this.runtimeId)
+              .filter((job) => !["succeeded", "failed", "cancelled", "lost"].includes(job.status));
+          });
+          for (const job of ownedJobs) {
+            shutdownSessionIds.add(job.sessionId);
+            if (job.childSessionId) shutdownSessionIds.add(job.childSessionId);
           }
+          await Promise.all(ownedJobs.map((job) => attempt(`background job ${job.id} shutdown`, () => this.jobs.cancel(job.id, false))));
         }
-        await this.containerLifecycle?.suspendAll();
-      } catch (error) {
-        shutdownError = error;
+        if (this.store.isOpen()) {
+          await Promise.all([...shutdownSessionIds].map(async (sessionId) => {
+            await Promise.all([
+              attempt(`browser session ${sessionId} shutdown`, () => stopBrowserContextsForSession(sessionId)),
+              attempt(`email session ${sessionId} shutdown`, () => this.stopSessionEmail(sessionId)),
+              attempt(`mcp session ${sessionId} shutdown`, () => stopMcpToolsForSession(sessionId))
+            ]);
+            await attempt(`service session ${sessionId} unregister`, () => serviceRegistry.unregisterSession(sessionId));
+          }));
+        }
+        this.resourceSessionIds.clear();
+        await attempt("container shutdown", () => this.containerLifecycle?.suspendAll());
       } finally {
         this.stopRuntimeLease();
-        this.containerLifecycle?.dispose();
-        this.knowledgeStore?.close();
+        await attempt("container lifecycle disposal", () => this.containerLifecycle?.dispose());
+        await attempt("knowledge store shutdown", () => this.knowledgeStore?.close());
         this.knowledgeStore = null;
-        this.store.close();
+        await attempt("session store shutdown", () => this.store.close());
       }
-      if (shutdownError) throw shutdownError;
+      if (failures.length) throw new AggregateError(failures, "runtime shutdown completed with cleanup failures");
     })();
     void this.shutdownFinalizationPromise.catch(() => undefined);
     this.shutdownPromise = (async () => {
@@ -410,6 +437,7 @@ export class AgentRuntime {
   }
 
   private mcpCallbacks(session: Session): Pick<McpRefreshInput, "onCatalogChange" | "handleElicitation"> {
+    this.resourceSessionIds.add(session.id);
     return {
       onCatalogChange: (event) => this.event(session.id, "mcp_catalog_changed", event),
       handleElicitation: (server, request, signal) => requestMcpFormElicitation(
@@ -454,6 +482,10 @@ export class AgentRuntime {
       this.startRuntimeLease();
       void this.containerLifecycle?.reconcile().catch(() => undefined);
       const activeRuntimeIds = new Set(this.store.listActiveRuntimeIds());
+      if (activeRuntimeIds.size === 1 && activeRuntimeIds.has(this.runtimeId)) {
+        this.store.pruneOrphanedToolAttachments();
+        this.store.pruneOrphanedDurableFiles();
+      }
       this.store.reclaimMailboxClaims([...activeRuntimeIds]);
       const sessions = this.store.listSessions(10_000, { includeArchived: true });
       for (const session of sessions) {
@@ -1293,7 +1325,7 @@ export class AgentRuntime {
     mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().slice(0, 10);
     const path = join(dir, `${sessionId}-${stamp}.md`);
-    writeFileSync(path, markdown);
+    atomicWriteFile(path, markdown, 0o600);
     return { markdown, path };
   }
 
@@ -1824,19 +1856,21 @@ export class AgentRuntime {
     if (signal.aborted) relayTurnAbort();
     else signal.addEventListener("abort", relayTurnAbort, { once: true });
     const request = buildChatRequest(plannerInput, requestController.signal);
+    const providerLimits = providerResponseLimits(provider.maxOutputTokens);
     let lastError = "";
     this.deleteStreamingParts(turn.id);
     try {
       for (let attempt = 1; ; attempt += 1) {
         this.emitPlannerAttempt(session, turn, assistantMessage, plannerName, attempt, plannerInput, context);
         const dispatched: Array<Promise<ToolActionOutcome>> = [];
-        let content = "";
-        let reasoning = "";
+        const content = new BoundedTextAccumulator(providerLimits.contentBytes, "provider content", providerLimits.sseEvents);
+        const reasoning = new BoundedTextAccumulator(providerLimits.reasoningBytes, "provider reasoning", providerLimits.sseEvents);
         let finishReason: string | undefined;
         let usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheWriteInputTokens?: number } | undefined;
         const requestStarted = Date.now();
         let sawParseError = false;
         let interrupted = false;
+        let providerEvents = 0;
         try {
           const iterator = provider.stream(request)[Symbol.asyncIterator]();
           for (;;) {
@@ -1863,17 +1897,22 @@ export class AgentRuntime {
             }
             if (next.done) break;
             const event = next.value;
+            providerEvents += 1;
+            if (providerEvents > providerLimits.sseEvents) throw new Error(`provider stream exceeded the ${providerLimits.sseEvents}-event limit`);
             if (signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") break;
             if (this.mailbox.hasQueued(session.id, "interrupt")) { interrupted = true; break; }
             if (event.type === "text_delta") {
-              content += event.delta;
+              content.append(event.delta);
               this.applyStreamEvent(session, turn, assistantMessage, { kind: "text", delta: event.delta });
             } else if (event.type === "reasoning_delta") {
-              reasoning += event.delta;
+              reasoning.append(event.delta);
             } else if (event.type === "tool_call_delta") {
+              assertProviderToolIndex(event.index, providerLimits.toolCalls);
               this.applyToolInputPreview(session.id, turn.id, event);
             } else if (event.type === "tool_call_complete") {
-              this.finishToolInputPreview(session.id, turn.id, event.index, event.id);
+              assertProviderToolIndex(event.index, providerLimits.toolCalls);
+              new BoundedTextAccumulator(providerLimits.toolArgumentsBytes, "provider tool arguments").append(event.arguments);
+              this.finishToolInputPreview(session.id, turn.id, event.index, event.id, event.arguments);
               const toolCallId = event.id || undefined;
               const toolName = canonicalToolName(event.name);
               if (!toolName) {
@@ -1967,9 +2006,10 @@ export class AgentRuntime {
           this.persistModelUsage(provider, session, turn, usage, Date.now() - requestStarted);
         }
         let shouldContinue = false;
-        const reasoningText = reasoning.trim() ? takeBytes(reasoning.trim(), REASONING_MAX_BYTES, "head") : undefined;
+        const completeReasoning = reasoning.text();
+        const reasoningText = completeReasoning.trim() ? takeBytes(completeReasoning.trim(), REASONING_MAX_BYTES, "head") : undefined;
         if (reasoningText) this.finalizeReasoning(session, turn, assistantMessage, plannerName, reasoningText);
-        const rawRespondText = content.trim();
+        const rawRespondText = content.text().trim();
         const respondText = dispatched.length > 0 && isInternalMetaReasoning(rawRespondText) ? "" : rawRespondText;
         if (!respondText && rawRespondText && dispatched.length > 0) this.discardStreamingText(session.id, turn.id);
         const outcomes = await Promise.all(dispatched);
@@ -2010,15 +2050,22 @@ export class AgentRuntime {
     event: Extract<import("./provider/protocol").ProviderStreamEvent, { type: "tool_call_delta" }>
   ): void {
     const key = `${turnId}:${event.index}`;
-    const current = this.toolInputPreviews.get(key) ?? { name: "", arguments: "" };
+    const existing = this.toolInputPreviews.get(key);
+    const current = existing ?? { name: "", arguments: "", bytes: 0, truncated: false };
     if (event.id) current.id = event.id;
     if (event.name) current.name = event.name;
-    if (event.argumentsDelta) current.arguments += event.argumentsDelta;
+    if (event.argumentsDelta) {
+      const remaining = PROVIDER_TOOL_PREVIEW_MAX_BYTES - current.bytes;
+      const retained = utf8Prefix(event.argumentsDelta, remaining);
+      current.arguments += retained;
+      current.bytes += Buffer.byteLength(retained, "utf8");
+      if (retained !== event.argumentsDelta) current.truncated = true;
+    }
     this.toolInputPreviews.set(key, current);
     this.store.publishTransientEvent({
       id: `preview:${key}`,
       sessionId,
-      type: current.arguments.length === (event.argumentsDelta?.length ?? 0) ? "tool_input_start" : "tool_input_delta",
+      type: existing ? "tool_input_delta" : "tool_input_start",
       payload: {
         previewId: `preview:${key}`,
         turnId,
@@ -2031,10 +2078,13 @@ export class AgentRuntime {
     });
   }
 
-  private finishToolInputPreview(sessionId: string, turnId: string, index: number, providerToolCallId?: string): void {
+  private finishToolInputPreview(sessionId: string, turnId: string, index: number, providerToolCallId?: string, finalArguments?: string): void {
     const key = `${turnId}:${index}`;
     const current = this.toolInputPreviews.get(key);
     this.toolInputPreviews.delete(key);
+    const rawArguments = finalArguments === undefined
+      ? current?.arguments ?? ""
+      : utf8Prefix(finalArguments, PROVIDER_TOOL_PREVIEW_MAX_BYTES);
     this.store.publishTransientEvent({
       id: `preview:${key}`,
       sessionId,
@@ -2045,7 +2095,7 @@ export class AgentRuntime {
         index,
         providerToolCallId: providerToolCallId || current?.id,
         tool: current?.name ?? "",
-        rawArguments: current?.arguments ?? ""
+        rawArguments
       },
       createdAt: nowIso()
     });
@@ -2752,6 +2802,7 @@ export class AgentRuntime {
     await this.recover();
     this.assertAcceptingWork();
     session = this.store.loadSession(session.id);
+    this.resourceSessionIds.add(session.id);
     let tool = toolForExecution(session, toolName);
     let schedulingTool = tool;
     const workspaceTransition = isWorkspaceTransitionTool(schedulingTool);
@@ -3281,7 +3332,7 @@ export class AgentRuntime {
     releaseController();
     let rendered: RenderedToolResult;
     try {
-      result = this.boundToolOutput(session.id, toolCall, result);
+      result = this.store.persistToolResultAttachments(session.id, this.boundToolOutput(session.id, toolCall, result));
       if (result.evidence) {
         for (const evidence of result.evidence) {
           const saved = this.store.saveEvidence(evidence, result.output);
@@ -3882,14 +3933,14 @@ function isWorkspaceTransitionTool(tool: ToolDefinition): boolean {
 }
 
 async function runHostGit(cwd: string, args: string[]): Promise<string> {
-  const process = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text()
-  ]);
-  if (exitCode !== 0) throw new Error(stderr.trim() || `git ${args[0] ?? "command"} failed with exit code ${exitCode}`);
-  return stdout;
+  const result = await runCapturedProcess("git", args, {
+    cwd,
+    timeoutMs: 30_000,
+    maxOutputBytes: INTERNAL_PROCESS_OUTPUT_MAX_BYTES
+  });
+  if (result.timedOut) throw new Error(`git ${args[0] ?? "command"} timed out`);
+  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `git ${args[0] ?? "command"} failed with exit code ${result.exitCode}`);
+  return result.stdout;
 }
 
 async function registeredWorktree(root: string, wantedPath: string): Promise<{ ref: string; branch?: string } | undefined> {

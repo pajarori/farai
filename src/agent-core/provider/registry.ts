@@ -10,6 +10,7 @@ export function createChatProvider(resolved: ConcreteResolvedModel): ChatProvide
     apiKey: resolved.apiKey,
     baseUrl: resolved.baseUrl,
     model: resolved.model,
+    ...(resolved.name ? { name: resolved.name } : {}),
     pricing: resolved.pricing,
     contextWindow: resolved.contextWindow,
     maxOutputTokens: resolved.maxOutputTokens

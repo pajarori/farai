@@ -266,7 +266,12 @@ export class McpServerManager {
     const managed = this.servers.get(scopedServerKey(input.session, serverName));
     if (!managed) throw new Error(`MCP server is not enabled: ${serverName}`);
     this.suspendCatalogRefresh(scopedServerKey(scope, serverName), managed);
-    await managed.client.stop();
+    try {
+      await managed.client.stop();
+    } finally {
+      managed.proxyStarted = false;
+      delete managed.proxyStartTask;
+    }
     const existing = this.statusMap(scope).get(serverName);
     const { error: _error, ...rest } = existing ?? idleMcpStatus(managed.catalogConfig);
     const next: McpServerRuntimeStatus = {
@@ -1051,6 +1056,8 @@ export class McpServerManager {
       if (this.servers.get(key) !== managed) throw new Error(`MCP server changed while starting: ${serverName}`);
       if (!sameProcessConfig(managed.config, prepared)) {
         await managed.client.stop().catch(() => {});
+        managed.proxyStarted = false;
+        delete managed.proxyStartTask;
         managed.config = prepared;
         managed.client = createMcpClient(prepared, input.configWorkspace ?? input.workspace);
       }
@@ -1200,7 +1207,7 @@ export class McpServerManager {
         const args: Record<string, unknown> = { port: mitmproxy.port };
         if (mitmproxy.dumpFile) args.dump_file = mitmproxy.dumpFile;
         if (mitmproxy.upstreamProxy) args.upstream_proxy = mitmproxy.upstreamProxy;
-        await server.client.callTool("start_proxy", args);
+        await server.client.callTool("start_proxy", args, input.signal);
         server.proxyStarted = true;
       }
       await this.enableTransparentProxy(input, server, mitmproxy.port);
@@ -1208,9 +1215,8 @@ export class McpServerManager {
     server.proxyStartTask = task;
     try {
       await task;
-    } catch (error) {
+    } finally {
       if (server.proxyStartTask === task) delete server.proxyStartTask;
-      throw error;
     }
   }
 
@@ -1941,7 +1947,7 @@ function containerMcpShellCommand(config: ExternalMcpServer, runtimeDir = "/work
   lines.push(`if ! command -v ${shellQuote(command.command)} >/dev/null 2>&1; then echo "MCP binary not found in farai-kali image: ${shellQuote(command.command)}" >&2; exit 127; fi`);
   const cwd = config.cwd ?? runtimeDir;
   lines.push(`mkdir -p ${shellQuote(cwd)}`);
-  lines.push(`cd ${shellQuote(cwd)} && ${shellJoin([command.command, ...command.args])}`);
+  lines.push(`cd ${shellQuote(cwd)} && exec ${shellJoin([command.command, ...command.args])}`);
   return lines.join("\n");
 }
 

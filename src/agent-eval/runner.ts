@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { AgentRuntime } from "../agent-core/runtime";
 import { HeuristicPlanner, type PlannerAction, type PlannerInput, type PlannerProvider } from "../agent-core/provider";
 import type { SessionEvent, TurnStopReason } from "../types";
+import { readBoundedFileText } from "../file-read";
+
+const EVAL_SUITE_MAX_BYTES = 8 * 1024 * 1024;
 
 export type EvalSuite = {
   title?: string;
@@ -39,7 +42,7 @@ export type EvalRunResult = {
 
 export async function loadEvalSuite(file?: string): Promise<EvalSuite> {
   if (!file) return defaultEvalSuite();
-  const parsed = JSON.parse(await Bun.file(file).text()) as EvalSuite;
+  const parsed = JSON.parse(await readBoundedFileText(file, EVAL_SUITE_MAX_BYTES, "eval suite")) as EvalSuite;
   if (!Array.isArray(parsed.cases)) throw new Error("eval file must contain cases[]");
   return parsed;
 }

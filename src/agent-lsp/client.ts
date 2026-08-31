@@ -1,6 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { FARAI_VERSION } from "../version";
+import { terminateProcessTree } from "../agent-tools/backends/process-tree";
 import { ContentLengthParser, encodeJsonRpcMessage, type JsonRpcId, type JsonRpcMessage } from "./protocol";
 import type { LspDiagnostic, LspInspectOperation } from "./types";
 
@@ -41,12 +42,21 @@ export class LspClient {
   private stopping = false;
   private exited = false;
   private failed = false;
+  private readonly processExit: Promise<void>;
 
   constructor(
     private readonly process: ChildProcessWithoutNullStreams,
     readonly serverName: string,
     readonly projectRoot: string
   ) {
+    let settleProcessExit!: () => void;
+    let processSettled = false;
+    this.processExit = new Promise<void>((resolve) => { settleProcessExit = resolve; });
+    const settle = () => {
+      if (processSettled) return;
+      processSettled = true;
+      settleProcessExit();
+    };
     const parser = new ContentLengthParser(
       (message) => this.handleMessage(message),
       (error) => this.fail(new LspProcessExitedError(`Invalid LSP response from ${serverName}: ${error.message}`))
@@ -56,11 +66,16 @@ export class LspClient {
     process.stdin.on("error", (error) => {
       if (!this.stopping) this.fail(new LspProcessExitedError(`LSP stdin failed for ${serverName}: ${error.message}`));
     });
-    process.on("error", (error) => this.fail(new LspProcessExitedError(`LSP process failed for ${serverName}: ${error.message}`)));
+    process.on("error", (error) => {
+      settle();
+      this.fail(new LspProcessExitedError(`LSP process failed for ${serverName}: ${error.message}`));
+    });
     process.on("exit", (code, signal) => {
+      settle();
       this.exited = true;
       if (!this.stopping) this.fail(new LspProcessExitedError(`LSP server ${serverName} exited (${code ?? signal ?? "unknown"})`));
     });
+    process.on("close", settle);
   }
 
   get closed(): boolean {
@@ -139,7 +154,7 @@ export class LspClient {
       } catch {}
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    if (!this.closed) this.process.kill("SIGTERM");
+    if (!this.closed) await terminateProcessTree(this.process, this.processExit);
     this.fail(new LspProcessExitedError(`LSP server ${this.serverName} shut down`));
   }
 
@@ -270,7 +285,7 @@ export class LspClient {
       }
     }
     this.diagnosticWaiters.clear();
-    if (!this.stopping && !this.process.killed) this.process.kill("SIGTERM");
+    if (!this.stopping && !this.process.killed) void terminateProcessTree(this.process, this.processExit);
   }
 }
 

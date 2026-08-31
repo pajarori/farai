@@ -9,6 +9,8 @@ import { takeBytes } from "../agent-tools/shared/output-bound";
 import type { PlannerContextBlock } from "./context-builder";
 import { buildSystemPromptBlocks } from "./provider/system-prompt";
 import { assembleStream, ProviderStreamError, type AssembledMessage, type ChatProvider, type ChatRequest, type ProviderMessage, type ProviderStreamEvent, type ProviderToolDef } from "./provider/protocol";
+import { providerResponseLimits } from "./provider/stream-bounds";
+import { toolAttachmentBytes } from "../tool-attachment";
 import { OpenAiChatProvider, parseXmlToolCalls } from "./provider/openai-chat";
 import { AnthropicMessagesProvider } from "./provider/anthropic-messages";
 import { createChatProvider, resolveProtocol } from "./provider/registry";
@@ -116,7 +118,7 @@ export class ChatProviderPlanner implements PlannerProvider {
       : undefined;
     let assembled: AssembledMessage;
     try {
-      assembled = await assembleStream(this.provider.stream(request), onEvent);
+      assembled = await assembleStream(this.provider.stream(request), onEvent, providerResponseLimits(this.provider.maxOutputTokens));
     } catch (error) {
       if (error instanceof ProviderStreamError && error.status !== undefined) {
         throw new PlannerHttpError(error.message, error.status, error.retryAfterMs);
@@ -201,7 +203,7 @@ export function estimateProviderMessagesTokens(messages: ProviderMessage[]): num
         mediaType: attachment.mediaType,
         ...(attachment.name ? { name: attachment.name } : {}),
         ...(attachment.detail ? { detail: attachment.detail } : {}),
-        bytes: decodedBase64Bytes(attachment.data)
+        bytes: toolAttachmentBytes(attachment)
       }))
     };
   });
@@ -216,12 +218,6 @@ function imageTokenEstimate(detail: ToolAttachment["detail"]): number {
   if (detail === "low") return 85;
   if (detail === "high") return 765;
   return 512;
-}
-
-function decodedBase64Bytes(data: string): number {
-  if (!data) return 0;
-  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor(data.length * 3 / 4) - padding);
 }
 
 export function promptCacheKey(session: Session): string {
@@ -278,17 +274,19 @@ export function createPlannerForSession(session: Session, configWorkspace = sess
   const profiles = loadModelProfiles(configWorkspace);
   const profileResolved = resolveProfile(profiles, session.model);
   const resolved = profileResolved ?? resolveModel({ model: session.model });
-  return createPlannerFromResolved(requireConcreteModel(resolved));
+  return createPlannerFromResolved({ ...requireConcreteModel(resolved), name: session.model });
 }
 
 export async function createPlannerForSessionAsync(session: Session, configWorkspace = session.workspace): Promise<PlannerProvider> {
-  return createPlannerFromResolved(await resolveModelSelection(configWorkspace, session.model));
+  const resolved = await resolveModelSelection(configWorkspace, session.model);
+  return createPlannerFromResolved({ ...resolved, name: session.model ?? resolved.name ?? resolved.model });
 }
 
 export async function createChatProviderForSession(session: Session, configWorkspace = session.workspace): Promise<ChatProvider> {
   const resolved = await resolveModelSelection(configWorkspace, session.model);
   const pricing = resolved.pricing ?? await lookupModelsDevPricing(resolved.model, session.provider, resolved.baseUrl);
-  return createChatProvider(pricing ? { ...resolved, pricing } : resolved);
+  const named = { ...resolved, name: session.model ?? resolved.name ?? resolved.model };
+  return createChatProvider(pricing ? { ...named, pricing } : named);
 }
 
 function createPlannerFromResolved(resolved: ConcreteResolvedModel): PlannerProvider {
@@ -297,6 +295,7 @@ function createPlannerFromResolved(resolved: ConcreteResolvedModel): PlannerProv
     ...(resolved.apiKey ? { apiKey: resolved.apiKey } : {}),
     baseUrl: resolved.baseUrl,
     model: resolved.model,
+    ...(resolved.name ? { name: resolved.name } : {}),
     ...(resolved.contextWindow ? { contextWindow: resolved.contextWindow } : {}),
     ...(resolved.maxOutputTokens ? { maxOutputTokens: resolved.maxOutputTokens } : {})
   };

@@ -1,4 +1,5 @@
 import type { ModelPricingSnapshot, ToolAttachment, ToolSchemaSnapshot } from "../../types";
+import { BoundedTextAccumulator, providerResponseLimits, type ProviderResponseLimits } from "./stream-bounds";
 
 export type ProviderStreamEvent =
   | { type: "text_delta"; delta: string }
@@ -86,34 +87,47 @@ export class ProviderStreamError extends Error {
 
 export async function assembleStream(
   stream: AsyncIterable<ProviderStreamEvent>,
-  onEvent?: (event: ProviderStreamEvent) => void
+  onEvent?: (event: ProviderStreamEvent) => void,
+  limits: ProviderResponseLimits = providerResponseLimits()
 ): Promise<AssembledMessage> {
-  let content = "";
-  let reasoning = "";
+  const content = new BoundedTextAccumulator(limits.contentBytes, "provider content", limits.sseEvents);
+  const reasoning = new BoundedTextAccumulator(limits.reasoningBytes, "provider reasoning", limits.sseEvents);
   let finishReason: string | undefined;
   let usage: AssembledMessage["usage"];
-  const slots: AssembledToolCall[] = [];
+  const slots: Array<{ id?: string; name: string; arguments: BoundedTextAccumulator; completeArguments?: string }> = [];
+  let events = 0;
   for await (const event of stream) {
-    onEvent?.(event);
+    events += 1;
+    if (events > limits.sseEvents) throw new Error(`provider stream exceeded the ${limits.sseEvents}-event limit`);
     switch (event.type) {
       case "text_delta":
-        content += event.delta;
+        content.append(event.delta);
         break;
       case "reasoning_delta":
-        reasoning += event.delta;
+        reasoning.append(event.delta);
         break;
       case "tool_call_delta": {
-        const slot = (slots[event.index] ??= { name: "", arguments: "" });
+        assertProviderToolIndex(event.index, limits.toolCalls);
+        const slot = (slots[event.index] ??= {
+          name: "",
+          arguments: new BoundedTextAccumulator(limits.toolArgumentsBytes, "provider tool arguments", limits.sseEvents)
+        });
         if (event.id) slot.id = event.id;
         if (event.name) slot.name = event.name;
-        if (event.argumentsDelta) slot.arguments += event.argumentsDelta;
+        if (event.argumentsDelta) slot.arguments.append(event.argumentsDelta);
         break;
       }
       case "tool_call_complete": {
-        const slot = (slots[event.index] ??= { name: "", arguments: "" });
+        assertProviderToolIndex(event.index, limits.toolCalls);
+        assertTextWithinLimit(event.arguments, limits.toolArgumentsBytes, "provider tool arguments");
+        const slot = (slots[event.index] ??= {
+          name: "",
+          arguments: new BoundedTextAccumulator(limits.toolArgumentsBytes, "provider tool arguments", limits.sseEvents)
+        });
         if (event.id) slot.id = event.id;
         if (event.name) slot.name = event.name;
-        slot.arguments = event.arguments;
+        slot.completeArguments = event.arguments;
+        slot.arguments.clear();
         break;
       }
       case "message_complete":
@@ -131,12 +145,25 @@ export async function assembleStream(
       case "error":
         throw new ProviderStreamError(event.message, event.status, event.retryAfterMs);
     }
+    onEvent?.(event);
   }
   return {
-    content,
-    reasoning,
-    toolCalls: slots.filter((slot): slot is AssembledToolCall => Boolean(slot?.name)),
+    content: content.text(),
+    reasoning: reasoning.text(),
+    toolCalls: slots.flatMap((slot): AssembledToolCall[] => slot?.name ? [{
+      ...(slot.id ? { id: slot.id } : {}),
+      name: slot.name,
+      arguments: slot.completeArguments ?? slot.arguments.text()
+    }] : []),
     ...(finishReason ? { finishReason } : {}),
     ...(usage ? { usage } : {})
   };
+}
+
+function assertProviderToolIndex(index: number, max: number): void {
+  if (!Number.isInteger(index) || index < 0 || index >= max) throw new Error(`provider tool call index must be between 0 and ${max - 1}`);
+}
+
+function assertTextWithinLimit(value: string, max: number, label: string): void {
+  if (Buffer.byteLength(value, "utf8") > max) throw new Error(`${label} exceeded the ${max}-byte provider response limit`);
 }

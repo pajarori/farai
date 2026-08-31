@@ -1,9 +1,14 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fetchGitSource } from "./git-source";
 import { chunkMarkdownByHeading } from "./markdown-chunk";
 import { extractEntities, recordId, sourceHash, writePack, type NormalizedRecord } from "../pack";
 import type { KnowledgeEntity, KnowledgePackMeta } from "../types";
+import { readBoundedFileTextSyncNoFollow } from "../../file-read";
+
+const MARKDOWN_MAX_BYTES = 16 * 1024 * 1024;
+const MARKDOWN_FILE_MAX_COUNT = 100_000;
+const WALK_ENTRY_MAX_COUNT = 250_000;
 
 const SOURCE = {
   id: "hacktricks",
@@ -12,8 +17,8 @@ const SOURCE = {
   sparse: ["/src/**/*.md"]
 };
 
-export function ingestHacktricks(): { dir: string; records: number } {
-  const fetched = fetchGitSource(SOURCE);
+export async function ingestHacktricks(): Promise<{ dir: string; records: number }> {
+  const fetched = await fetchGitSource(SOURCE);
   const srcDir = join(fetched.dir, "src");
   const meta: KnowledgePackMeta = {
     id: "hacktricks",
@@ -33,7 +38,7 @@ export function ingestHacktricks(): { dir: string; records: number } {
   const entities: KnowledgeEntity[] = [];
   for (const file of markdownFiles(srcDir)) {
     const docPath = relative(srcDir, file);
-    const text = readFileSync(file, "utf8");
+    const text = readBoundedFileTextSyncNoFollow(file, MARKDOWN_MAX_BYTES, "hacktricks markdown");
     let ordinal = 0;
     for (const chunk of chunkMarkdownByHeading(text)) {
       const id = recordId(meta.id, meta.pin, `${docPath}#${chunk.charStart}:${ordinal++}`);
@@ -59,15 +64,25 @@ export function ingestHacktricks(): { dir: string; records: number } {
 
 function markdownFiles(root: string): string[] {
   if (!existsSync(root)) return [];
+  const rootInfo = lstatSync(root);
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error("hacktricks source root must be a real directory");
   const out: string[] = [];
-  const walk = (dir: string) => {
+  const pending = [root];
+  let entries = 0;
+  while (pending.length) {
+    const dir = pending.pop()!;
     for (const entry of readdirSync(dir)) {
+      entries += 1;
+      if (entries > WALK_ENTRY_MAX_COUNT) throw new Error(`hacktricks source exceeded ${WALK_ENTRY_MAX_COUNT} entries`);
       const full = join(dir, entry);
-      const stats = statSync(full);
-      if (stats.isDirectory()) walk(full);
-      else if (entry.toLowerCase().endsWith(".md")) out.push(full);
+      const info = lstatSync(full);
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) pending.push(full);
+      else if (info.isFile() && entry.toLowerCase().endsWith(".md")) {
+        if (out.length >= MARKDOWN_FILE_MAX_COUNT) throw new Error(`hacktricks source exceeded ${MARKDOWN_FILE_MAX_COUNT} markdown files`);
+        out.push(full);
+      }
     }
-  };
-  walk(root);
+  }
   return out.sort();
 }

@@ -3,6 +3,7 @@ import type { EmailAccountInfo, EmailMessageDetail, EmailMessageSummary } from "
 import { mergeMessageState, parseEmailSource } from "./message";
 
 const MAX_MESSAGE_SOURCE_BYTES = 2 * 1024 * 1024;
+const IMAP_LOGOUT_TIMEOUT_MS = 2_000;
 
 export async function probeImapAccount(account: EmailAccountInfo, credential: string, signal?: AbortSignal): Promise<{ mailbox: string; messages: number }> {
   return await withImapConnection(account, credential, true, signal, async (client) => {
@@ -226,7 +227,21 @@ async function waitForMailboxChange(client: ImapFlow, timeoutMs: number, signal?
 }
 
 async function closeImap(client: ImapFlow): Promise<void> {
-  try { await client.logout(); } catch { client.close(); }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const closed = await Promise.race([
+      client.logout().then(() => true, () => false),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), IMAP_LOGOUT_TIMEOUT_MS);
+        timer.unref?.();
+      })
+    ]);
+    if (!closed) client.close();
+  } catch {
+    try { client.close(); } catch {}
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function numericMessageId(value: string): number {

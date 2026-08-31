@@ -1,6 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { localFaraiDir } from "../global-config";
+import { readBoundedFileTextSync } from "../../file-read";
+
+const LANE_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
 
 export type LaneDefinition = {
   id: string;
@@ -71,7 +74,7 @@ export function loadLanes(workspace: string): LaneDefinition[] {
   for (const path of laneConfigPaths(workspace)) {
     if (!existsSync(path)) continue;
     try {
-      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+      const parsed: unknown = JSON.parse(readBoundedFileTextSync(path, LANE_CONFIG_MAX_BYTES, "agent lane config"));
       if (!Array.isArray(parsed)) continue;
       for (const entry of parsed) {
         const lane = normalizeLane(entry);

@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, normalize, relative } from "node:path";
 import type { Session, ToolCallRecord, ToolResult } from "../types";
 import { id } from "../utils";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import { globalInstructionDirs } from "./global-config";
+import { readFileTextPrefixSync } from "../file-read";
 
 export type PlannerContextBlock = {
   id?: string;
@@ -109,7 +110,7 @@ export class ContextBuilderCache {
     if (cached?.fingerprint === fingerprint) return cached.values;
     let source = "";
     try {
-      source = readFileSync(path, "utf8").slice(0, 64 * 1024);
+      source = readFileTextPrefixSync(path, 64 * 1024, "source file").text;
     } catch {
       this.symbols.set(path, { values: [], fingerprint });
       return [];
@@ -291,7 +292,7 @@ function readFirstInstructionFile(dir: string): { filename: string; path: string
     const path = join(dir, filename);
     if (!existsSync(path)) continue;
     try {
-      const body = readFileSync(path, "utf8").trim();
+      const body = readFileTextPrefixSync(path, PROJECT_INSTRUCTIONS_MAX_BYTES, "project instructions").text.trim();
       if (!body) continue;
       return { filename, path, body: takeBytes(body, PROJECT_INSTRUCTIONS_MAX_BYTES, "head") };
     } catch {

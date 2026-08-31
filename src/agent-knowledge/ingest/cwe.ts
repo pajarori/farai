@@ -17,6 +17,8 @@ export async function ingestCwe(): Promise<{ dir: string; nodes: number; edges: 
     for (const capec of unique(relatedCapec(block.body))) edges.push({ src: `CAPEC-${capec}`, rel: "exploits_weakness", dst: id, authoritative: true });
   }
 
+  if (nodes.length === 0) throw new Error("cwe xml contained no weaknesses");
+
   const dir = writeTaxonomy({
     id: "cwe",
     sourceUrl: "https://cwe.mitre.org",

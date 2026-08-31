@@ -1,9 +1,15 @@
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { CSI_CYBENCH_33 } from "./csi-cybench-33";
 import { hashPath } from "./hash";
 import { normalizeBenchmarkSuiteManifest } from "./manifest";
 import type { BenchmarkManifest, BenchmarkSuiteManifest } from "./types";
+import { readBoundedFileText, readBoundedFileTextSync } from "../file-read";
+import { atomicWriteFile } from "../agent-core/atomic-file";
+
+const CSI_CAMPAIGN_MAX_BYTES = 4 * 1024 * 1024;
+const CSI_MATERIAL_INDEX_MAX_BYTES = 16 * 1024 * 1024;
+const CSI_PROMPT_MAX_BYTES = 1024 * 1024;
 
 export type CsiCampaignConfig = {
   schemaVersion: 1;
@@ -39,11 +45,11 @@ export type CsiChallengeMaterial = {
 };
 
 export async function loadCsiCampaignConfig(path: string): Promise<CsiCampaignConfig> {
-  return normalizeCsiCampaignConfig(JSON.parse(await Bun.file(path).text()));
+  return normalizeCsiCampaignConfig(JSON.parse(await readBoundedFileText(path, CSI_CAMPAIGN_MAX_BYTES, "csi campaign config")));
 }
 
 export async function loadCsiMaterialIndex(root: string): Promise<CsiMaterialIndex> {
-  return normalizeCsiMaterialIndex(JSON.parse(await Bun.file(resolve(root, "index.json")).text()));
+  return normalizeCsiMaterialIndex(JSON.parse(await readBoundedFileText(resolve(root, "index.json"), CSI_MATERIAL_INDEX_MAX_BYTES, "csi material index")));
 }
 
 export async function generateCsiBenchmarkSuite(configInput: CsiCampaignConfig, materialRoot: string): Promise<BenchmarkSuiteManifest> {
@@ -62,7 +68,7 @@ export async function generateCsiBenchmarkSuite(configInput: CsiCampaignConfig, 
     if (config.isolation.backend === "host" && material.requiresTarget) throw new Error(`host csi challenge requires a live target and cannot run in host smoke mode: ${challenge.id}`);
     const promptPath = protectedPath(root, material.promptFile, `${challenge.id}.promptFile`);
     if (!existsSync(promptPath) || !statSync(promptPath).isFile()) throw new Error(`missing prompt file for csi challenge: ${challenge.id}`);
-    const prompt = readFileSync(promptPath, "utf8").trim();
+    const prompt = readBoundedFileTextSync(promptPath, CSI_PROMPT_MAX_BYTES, `csi prompt ${challenge.id}`).trim();
     if (!prompt) throw new Error(`empty prompt file for csi challenge: ${challenge.id}`);
     const files = material.files?.map((file, index) => {
       const source = protectedPath(root, file.source, `${challenge.id}.files[${index}].source`);
@@ -143,7 +149,7 @@ export async function generateCsiBenchmarkSuite(configInput: CsiCampaignConfig, 
 export function writeCsiBenchmarkSuite(suite: BenchmarkSuiteManifest, path: string): void {
   const directory = dirname(resolve(path));
   if (!existsSync(directory)) throw new Error(`suite output directory does not exist: ${directory}`);
-  writeFileSync(path, `${JSON.stringify(suite, null, 2)}\n`);
+  atomicWriteFile(path, `${JSON.stringify(suite, null, 2)}\n`, 0o600);
 }
 
 export function normalizeCsiCampaignConfig(value: unknown): CsiCampaignConfig {

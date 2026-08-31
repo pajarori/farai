@@ -1,10 +1,13 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { MCP_BACKBONE_SERVER_IDS } from "../agent-tools/mcp-builtins";
 import { readCredentialForWorkspaceSync } from "./credential-store";
 import { atomicWriteFile } from "./atomic-file";
 import { configPath, localFaraiDir, type ConfigLocation } from "./paths";
 import { isEnvironmentVariableName } from "./model-provider-validation";
+import { readBoundedFileTextSyncNoFollow } from "../file-read";
+import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists } from "./private-path";
 
 export { authPath, configPath, debugLogPath, globalDataDir, localFaraiDir } from "./paths";
 export type { ConfigLocation } from "./paths";
@@ -69,6 +72,7 @@ export type FaraiProxyConfig = {
 };
 
 export const DEFAULT_TRANSPARENT_PROXY_PORTS = [80, 443, 3000, 5000, 8000, 8008, 8080, 8081, 8443, 8888, 9000];
+const CONFIG_MAX_BYTES = 4 * 1024 * 1024;
 
 export function isDebugLoggingEnabled(): boolean {
   return process.env.FARAI_DEBUG === "1" || process.env.FARAI_DEBUG === "true";
@@ -221,7 +225,8 @@ export function resolveProxyConfig(config: FaraiConfig): { transparent: boolean;
 export function loadRawConfig(path: string): FaraiConfig {
   try {
     if (!existsSync(path)) return {};
-    return normalizeConfig(Bun.TOML.parse(readFileSync(path, "utf8")));
+    ensurePrivateRegularFileIfExists(path, "farai config");
+    return normalizeConfig(Bun.TOML.parse(readBoundedFileTextSyncNoFollow(path, CONFIG_MAX_BYTES, "farai config")));
   } catch {
     return {};
   }
@@ -358,6 +363,8 @@ function tomlKey(key: string): string {
 
 export function writeConfig(config: FaraiConfig, location: ConfigLocation = "global", workspace?: string): string {
   const path = configPath(location, workspace);
+  ensurePrivateDirectory(dirname(path), "farai config directory");
+  ensurePrivateRegularFileIfExists(path, "farai config");
   atomicWriteFile(path, serializeConfigToml(config), 0o600);
   return path;
 }
@@ -369,14 +376,15 @@ export function updateConfig(mutator: (config: FaraiConfig) => FaraiConfig, loca
 
 export function ensureDefaultConfig(): string {
   const path = configPath("global");
-  mkdirSync(localFaraiDir(), { recursive: true });
+  ensurePrivateDirectory(localFaraiDir(), "farai home directory");
   if (!existsSync(path)) {
     atomicWriteFile(path, DEFAULT_CONFIG_TEMPLATE, 0o600);
     return path;
   }
+  ensurePrivateRegularFileIfExists(path, "farai config");
   let current: FaraiConfig;
   try {
-    current = normalizeConfig(Bun.TOML.parse(readFileSync(path, "utf8")));
+    current = normalizeConfig(Bun.TOML.parse(readBoundedFileTextSyncNoFollow(path, CONFIG_MAX_BYTES, "farai config")));
   } catch {
     return path;
   }

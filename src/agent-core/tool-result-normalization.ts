@@ -1,10 +1,11 @@
 import type { OutputArtifact, ToolAttachment, ToolResult } from "../types";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import { isBinaryLike, sanitizeToolOutput } from "../agent-tools/shared/output-sanitize";
+import { loadToolAttachmentBytes, TOOL_ATTACHMENT_MAX_BYTES } from "../tool-attachment";
 
 export const TOOL_ATTACHMENT_LIMITS = Object.freeze({
   count: 8,
-  bytes: 20 * 1024 * 1024,
+  bytes: TOOL_ATTACHMENT_MAX_BYTES,
   totalBytes: 40 * 1024 * 1024,
   nameBytes: 512
 });
@@ -75,14 +76,8 @@ export function normalizeToolAttachments(result: ToolResult): ToolResult {
 
 function decodeToolAttachment(attachment: ToolAttachment, index: number): Buffer {
   if (attachment.kind !== "image") throw new Error(`unsupported tool attachment kind at index ${index}`);
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.data) || attachment.data.length % 4 === 1) {
-    throw new Error(`tool attachment ${index + 1} contains invalid base64`);
-  }
-  const bytes = Buffer.from(attachment.data, "base64");
-  if (bytes.toString("base64").replace(/=+$/, "") !== attachment.data.replace(/=+$/, "")) {
-    throw new Error(`tool attachment ${index + 1} contains invalid base64`);
-  }
-  return bytes;
+  try { return loadToolAttachmentBytes(attachment); }
+  catch (error) { throw new Error(`tool attachment ${index + 1}: ${error instanceof Error ? error.message : String(error)}`); }
 }
 
 function assertAttachmentMagic(attachment: ToolAttachment, bytes: Buffer, index: number): void {

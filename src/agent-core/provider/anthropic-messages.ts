@@ -1,8 +1,11 @@
 import { resolveRequestMaxOutputTokens } from "../model-registry";
 import { estimateChatRequestInputTokens, type ChatProvider, type ChatRequest, type ProviderMessage, type ProviderStreamEvent, type ProviderToolDef } from "./protocol";
-import { logDebugEntry, parseRetryAfterMs, planRequestSignal } from "./http";
+import { createProviderDebugCapture, iterateSseData, logDebugEntry, parseRetryAfterMs, planRequestSignal, providerHttpError, readResponseTextPreview } from "./http";
+import { BoundedTextAccumulator, PROVIDER_ERROR_BODY_MAX_BYTES, providerResponseLimits, type ProviderResponseLimits } from "./stream-bounds";
 import { canonicalToolName } from "../../tool-names";
 import type { ModelPricingSnapshot } from "../../types";
+import { materializeToolAttachment } from "../../tool-attachment";
+import { ANTHROPIC_REQUEST_LIMITS, prepareProviderMessages, serializeProviderRequestBody } from "./request-bounds";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -45,23 +48,27 @@ export class AnthropicMessagesProvider implements ChatProvider {
   }
 
   async *stream(request: ChatRequest): AsyncIterable<ProviderStreamEvent> {
+    const messages = prepareProviderMessages(request.messages, ANTHROPIC_REQUEST_LIMITS);
+    const requestMaxOutputTokens = resolveRequestMaxOutputTokens({
+      estimatedInputTokens: estimateChatRequestInputTokens({ ...request, messages }),
+      ...(this.options.contextWindow !== undefined ? { contextWindow: this.options.contextWindow } : {}),
+      ...(this.options.maxOutputTokens !== undefined ? { modelMaxOutputTokens: this.options.maxOutputTokens } : {}),
+      ...(request.maxOutputTokens !== undefined ? { requestedMaxOutputTokens: request.maxOutputTokens } : {})
+    });
+    const limits = providerResponseLimits(requestMaxOutputTokens);
     const requestBody = {
       model: this.options.model,
-      max_tokens: resolveRequestMaxOutputTokens({
-        estimatedInputTokens: estimateChatRequestInputTokens(request),
-        ...(this.options.contextWindow !== undefined ? { contextWindow: this.options.contextWindow } : {}),
-        ...(this.options.maxOutputTokens !== undefined ? { modelMaxOutputTokens: this.options.maxOutputTokens } : {}),
-        ...(request.maxOutputTokens !== undefined ? { requestedMaxOutputTokens: request.maxOutputTokens } : {})
-      }),
+      max_tokens: requestMaxOutputTokens,
       temperature: request.temperature ?? 0.2,
       system: toAnthropicSystem(request.system, request.systemBlocks),
       stream: true,
-      messages: toAnthropicMessages(request.messages),
+      messages: toAnthropicMessages(messages),
       ...(request.tools.length > 0 ? {
         tools: toAnthropicTools(request.tools),
         ...(request.toolChoice === "none" ? { tool_choice: { type: "none" } } : {})
       } : {})
     };
+    const requestJson = serializeProviderRequestBody(requestBody, ANTHROPIC_REQUEST_LIMITS.bodyBytes, "anthropic provider request");
     const response = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/v1/messages`, {
       method: "POST",
       headers: {
@@ -69,25 +76,24 @@ export class AnthropicMessagesProvider implements ChatProvider {
         "anthropic-version": ANTHROPIC_VERSION,
         ...(this.options.apiKey ? { "x-api-key": this.options.apiKey } : {})
       },
-      body: JSON.stringify(requestBody),
+      body: requestJson,
       signal: planRequestSignal(request.signal)
     });
     if (!response.ok) {
-      const responseText = await response.text();
+      const responseText = await readResponseTextPreview(response, PROVIDER_ERROR_BODY_MAX_BYTES);
       logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText });
-      yield { type: "error", message: `Planner provider failed: ${response.status} ${responseText}`, status: response.status, ...(parseRetryAfterMs(response.headers) !== undefined ? { retryAfterMs: parseRetryAfterMs(response.headers)! } : {}) };
+      yield { type: "error", message: providerHttpError(response.status, responseText, Boolean(this.options.apiKey)), status: response.status, ...(parseRetryAfterMs(response.headers) !== undefined ? { retryAfterMs: parseRetryAfterMs(response.headers)! } : {}) };
       return;
     }
-    yield* this.consume(response, requestBody);
+    yield* this.consume(response, requestBody, limits);
   }
 
-  private async *consume(response: Response, requestBody: unknown): AsyncIterable<ProviderStreamEvent> {
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+  private async *consume(response: Response, requestBody: unknown, limits: ProviderResponseLimits): AsyncIterable<ProviderStreamEvent> {
     let finishReason: string | undefined;
-    const blocks = new Map<number, { type: string; id?: string; name?: string; arguments: string }>();
-    const raw: string[] = [];
+    const blocks = new Map<number, { type: string; id?: string; name?: string; arguments: BoundedTextAccumulator }>();
+    const content = new BoundedTextAccumulator(limits.contentBytes, "provider content", limits.sseEvents);
+    const reasoning = new BoundedTextAccumulator(limits.reasoningBytes, "provider reasoning", limits.sseEvents);
+    const capture = createProviderDebugCapture();
 
     const handle = function* (event: { type?: string; index?: number; content_block?: { type?: string; id?: string; name?: string }; delta?: Record<string, unknown>; usage?: AnthropicUsage; message?: { usage?: AnthropicUsage }; error?: { message?: string } }): Iterable<ProviderStreamEvent> {
       switch (event.type) {
@@ -96,21 +102,30 @@ export class AnthropicMessagesProvider implements ChatProvider {
           break;
         case "content_block_start": {
           const idx = event.index ?? 0;
+          if (!Number.isInteger(idx) || idx < 0 || idx >= limits.toolCalls) throw new Error(`provider content block index must be between 0 and ${limits.toolCalls - 1}`);
           const block = event.content_block ?? {};
-          blocks.set(idx, { type: block.type ?? "text", ...(block.id ? { id: block.id } : {}), ...(block.name ? { name: block.name } : {}), arguments: "" });
+          blocks.set(idx, {
+            type: block.type ?? "text",
+            ...(block.id ? { id: block.id } : {}),
+            ...(block.name ? { name: block.name } : {}),
+            arguments: new BoundedTextAccumulator(limits.toolArgumentsBytes, "provider tool arguments", limits.sseEvents)
+          });
           break;
         }
         case "content_block_delta": {
           const idx = event.index ?? 0;
+          if (!Number.isInteger(idx) || idx < 0 || idx >= limits.toolCalls) throw new Error(`provider content block index must be between 0 and ${limits.toolCalls - 1}`);
           const delta = event.delta ?? {};
           if (delta.type === "text_delta" && typeof delta.text === "string") {
+            content.append(delta.text);
             yield { type: "text_delta", delta: delta.text };
           } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+            reasoning.append(delta.thinking);
             yield { type: "reasoning_delta", delta: delta.thinking };
           } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
             const slot = blocks.get(idx);
             if (slot) {
-              slot.arguments += delta.partial_json;
+              slot.arguments.append(delta.partial_json);
               yield { type: "tool_call_delta", index: idx, ...(slot.id ? { id: slot.id } : {}), ...(slot.name ? { name: slot.name } : {}), argumentsDelta: delta.partial_json };
             }
           }
@@ -120,7 +135,7 @@ export class AnthropicMessagesProvider implements ChatProvider {
           const idx = event.index ?? 0;
           const slot = blocks.get(idx);
           if (slot && slot.type === "tool_use" && slot.name) {
-            yield { type: "tool_call_complete", index: idx, id: slot.id ?? slot.name, name: slot.name, arguments: slot.arguments || "{}" };
+            yield { type: "tool_call_complete", index: idx, id: slot.id ?? slot.name, name: slot.name, arguments: slot.arguments.text() || "{}" };
           }
           break;
         }
@@ -136,24 +151,16 @@ export class AnthropicMessagesProvider implements ChatProvider {
       }
     };
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let newline: number;
-      while ((newline = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
+    try {
+      for await (const data of iterateSseData(response, limits, capture)) {
         if (!data) continue;
-        raw.push(data);
         let event: Record<string, unknown>;
-        try { event = JSON.parse(data); } catch { continue; }
+        try { event = JSON.parse(data); } catch { throw new Error("provider returned malformed sse json"); }
         yield* handle(event as Parameters<typeof handle>[0]);
       }
+    } finally {
+      logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText: capture?.text() ?? "" });
     }
-    logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText: raw.join("\n") });
     yield { type: "message_complete", ...(finishReason ? { finishReason } : {}) };
   }
 }
@@ -215,7 +222,7 @@ function toAnthropicMessages(messages: ProviderMessage[]): AnthropicMessage[] {
 }
 
 function anthropicImages(attachments: import("../../types").ToolAttachment[] | undefined): AnthropicContentBlock[] {
-  return (attachments ?? []).map((item) => ({
+  return (attachments ?? []).map(materializeToolAttachment).map((item) => ({
     type: "image",
     source: { type: "base64", media_type: item.mediaType, data: item.data }
   }));

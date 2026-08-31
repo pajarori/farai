@@ -4,6 +4,7 @@ import { id } from "../utils";
 import { extractOtpCandidates, extractUrls, normalizeAttachmentName } from "./message";
 import { emailMessageRegistry } from "./resources";
 import type { DisposableInboxActivity, EmailMessageDetail, EmailMessageSummary } from "./types";
+import { readBoundedResponseJson, readBoundedResponsePreview } from "../http-response";
 
 type TempMailProvider = {
   name: DisposableInboxActivity["provider"];
@@ -37,6 +38,8 @@ const PROVIDERS: TempMailProvider[] = [
 const REQUEST_TIMEOUT_MS = 15_000;
 const REQUEST_ATTEMPTS = 3;
 const ADDRESS_ATTEMPTS = 3;
+const TEMP_MAIL_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
+const TEMP_MAIL_ERROR_MAX_BYTES = 8 * 1024;
 
 class TempMailHttpError extends Error {
   constructor(readonly status: number, message: string, readonly retryAfterMs?: number) {
@@ -413,15 +416,18 @@ async function requestJson(
     signal
   });
   if (!response.ok) {
-    const detail = compactErrorDetail(await response.text().catch(() => ""));
+    const detail = compactErrorDetail(await readBoundedResponsePreview(response, TEMP_MAIL_ERROR_MAX_BYTES).catch(() => ""));
     throw new TempMailHttpError(
       response.status,
       [`HTTP ${response.status} ${response.statusText}`, detail].filter(Boolean).join(" · "),
       retryAfterMilliseconds(response.headers.get("retry-after"))
     );
   }
-  if (options.allowEmpty || response.status === 204) return {};
-  return await response.json();
+  if (options.allowEmpty || response.status === 204) {
+    try { await response.body?.cancel(); } catch {}
+    return {};
+  }
+  return await readBoundedResponseJson(response, TEMP_MAIL_RESPONSE_MAX_BYTES, "temporary email response");
 }
 
 function retryableRequestError(error: unknown): boolean {

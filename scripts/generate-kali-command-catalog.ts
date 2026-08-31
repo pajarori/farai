@@ -1,5 +1,6 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { readBoundedFileTextSync } from "../src/file-read";
 
 const docsRoot = resolve(process.argv[2] ?? "");
 const sourceVersion = process.argv[3] ?? "unknown";
@@ -9,7 +10,7 @@ const commands = new Set<string>();
 for (const directory of readdirSync(docsRoot).sort()) {
   let content: string;
   try {
-    content = readFileSync(join(docsRoot, directory, "index.md"), "utf8");
+    content = readBoundedFileTextSync(join(docsRoot, directory, "index.md"), 8 * 1024 * 1024, "kali package documentation");
   } catch {
     continue;
   }

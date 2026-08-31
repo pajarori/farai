@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatProvider } from "../agent-core/provider/protocol";
 import type { PlannerProvider } from "../agent-core/provider";
 import { id } from "../utils";
+import { atomicWriteFile } from "../agent-core/atomic-file";
 import { benchmarkSuiteHash } from "./hash";
 import { loadBenchmarkSuiteManifest, normalizeBenchmarkSuiteManifest } from "./manifest";
 import { runBenchmark } from "./runner";
@@ -107,8 +108,8 @@ export async function runBenchmarkSuite(input: BenchmarkSuiteManifest, options: 
       error: outcome.error
     })
   };
-  writeFileSync(join(bundlePath, "campaign.json"), `${JSON.stringify(result, null, 2)}\n`);
-  writeFileSync(join(bundlePath, "suite.sha256"), `${result.manifestHash}\n`);
+  atomicWriteFile(join(bundlePath, "campaign.json"), `${JSON.stringify(result, null, 2)}\n`, 0o600);
+  atomicWriteFile(join(bundlePath, "suite.sha256"), `${result.manifestHash}\n`, 0o600);
   return result;
 }
 

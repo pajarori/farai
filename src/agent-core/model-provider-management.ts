@@ -4,6 +4,7 @@ import { buildModelCatalog, type ModelCatalog } from "./model-catalog";
 import { loadModelProfiles, resolveProfileApiKeyAsync } from "./model-profiles";
 import { normalizeModelProviderBaseUrl, normalizeModelProviderID } from "./model-provider-validation";
 import { resolveProtocol } from "./provider/registry";
+import { readBoundedResponseJson } from "../http-response";
 
 export { normalizeModelProviderID } from "./model-provider-validation";
 
@@ -53,6 +54,8 @@ export type ModelProviderProbe = {
   latencyMs: number;
   error?: string;
 };
+
+const MODEL_PROBE_MAX_BYTES = 8 * 1024 * 1024;
 
 const DEFAULT_PROBE_TIMEOUT_MS = 8_000;
 
@@ -139,7 +142,7 @@ export async function probeModelProvider(
         error: await responseError(response)
       };
     }
-    const models = modelIDs(await response.json());
+    const models = modelIDs(await readBoundedResponseJson(response, MODEL_PROBE_MAX_BYTES, "provider model catalog"));
     if (!models) {
       return {
         ok: false,

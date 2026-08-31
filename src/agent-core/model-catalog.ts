@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, DEFAULT_MODEL_PROVIDER_ID, DEFAULT_MODEL_PUBLIC_API_KEY } from "./default-model";
 import { globalDataDir, loadGlobalConfig } from "./global-config";
@@ -6,6 +6,10 @@ import { loadConfig, updateConfig } from "./config";
 import { fetchAvailableModelIds, HEURISTIC_MODEL_ID, resolveModel, type ConcreteResolvedModel, type ResolvedModel } from "./model-registry";
 import { loadModelProfiles, resolveProfile, resolveProfileApiKeyAsync, resolveProfileAsync, type ModelProfile } from "./model-profiles";
 import type { ModelPricingSnapshot } from "../types";
+import { discardResponseBody, readBoundedResponseJson } from "../http-response";
+import { readBoundedFileTextSyncNoFollow } from "../file-read";
+import { atomicWriteFile } from "./atomic-file";
+import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists } from "./private-path";
 
 export type ModelProviderCatalog = {
   id: string;
@@ -48,6 +52,7 @@ const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MODELS_DEV_STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MODELS_DEV_FETCH_TIMEOUT_MS = 4_000;
+const MODELS_DEV_MAX_BYTES = 16 * 1024 * 1024;
 const RECENT_MODEL_LIMIT = 12;
 const modelsDevRefreshes = new Map<string, Promise<Record<string, ModelsDevProvider> | undefined>>();
 
@@ -605,8 +610,11 @@ export async function fetchModelsDevCatalog(
       headers: { "user-agent": "farai" },
       signal: controller.signal
     });
-    if (!response.ok) return undefined;
-    return normalizeModelsDevCatalog(await response.json());
+    if (!response.ok) {
+      await discardResponseBody(response);
+      return undefined;
+    }
+    return normalizeModelsDevCatalog(await readBoundedResponseJson(response, MODELS_DEV_MAX_BYTES, "models.dev catalog"));
   } catch {
     return undefined;
   } finally {
@@ -618,7 +626,9 @@ function readCachedModelsDevCatalog(): { fetchedAt: number; providers: Record<st
   try {
     const path = modelsDevCachePath();
     if (!existsSync(path)) return undefined;
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { fetchedAt?: number; providers?: unknown };
+    ensurePrivateDirectory(dirname(path), "model cache directory");
+    ensurePrivateRegularFileIfExists(path, "models.dev cache");
+    const parsed = JSON.parse(readBoundedFileTextSyncNoFollow(path, MODELS_DEV_MAX_BYTES, "models.dev cache")) as { fetchedAt?: number; providers?: unknown };
     if (typeof parsed.fetchedAt !== "number" || Date.now() - parsed.fetchedAt > MODELS_DEV_STALE_TTL_MS) return undefined;
     const providers = normalizeModelsDevCatalog(parsed.providers);
     return providers ? { fetchedAt: parsed.fetchedAt, providers } : undefined;
@@ -629,10 +639,9 @@ function readCachedModelsDevCatalog(): { fetchedAt: number; providers: Record<st
 
 function writeCachedModelsDevCatalog(providers: Record<string, ModelsDevProvider>): void {
   const path = modelsDevCachePath();
-  mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify({ fetchedAt: Date.now(), providers })}\n`);
-  renameSync(temporary, path);
+  ensurePrivateDirectory(dirname(path), "model cache directory");
+  ensurePrivateRegularFileIfExists(path, "models.dev cache");
+  atomicWriteFile(path, `${JSON.stringify({ fetchedAt: Date.now(), providers })}\n`, 0o600);
 }
 
 function normalizeModelsDevCatalog(value: unknown): Record<string, ModelsDevProvider> | undefined {

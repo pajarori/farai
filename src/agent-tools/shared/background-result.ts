@@ -29,8 +29,15 @@ export function backgroundToolResult(tool: string, started: StartSessionResult, 
 
 export function timeoutBackgroundResult(tool: string, backend: ExecutionBackend, result: BackendExecResult): ToolResult | undefined {
   if (!result.backgroundSessionId) return undefined;
-  sessionManager.adopt(backend, tool, result.backgroundSessionId, "generic", [result.stdout, result.stderr].filter(Boolean).join("\n"));
   const output = [result.stdout, result.stderr ? `STDERR:\n${result.stderr}` : ""].filter(Boolean).join("\n") || "(no output yet)";
+  if (!sessionManager.adopt(backend, tool, result.backgroundSessionId, "generic", [result.stdout, result.stderr].filter(Boolean).join("\n"))) {
+    return {
+      ok: false,
+      summary: `${tool} background handoff cancelled because sessions are stopping`,
+      output,
+      status: "error"
+    };
+  }
   return {
     ok: true,
     summary: `${tool} exceeded its time budget and continues running in background: processId=${result.backgroundSessionId}`,

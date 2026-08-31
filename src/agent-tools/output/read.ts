@@ -1,6 +1,6 @@
 import type { ToolContext, ToolDefinition, ToolResult } from "../../types";
 
-type OutputReadArgs = { artifactId?: unknown; offset?: unknown; limit?: unknown };
+type OutputReadArgs = { artifactId?: unknown; offset?: unknown; limit?: unknown; byteOffset?: unknown; byteLimit?: unknown };
 
 export const outputReadTool: ToolDefinition<OutputReadArgs> = {
   name: "tool_output_read",
@@ -11,7 +11,9 @@ export const outputReadTool: ToolDefinition<OutputReadArgs> = {
     properties: {
       artifactId: { type: "string", description: "The output_artifact_id from a truncated tool result." },
       offset: { type: "integer", description: "0-based starting line (default 0)." },
-      limit: { type: "integer", description: "Maximum lines to return (default 400)." }
+      limit: { type: "integer", description: "Maximum lines to return (default 400, maximum 1000)." },
+      byteOffset: { type: "integer", description: "0-based byte offset for continuing inside a very long line." },
+      byteLimit: { type: "integer", description: "Maximum bytes to return in byte mode (default and maximum 49152)." }
     }
   },
   mutates: false,
@@ -26,13 +28,30 @@ export const outputReadTool: ToolDefinition<OutputReadArgs> = {
     if (!artifactId) return { ok: false, summary: "artifactId is required." };
     const result = context.store.readOutputArtifact(artifactId, {
       ...(typeof args.offset === "number" ? { offset: args.offset } : {}),
-      ...(typeof args.limit === "number" ? { limit: args.limit } : {})
+      ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+      ...(typeof args.byteOffset === "number" ? { byteOffset: args.byteOffset } : {}),
+      ...(typeof args.byteLimit === "number" ? { byteLimit: args.byteLimit } : {})
     });
     if (!result) return { ok: false, summary: `No output artifact found for ${artifactId}.` };
+    if (result.byteFrom !== undefined && result.byteTo !== undefined) {
+      const remaining = result.byteTo < result.artifact.bytes ? `; read more with byteOffset=${result.byteTo}` : "";
+      return {
+        ok: true,
+        summary: `bytes ${result.byteFrom}-${result.byteTo} of ${result.artifact.bytes} from ${artifactId}${remaining}`,
+        output: result.content
+      };
+    }
+    if (result.nextByteOffset !== undefined) {
+      return {
+        ok: true,
+        summary: `lines ${result.from}-${result.to} of ${result.totalLines} from ${artifactId}; continue with byteOffset=${result.nextByteOffset}`,
+        output: result.content
+      };
+    }
     const remaining = result.to < result.totalLines ? `; read more with offset=${result.to}` : "";
     return {
       ok: true,
-      summary: `Lines ${result.from}-${result.to} of ${result.totalLines} from ${artifactId}${remaining}`,
+      summary: `lines ${result.from}-${result.to} of ${result.totalLines} from ${artifactId}${remaining}`,
       output: result.content
     };
   }

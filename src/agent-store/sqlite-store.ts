@@ -1,6 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import type {
   BackgroundJob,
@@ -20,6 +19,8 @@ import type {
   MemoryItem,
   Note,
   OutputArtifact,
+  OutputArtifactReadOptions,
+  OutputArtifactReadResult,
   Part,
   PartType,
   Session,
@@ -31,12 +32,19 @@ import type {
   TurnStopReason,
   TurnStatus,
   ToolCallRecord,
+  ToolResult,
   UsageRecord,
   UsageSummary
 } from "../types";
 import { id, nowIso } from "../utils";
 import { canonicalToolName } from "../tool-names";
 import { DEFAULT_SESSION_TITLE, sessionDisplayName } from "../session-title";
+import { forEachFileLineSync, readFileByteWindowSync } from "../file-read";
+import { takeBytes } from "../agent-tools/shared/output-bound";
+import { persistToolAttachment, sessionAttachmentDirectory } from "../tool-attachment";
+import { assertPersistedText, PERSISTENCE_LIMITS, stringifyPersistedJson } from "./persistence-bounds";
+import { atomicWriteFile } from "../agent-core/atomic-file";
+import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
 
 type Row = Record<string, unknown>;
 type BackgroundToolSettlementInput = {
@@ -65,6 +73,9 @@ const RESUMABLE_SESSION_PREDICATE = `(
   or exists (select 1 from todos where session_id = s.id)
   or exists (select 1 from output_artifacts where session_id = s.id)
 )`;
+const OUTPUT_ARTIFACT_PAGE_MAX_LINES = 1_000;
+const OUTPUT_ARTIFACT_PAGE_MAX_BYTES = 48 * 1024;
+const OUTPUT_ARTIFACT_LINE_MAX_BYTES = 16 * 1024 * 1024;
 
 export type StoreChange =
   | { kind: "event"; sessionId: string; event: SessionEvent }
@@ -118,9 +129,11 @@ export class SqliteStore {
   }
 
   async ensure(): Promise<void> {
-    await mkdir(this.root, { recursive: true });
-    await mkdir(join(this.root, "evidence"), { recursive: true });
-    await mkdir(join(this.root, "artifacts"), { recursive: true });
+    ensurePrivateDirectory(this.root, "farai state root");
+    for (const name of ["evidence", "artifacts", "attachments"]) {
+      const directory = join(this.root, name);
+      ensurePrivateDirectory(directory, `farai ${name} directory`);
+    }
     this.database();
   }
 
@@ -128,12 +141,21 @@ export class SqliteStore {
     if (this.closed) throw new Error("SQLite store is closed");
     if (this.db) return this.db;
     const file = join(this.root, "farai.db");
-    this.db = new Database(file, { create: true });
-    this.db.exec("PRAGMA journal_mode = WAL;");
-    this.db.exec("PRAGMA foreign_keys = ON;");
-    this.db.exec("PRAGMA busy_timeout = 5000;");
-    this.migrate(this.db);
-    return this.db;
+    ensurePrivateSqlitePath(file, "farai database path");
+    const db = new Database(file, { create: true });
+    try {
+      ensurePrivateRegularFileIfExists(file, "farai database path");
+      db.exec("PRAGMA journal_mode = WAL;");
+      db.exec("PRAGMA foreign_keys = ON;");
+      db.exec("PRAGMA busy_timeout = 5000;");
+      this.migrate(db);
+      ensurePrivateSqlitePath(file, "farai database path");
+      this.db = db;
+      return db;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
   }
 
   async createSession(options: Partial<Pick<Session, "title" | "parentId" | "provider" | "model" | "emailPrimaryId" | "emailSecondaryId" | "summary" | "summaryUpdatedAt" | "campaignId">> & { workspace?: string } = {}): Promise<Session> {
@@ -194,16 +216,16 @@ export class SqliteStore {
         $workspace: session.workspace,
         $mode: session.mode,
         $phase: session.phase,
-        $title: session.title ?? null,
+        $title: session.title ? assertPersistedText(session.title, PERSISTENCE_LIMITS.shortTextBytes, "session title") : null,
         $parent: session.parentId ?? null,
         $campaign: session.campaignId ?? null,
         $provider: session.provider ?? null,
         $model: session.model ?? null,
         $emailPrimaryId: session.emailPrimaryId ?? null,
         $emailSecondaryId: session.emailSecondaryId ?? null,
-        $summary: session.summary ?? null,
+        $summary: session.summary ? assertPersistedText(session.summary, PERSISTENCE_LIMITS.summaryBytes, "session summary") : null,
         $summaryUpdated: session.summaryUpdatedAt ?? null,
-        $toolScope: session.toolScope ? JSON.stringify(session.toolScope.map(canonicalToolName)) : null,
+        $toolScope: session.toolScope ? stringifyPersistedJson(session.toolScope.map(canonicalToolName), PERSISTENCE_LIMITS.structuredJsonBytes, "session tool scope") : null,
         $archived: session.archivedAt ?? null,
         $created: session.createdAt,
         $updated: session.updatedAt
@@ -260,6 +282,7 @@ export class SqliteStore {
       const result = db.query("delete from sessions where id = $session").run({ $session: sessionId });
       discarded = result.changes === 1;
     })();
+    if (discarded) rmSync(join(this.root, "attachments", sessionAttachmentDirectory(sessionId)), { recursive: true, force: true });
     return discarded;
   }
 
@@ -292,8 +315,8 @@ export class SqliteStore {
        values ($id, $workspace, $name, $kind, $status, $created, $updated)`
     ).run({
       $id: campaign.id,
-      $workspace: campaign.workspace,
-      $name: campaign.name,
+      $workspace: assertPersistedText(campaign.workspace, PERSISTENCE_LIMITS.shortTextBytes, "campaign workspace"),
+      $name: assertPersistedText(campaign.name, PERSISTENCE_LIMITS.shortTextBytes, "campaign name"),
       $kind: campaign.kind,
       $status: campaign.status,
       $created: campaign.createdAt,
@@ -318,7 +341,7 @@ export class SqliteStore {
     const current = this.loadCampaign(campaignId);
     const next: Campaign = { ...current, ...patch, updatedAt: nowIso() };
     this.database().query("update campaigns set name = $name, status = $status, updated_at = $updated where id = $id")
-      .run({ $name: next.name, $status: next.status, $updated: next.updatedAt, $id: campaignId });
+      .run({ $name: assertPersistedText(next.name, PERSISTENCE_LIMITS.shortTextBytes, "campaign name"), $status: next.status, $updated: next.updatedAt, $id: campaignId });
     return next;
   }
 
@@ -338,11 +361,11 @@ export class SqliteStore {
     ).run({
       $id: asset.id,
       $campaign: asset.campaignId,
-      $canonical: asset.canonical,
+      $canonical: assertPersistedText(asset.canonical, PERSISTENCE_LIMITS.shortTextBytes, "campaign asset canonical value"),
       $kind: asset.kind,
       $parent: asset.parentId ?? null,
-      $technologies: JSON.stringify(asset.technologies),
-      $metadata: JSON.stringify(asset.metadata),
+      $technologies: stringifyPersistedJson(asset.technologies, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign asset technologies"),
+      $metadata: stringifyPersistedJson(asset.metadata, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign asset metadata"),
       $confidence: asset.confidence,
       $first: asset.firstSeen,
       $last: asset.lastSeen
@@ -366,11 +389,11 @@ export class SqliteStore {
       $id: observation.id,
       $campaign: observation.campaignId,
       $asset: observation.assetId ?? null,
-      $kind: observation.kind,
-      $value: JSON.stringify(observation.value),
+      $kind: assertPersistedText(observation.kind, PERSISTENCE_LIMITS.shortTextBytes, "campaign observation kind"),
+      $value: stringifyPersistedJson(observation.value, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign observation value"),
       $confidence: observation.confidence,
-      $source: observation.source,
-      $evidence: JSON.stringify(observation.evidenceIds),
+      $source: assertPersistedText(observation.source, PERSISTENCE_LIMITS.shortTextBytes, "campaign observation source"),
+      $evidence: stringifyPersistedJson(observation.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign observation evidence ids"),
       $status: observation.status,
       $created: now,
       $updated: now
@@ -402,13 +425,13 @@ export class SqliteStore {
       $id: hypothesis.id,
       $campaign: hypothesis.campaignId,
       $asset: hypothesis.assetId ?? null,
-      $title: hypothesis.title,
-      $category: hypothesis.category,
+      $title: assertPersistedText(hypothesis.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign hypothesis title"),
+      $category: assertPersistedText(hypothesis.category, PERSISTENCE_LIMITS.shortTextBytes, "campaign hypothesis category"),
       $status: hypothesis.status,
-      $rationale: hypothesis.rationale,
-      $next_test: hypothesis.nextTest,
+      $rationale: assertPersistedText(hypothesis.rationale, PERSISTENCE_LIMITS.documentTextBytes, "campaign hypothesis rationale"),
+      $next_test: assertPersistedText(hypothesis.nextTest, PERSISTENCE_LIMITS.documentTextBytes, "campaign hypothesis next test"),
       $confidence: hypothesis.confidence,
-      $evidence: JSON.stringify(hypothesis.evidenceIds),
+      $evidence: stringifyPersistedJson(hypothesis.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign hypothesis evidence ids"),
       $created: hypothesis.createdAt,
       $updated: hypothesis.updatedAt
     });
@@ -433,16 +456,16 @@ export class SqliteStore {
       $campaign: attempt.campaignId,
       $session: attempt.sessionId,
       $hypothesis: attempt.hypothesisId ?? null,
-      $title: attempt.title,
-      $target: attempt.target,
-      $method: attempt.method,
-      $baseline: JSON.stringify(attempt.baseline),
-      $mutation: JSON.stringify(attempt.mutation),
-      $oracle: attempt.oracle,
-      $observed: attempt.observed === undefined ? null : JSON.stringify(attempt.observed),
+      $title: assertPersistedText(attempt.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign test title"),
+      $target: assertPersistedText(attempt.target, PERSISTENCE_LIMITS.shortTextBytes, "campaign test target"),
+      $method: assertPersistedText(attempt.method, PERSISTENCE_LIMITS.documentTextBytes, "campaign test method"),
+      $baseline: stringifyPersistedJson(attempt.baseline, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test baseline"),
+      $mutation: stringifyPersistedJson(attempt.mutation, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test mutation"),
+      $oracle: assertPersistedText(attempt.oracle, PERSISTENCE_LIMITS.documentTextBytes, "campaign test oracle"),
+      $observed: attempt.observed === undefined ? null : stringifyPersistedJson(attempt.observed, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test observation"),
       $status: attempt.status,
       $level: attempt.evidenceLevel,
-      $evidence: JSON.stringify(attempt.evidenceIds),
+      $evidence: stringifyPersistedJson(attempt.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test evidence ids"),
       $created: now,
       $updated: now
     });
@@ -468,10 +491,10 @@ export class SqliteStore {
     this.database().query(
       `update campaign_test_attempts set observed_json = $observed, status = $status, evidence_level = $level, evidence_ids_json = $evidence, updated_at = $updated where id = $id`
     ).run({
-      $observed: next.observed === undefined ? null : JSON.stringify(next.observed),
+      $observed: next.observed === undefined ? null : stringifyPersistedJson(next.observed, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test observation"),
       $status: next.status,
       $level: next.evidenceLevel,
-      $evidence: JSON.stringify(next.evidenceIds),
+      $evidence: stringifyPersistedJson(next.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test evidence ids"),
       $updated: next.updatedAt,
       $id: attemptId
     });
@@ -567,7 +590,7 @@ export class SqliteStore {
         $session: persisted.sessionId,
         $sequence: persisted.sequence!,
         $type: persisted.type,
-        $payload: JSON.stringify(persisted.payload),
+        $payload: stringifyPersistedJson(persisted.payload, PERSISTENCE_LIMITS.eventJsonBytes, "session event payload"),
         $created: persisted.createdAt
       });
       db.query("update sessions set updated_at = $updated where id = $session").run({
@@ -623,7 +646,7 @@ export class SqliteStore {
         $session: turn.sessionId,
         $runtime: turn.runtimeId ?? null,
         $status: turn.status,
-        $input: turn.userInput,
+        $input: assertPersistedText(turn.userInput, PERSISTENCE_LIMITS.userInputBytes, "turn user input"),
         $steps: turn.stepCount,
         $created: turn.createdAt,
         $updated: turn.updatedAt
@@ -657,7 +680,7 @@ export class SqliteStore {
         $planner: next.plannerName ?? null,
         $provider: next.provider ?? null,
         $model: next.model ?? null,
-        $error: next.errorSummary ?? null,
+        $error: next.errorSummary ? assertPersistedText(next.errorSummary, PERSISTENCE_LIMITS.documentTextBytes, "turn error summary") : null,
         $updated: next.updatedAt,
         $id: next.id
       });
@@ -743,15 +766,15 @@ export class SqliteStore {
           $session: boundary.sessionId,
           $trigger: boundary.trigger,
           $through: boundary.throughMessageRowId,
-          $summary: boundary.summary,
+          $summary: assertPersistedText(boundary.summary, PERSISTENCE_LIMITS.summaryBytes, "compaction summary"),
           $pre: boundary.preCompactTokens ?? null,
           $post: boundary.postCompactTokens ?? null,
           $created: boundary.createdAt
         });
       db.query("update sessions set summary = $summary, summary_updated_at = $created, updated_at = $created where id = $session")
-        .run({ $summary: boundary.summary, $created: boundary.createdAt, $session: boundary.sessionId });
+        .run({ $summary: assertPersistedText(boundary.summary, PERSISTENCE_LIMITS.summaryBytes, "session summary"), $created: boundary.createdAt, $session: boundary.sessionId });
       db.query("insert into events (id, session_id, sequence, type, payload_json, created_at) values ($id, $session, $sequence, $type, $payload, $created)")
-        .run({ $id: event.id, $session: event.sessionId, $sequence: event.sequence!, $type: event.type, $payload: JSON.stringify(event.payload), $created: event.createdAt });
+        .run({ $id: event.id, $session: event.sessionId, $sequence: event.sequence!, $type: event.type, $payload: stringifyPersistedJson(event.payload, PERSISTENCE_LIMITS.eventJsonBytes, "compaction event payload"), $created: event.createdAt });
     })();
     this.emit({ kind: "event", sessionId: event.sessionId, event });
     const session = this.loadSession(input.sessionId);
@@ -774,7 +797,7 @@ export class SqliteStore {
         $output: record.outputTokens,
         $cached: record.cachedInputTokens ?? null,
         $cacheWrite: record.cacheWriteInputTokens ?? null,
-        $pricing: record.pricing ? JSON.stringify(record.pricing) : null,
+        $pricing: record.pricing ? stringifyPersistedJson(record.pricing, PERSISTENCE_LIMITS.structuredJsonBytes, "usage pricing") : null,
         $cost: record.cost,
         $latency: record.latencyMs,
         $created: record.createdAt
@@ -878,6 +901,7 @@ export class SqliteStore {
       db.query("update sessions set summary = null, summary_updated_at = null, updated_at = $updated where id = $session")
         .run({ $updated: updated, $session: sessionId });
     })();
+    rmSync(join(this.root, "attachments", sessionAttachmentDirectory(sessionId)), { recursive: true, force: true });
     const session = this.loadSession(sessionId);
     this.emit({ kind: "session", sessionId, session });
     return session;
@@ -953,7 +977,7 @@ export class SqliteStore {
         $turn: part.turnId,
         $message: part.messageId,
         $type: part.type,
-        $payload: JSON.stringify(part.payload),
+        $payload: stringifyPersistedJson(part.payload, PERSISTENCE_LIMITS.partJsonBytes, "message part payload"),
         $order: part.order,
         $created: part.createdAt
       });
@@ -964,7 +988,7 @@ export class SqliteStore {
   updatePartPayload(partId: string, payload: unknown): Part {
     this.database().query("update parts set payload_json = $payload where id = $id").run({
       $id: partId,
-      $payload: JSON.stringify(payload)
+      $payload: stringifyPersistedJson(payload, PERSISTENCE_LIMITS.partJsonBytes, "message part payload")
     });
     const row = this.database().query("select * from parts where id = $id").get({ $id: partId }) as Row | null;
     if (!row) throw new Error(`Part not found: ${partId}`);
@@ -1233,7 +1257,7 @@ export class SqliteStore {
         $session: item.sessionId,
         $sequence: item.sequence,
         $kind: item.kind,
-        $payload: JSON.stringify(item.payload),
+        $payload: stringifyPersistedJson(item.payload, PERSISTENCE_LIMITS.mailboxJsonBytes, "session mailbox payload"),
         $trigger: item.triggerPolicy,
         $state: item.state,
         $dedupe: item.dedupeKey,
@@ -1509,14 +1533,20 @@ export class SqliteStore {
   }
 
   saveEvidence(evidence: Evidence, content?: string): Evidence {
+    const title = assertPersistedText(evidence.title, PERSISTENCE_LIMITS.shortTextBytes, "evidence title");
+    const summary = assertPersistedText(evidence.summary, PERSISTENCE_LIMITS.documentTextBytes, "evidence summary");
+    const db = this.database();
+    const previous = db.query("select path from evidence where id = $id").get({ $id: evidence.id }) as { path?: string | null } | null;
     let finalEvidence = evidence;
+    let stagedPath: string | undefined;
     if (content !== undefined) {
-      const file = join(this.root, "evidence", `${evidence.id}.txt`);
-      Bun.write(file, content);
-      finalEvidence = { ...evidence, path: file };
+      const bounded = assertPersistedText(content, PERSISTENCE_LIMITS.evidenceContentBytes, "evidence content");
+      stagedPath = join(this.root, "evidence", `${evidence.id}-${id()}.txt`);
+      atomicWriteFile(stagedPath, bounded, 0o600);
+      finalEvidence = { ...evidence, path: stagedPath };
     }
-    this.database()
-      .query(
+    try {
+      db.query(
         `insert into evidence (id, session_id, source, title, path, summary, created_at)
          values ($id, $session, $source, $title, $path, $summary, $created)
          on conflict(id) do update set
@@ -1531,29 +1561,39 @@ export class SqliteStore {
         $id: finalEvidence.id,
         $session: finalEvidence.sessionId,
         $source: finalEvidence.source,
-        $title: finalEvidence.title,
+        $title: title,
         $path: finalEvidence.path ?? null,
-        $summary: finalEvidence.summary,
+        $summary: summary,
         $created: finalEvidence.createdAt
       });
+    } catch (error) {
+      if (stagedPath) rmSync(stagedPath, { force: true });
+      throw error;
+    }
+    const previousPath = typeof previous?.path === "string" ? previous.path : undefined;
+    if (previousPath && previousPath !== finalEvidence.path && this.isUnreferencedManagedPath(previousPath, join(this.root, "evidence"), "evidence")) {
+      rmSync(previousPath, { force: true });
+    }
     this.emit({ kind: "evidence", sessionId: finalEvidence.sessionId, evidence: finalEvidence });
     return finalEvidence;
   }
 
   saveOutputArtifact(input: { sessionId: string; toolCallId?: string; content: string }): OutputArtifact {
+    const content = assertPersistedText(input.content, PERSISTENCE_LIMITS.outputArtifactBytes, "output artifact");
     const artifact: OutputArtifact = {
       id: id(),
       sessionId: input.sessionId,
       ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
       path: join(this.root, "artifacts", `${id()}.txt`),
-      bytes: Buffer.byteLength(input.content, "utf8"),
+      bytes: Buffer.byteLength(content, "utf8"),
+      lines: countLines(content),
       createdAt: nowIso()
     };
-    writeFileSync(artifact.path, input.content);
-    this.database()
-      .query(
-        `insert into output_artifacts (id, session_id, tool_call_id, path, bytes, created_at)
-         values ($id, $session, $toolCall, $path, $bytes, $created)`
+    atomicWriteFile(artifact.path, content, 0o600);
+    try {
+      this.database().query(
+        `insert into output_artifacts (id, session_id, tool_call_id, path, bytes, lines, created_at)
+         values ($id, $session, $toolCall, $path, $bytes, $lines, $created)`
       )
       .run({
         $id: artifact.id,
@@ -1561,21 +1601,164 @@ export class SqliteStore {
         $toolCall: artifact.toolCallId ?? null,
         $path: artifact.path,
         $bytes: artifact.bytes,
+        $lines: artifact.lines ?? 0,
         $created: artifact.createdAt
       });
+    } catch (error) {
+      rmSync(artifact.path, { force: true });
+      throw error;
+    }
     return artifact;
   }
 
-  readOutputArtifact(artifactId: string, options: { offset?: number; limit?: number } = {}): { artifact: OutputArtifact; content: string; totalLines: number; from: number; to: number } | undefined {
+  persistToolResultAttachments(sessionId: string, result: ToolResult): ToolResult {
+    if (!result.attachments?.length) return result;
+    return {
+      ...result,
+      attachments: result.attachments.map((attachment) => persistToolAttachment(this.root, sessionId, attachment))
+    };
+  }
+
+  pruneOrphanedToolAttachments(): number {
+    const root = join(this.root, "attachments");
+    if (!existsSync(root)) return 0;
+    const sessions = this.database().query("select id from sessions").all() as Array<{ id: string }>;
+    const owners = new Map(sessions.map((session) => [sessionAttachmentDirectory(session.id), session.id]));
+    let removed = 0;
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const directory = join(root, entry.name);
+      const sessionId = entry.isDirectory() ? owners.get(entry.name) : undefined;
+      if (!sessionId) {
+        rmSync(directory, { recursive: true, force: true });
+        removed += 1;
+        continue;
+      }
+      let referenced: Set<string>;
+      try {
+        referenced = this.referencedToolAttachmentNames(sessionId, directory);
+      } catch {
+        continue;
+      }
+      for (const candidate of readdirSync(directory, { withFileTypes: true })) {
+        if (candidate.isFile() && referenced.has(candidate.name)) continue;
+        rmSync(join(directory, candidate.name), { recursive: true, force: true });
+        removed += 1;
+      }
+      if (readdirSync(directory).length === 0) rmSync(directory, { recursive: true, force: true });
+    }
+    return removed;
+  }
+
+  pruneOrphanedDurableFiles(): number {
+    const artifacts = this.database().query("select path from output_artifacts").all() as Array<{ path: string }>;
+    const evidence = this.database().query("select path from evidence where path is not null").all() as Array<{ path: string }>;
+    return this.pruneManagedDirectory(join(this.root, "artifacts"), artifacts.map((row) => row.path))
+      + this.pruneManagedDirectory(join(this.root, "evidence"), evidence.map((row) => row.path));
+  }
+
+  private pruneManagedDirectory(directory: string, paths: string[]): number {
+    if (!existsSync(directory)) return 0;
+    const canonicalDirectory = resolve(directory);
+    const referenced = new Set(paths.flatMap((path) => resolve(dirname(path)) === canonicalDirectory ? [basename(path)] : []));
+    let removed = 0;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isFile() && referenced.has(entry.name)) continue;
+      rmSync(join(directory, entry.name), { recursive: true, force: true });
+      removed += 1;
+    }
+    return removed;
+  }
+
+  private isUnreferencedManagedPath(path: string, directory: string, table: "evidence" | "output_artifacts"): boolean {
+    if (resolve(dirname(path)) !== resolve(directory)) return false;
+    const row = this.database().query(`select 1 as referenced from ${table} where path = $path limit 1`).get({ $path: path }) as Row | null;
+    return !row;
+  }
+
+  private referencedToolAttachmentNames(sessionId: string, directory: string): Set<string> {
+    const rows = this.database().query("select payload_json from parts where session_id = $session and type = 'tool_result'")
+      .all({ $session: sessionId }) as Array<{ payload_json: string }>;
+    const names = new Set<string>();
+    const canonicalDirectory = resolve(directory);
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json) as unknown;
+      if (!isPlainRecord(payload) || !isPlainRecord(payload.toolResult) || !Array.isArray(payload.toolResult.attachments)) continue;
+      for (const attachment of payload.toolResult.attachments) {
+        if (!isPlainRecord(attachment) || typeof attachment.path !== "string") continue;
+        const path = resolve(attachment.path);
+        if (resolve(dirname(path)) === canonicalDirectory) names.add(basename(path));
+      }
+    }
+    return names;
+  }
+
+  readOutputArtifact(artifactId: string, options: OutputArtifactReadOptions = {}): OutputArtifactReadResult | undefined {
     const row = this.database().query("select * from output_artifacts where id = $id").get({ $id: artifactId }) as Row | null;
     if (!row) return undefined;
     const artifact = outputArtifactFromRow(row);
     if (!existsSync(artifact.path)) return undefined;
-    const lines = readFileSync(artifact.path, "utf8").split("\n");
-    const from = Math.min(Math.max(0, Math.floor(options.offset ?? 0)), lines.length);
-    const limit = options.limit && options.limit > 0 ? Math.floor(options.limit) : 400;
-    const to = Math.min(lines.length, from + limit);
-    return { artifact, content: lines.slice(from, to).join("\n"), totalLines: lines.length, from, to };
+    if (options.byteOffset !== undefined) {
+      const window = readFileByteWindowSync(
+        artifact.path,
+        options.byteOffset,
+        clampPositiveInteger(options.byteLimit, OUTPUT_ARTIFACT_PAGE_MAX_BYTES, OUTPUT_ARTIFACT_PAGE_MAX_BYTES),
+        "output artifact",
+        true
+      );
+      return {
+        artifact,
+        content: window.bytes.toString("utf8"),
+        totalLines: artifact.lines ?? 0,
+        from: 0,
+        to: 0,
+        byteFrom: window.from,
+        byteTo: window.to
+      };
+    }
+    const totalLines = artifact.lines;
+    const requestedFrom = normalizeNonNegativeInteger(options.offset);
+    const from = totalLines === undefined ? requestedFrom : Math.min(requestedFrom, totalLines);
+    const limit = clampPositiveInteger(options.limit, 400, OUTPUT_ARTIFACT_PAGE_MAX_LINES);
+    const selected: string[] = [];
+    let measuredLines = 0;
+    let selectedBytes = 0;
+    let byteCursor = 0;
+    let nextByteOffset: number | undefined;
+    forEachFileLineSync(artifact.path, { label: "output artifact", maxLineBytes: OUTPUT_ARTIFACT_LINE_MAX_BYTES, noFollow: true }, (line) => {
+      const lineIndex = measuredLines;
+      measuredLines += 1;
+      const lineBytes = Buffer.byteLength(line, "utf8");
+      if (lineIndex < from) {
+        byteCursor += lineBytes + 1;
+        return;
+      }
+      if (lineIndex >= from + limit || nextByteOffset !== undefined) return totalLines === undefined ? undefined : false;
+      const separatorBytes = selected.length ? 1 : 0;
+      const remaining = OUTPUT_ARTIFACT_PAGE_MAX_BYTES - selectedBytes - separatorBytes;
+      if (lineBytes <= remaining) {
+        selected.push(line);
+        selectedBytes += separatorBytes + lineBytes;
+        byteCursor += lineBytes + 1;
+        return;
+      }
+      const marker = "\n[artifact page truncated; continue with byteOffset]";
+      const markerBytes = Buffer.byteLength(marker, "utf8");
+      const prefix = takeBytes(line, Math.max(0, remaining - markerBytes), "head");
+      selected.push(`${prefix}${marker}`);
+      selectedBytes += separatorBytes + Buffer.byteLength(prefix, "utf8") + markerBytes;
+      nextByteOffset = byteCursor + Buffer.byteLength(prefix, "utf8");
+      return totalLines === undefined ? undefined : false;
+    });
+    const resolvedTotalLines = totalLines ?? measuredLines;
+    const to = Math.min(resolvedTotalLines, from + selected.length);
+    return {
+      artifact,
+      content: selected.join("\n"),
+      totalLines: resolvedTotalLines,
+      from,
+      to,
+      ...(nextByteOffset !== undefined ? { nextByteOffset } : {})
+    };
   }
 
   listEvidence(sessionId: string): Evidence[] {
@@ -1617,8 +1800,8 @@ export class SqliteStore {
       .run({
         $id: note.id,
         $session: note.sessionId,
-        $text: note.text,
-        $tags: JSON.stringify(note.tags),
+        $text: assertPersistedText(note.text, PERSISTENCE_LIMITS.documentTextBytes, "note text"),
+        $tags: stringifyPersistedJson(note.tags, PERSISTENCE_LIMITS.structuredJsonBytes, "note tags"),
         $created: note.createdAt
       });
     this.emit({ kind: "note", sessionId: note.sessionId, note });
@@ -1646,13 +1829,13 @@ export class SqliteStore {
       .run({
         $id: finding.id,
         $session: finding.sessionId,
-        $title: finding.title,
+        $title: assertPersistedText(finding.title, PERSISTENCE_LIMITS.shortTextBytes, "finding title"),
         $severity: finding.severity,
-        $target: finding.target,
-        $evidence: JSON.stringify(finding.evidenceIds),
-        $impact: finding.impact,
-        $reproduction: finding.reproduction,
-        $remediation: finding.remediation,
+        $target: assertPersistedText(finding.target, PERSISTENCE_LIMITS.shortTextBytes, "finding target"),
+        $evidence: stringifyPersistedJson(finding.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "finding evidence ids"),
+        $impact: assertPersistedText(finding.impact, PERSISTENCE_LIMITS.documentTextBytes, "finding impact"),
+        $reproduction: assertPersistedText(finding.reproduction, PERSISTENCE_LIMITS.documentTextBytes, "finding reproduction"),
+        $remediation: assertPersistedText(finding.remediation, PERSISTENCE_LIMITS.documentTextBytes, "finding remediation"),
         $status: finding.status ?? "candidate",
         $campaign: finding.campaignId ?? null,
         $hypothesis: finding.hypothesisId ?? null,
@@ -1683,10 +1866,10 @@ export class SqliteStore {
        reproduction = $reproduction, remediation = $remediation, duplicate_of = $duplicate where id = $id`
     ).run({
       $status: next.status ?? "candidate",
-      $evidence: JSON.stringify(next.evidenceIds),
-      $impact: next.impact,
-      $reproduction: next.reproduction,
-      $remediation: next.remediation,
+      $evidence: stringifyPersistedJson(next.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "finding evidence ids"),
+      $impact: assertPersistedText(next.impact, PERSISTENCE_LIMITS.documentTextBytes, "finding impact"),
+      $reproduction: assertPersistedText(next.reproduction, PERSISTENCE_LIMITS.documentTextBytes, "finding reproduction"),
+      $remediation: assertPersistedText(next.remediation, PERSISTENCE_LIMITS.documentTextBytes, "finding remediation"),
       $duplicate: next.duplicateOf ?? null,
       $id: findingId
     });
@@ -1728,8 +1911,8 @@ export class SqliteStore {
         $id: next.id,
         $session: next.sessionId,
         $kind: next.kind,
-        $key: next.key,
-        $value: JSON.stringify(next.value),
+        $key: assertPersistedText(next.key, PERSISTENCE_LIMITS.shortTextBytes, "memory key"),
+        $value: stringifyPersistedJson(next.value, PERSISTENCE_LIMITS.structuredJsonBytes, "memory value"),
         $created: next.createdAt,
         $updated: next.updatedAt
       });
@@ -1773,7 +1956,7 @@ export class SqliteStore {
         $id: todo.id,
         $session: todo.sessionId,
         $turn: todo.turnId ?? null,
-        $text: todo.text,
+        $text: assertPersistedText(todo.text, PERSISTENCE_LIMITS.documentTextBytes, "todo text"),
         $status: todo.status,
         $priority: todo.priority,
         $created: todo.createdAt,
@@ -1796,7 +1979,7 @@ export class SqliteStore {
       .query("update todos set text = $text, status = $status, priority = $priority, updated_at = $updated where id = $id")
       .run({
         $id: next.id,
-        $text: next.text,
+        $text: assertPersistedText(next.text, PERSISTENCE_LIMITS.documentTextBytes, "todo text"),
         $status: next.status,
         $priority: next.priority,
         $updated: next.updatedAt
@@ -2185,6 +2368,7 @@ export class SqliteStore {
         tool_call_id text,
         path text not null,
         bytes integer not null,
+        lines integer,
         created_at text not null
       );
       create index if not exists output_artifacts_session_idx on output_artifacts(session_id, created_at);
@@ -2198,6 +2382,7 @@ export class SqliteStore {
       create index if not exists runtime_leases_expiry_idx on runtime_leases(expires_at);
     `);
     addColumnIfMissing(db, "sessions", "title", "text");
+    addColumnIfMissing(db, "output_artifacts", "lines", "integer");
     addColumnIfMissing(db, "sessions", "parent_id", "text");
     addColumnIfMissing(db, "sessions", "campaign_id", "text");
     addColumnIfMissing(db, "sessions", "provider", "text");
@@ -2277,8 +2462,8 @@ function writeJobRow(db: Database, job: BackgroundJob): void {
     $cancelPolicy: job.cancellationPolicy,
     $delivery: job.deliveryState ?? "pending",
     $artifact: job.outputArtifactId ?? null,
-    $result: job.result === undefined ? null : JSON.stringify(job.result),
-    $error: job.error ?? null,
+    $result: job.result === undefined ? null : stringifyPersistedJson(job.result, PERSISTENCE_LIMITS.backgroundResultJsonBytes, "background job result"),
+    $error: job.error ? assertPersistedText(job.error, PERSISTENCE_LIMITS.documentTextBytes, "background job error") : null,
     $mailbox: job.mailboxId ?? null,
     $created: job.createdAt,
     $started: job.startedAt ?? null,
@@ -2301,9 +2486,9 @@ function writeToolCallRow(db: Database, record: ToolCallRecord): void {
     $id: stored.id,
     $session: stored.sessionId,
     $tool: stored.tool,
-    $args: JSON.stringify(stored.args),
+    $args: stringifyPersistedJson(stored.args, PERSISTENCE_LIMITS.toolArgsJsonBytes, "tool call arguments"),
     $status: stored.status,
-    $evidence: JSON.stringify(stored.evidenceIds),
+    $evidence: stringifyPersistedJson(stored.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "tool call evidence ids"),
     $artifact: stored.outputArtifactId ?? null,
     $turn: stored.turnId ?? null,
     $message: stored.messageId ?? null,
@@ -2320,7 +2505,7 @@ function syncToolCallTimelineRow(db: Database, record: ToolCallRecord): Part | u
   if (!record.timelinePartId) return undefined;
   const updated = db.query("update parts set payload_json = $payload where id = $id").run({
     $id: record.timelinePartId,
-    $payload: JSON.stringify({ record })
+    $payload: stringifyPersistedJson({ record }, PERSISTENCE_LIMITS.partJsonBytes, "tool timeline payload")
   });
   if (updated.changes === 0) return undefined;
   const row = db.query("select * from parts where id = $id").get({ $id: record.timelinePartId }) as Row | null;
@@ -2368,7 +2553,7 @@ function ensureTerminalToolPart(
   const existing = matching[0];
   if (existing) {
     for (const duplicate of matching.slice(1)) db.query("delete from parts where id = $id").run({ $id: duplicate.id });
-    const payload = JSON.stringify(terminal.payload);
+    const payload = stringifyPersistedJson(terminal.payload, PERSISTENCE_LIMITS.partJsonBytes, "terminal tool payload");
     const changed = matching.length > 1 || existing.type !== terminal.type || JSON.stringify(existing.payload) !== payload;
     if (!changed) return { part: existing, inserted: false, updated: false };
     db.query("update parts set type = $type, payload_json = $payload where id = $id").run({
@@ -2399,7 +2584,7 @@ function ensureTerminalToolPart(
     $turn: part.turnId,
     $message: part.messageId,
     $type: part.type,
-    $payload: JSON.stringify(part.payload),
+    $payload: stringifyPersistedJson(part.payload, PERSISTENCE_LIMITS.partJsonBytes, "terminal tool payload"),
     $order: part.order,
     $created: part.createdAt
   });
@@ -2501,8 +2686,26 @@ function outputArtifactFromRow(row: Row): OutputArtifact {
     ...(typeof row.tool_call_id === "string" ? { toolCallId: row.tool_call_id } : {}),
     path: String(row.path),
     bytes: Number(row.bytes),
+    ...(typeof row.lines === "number" && Number.isSafeInteger(row.lines) && row.lines >= 0 ? { lines: row.lines } : {}),
     createdAt: String(row.created_at)
   };
+}
+
+function countLines(value: string): number {
+  if (!value) return 0;
+  let lines = 1;
+  let cursor = -1;
+  while ((cursor = value.indexOf("\n", cursor + 1)) !== -1) lines += 1;
+  return value.endsWith("\n") ? lines - 1 : lines;
+}
+
+function normalizeNonNegativeInteger(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function clampPositiveInteger(value: number | undefined, fallback: number, maximum: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(maximum, Math.floor(value));
 }
 
 function sessionFromRow(row: Row): Session {
@@ -2710,4 +2913,8 @@ function scoreCampaignMatch(text: string, phrase: string, terms: string[]): numb
   for (const term of terms) if (text.includes(term)) matched += term.length >= 5 ? 1 : 0.6;
   const coverage = matched / terms.length;
   return Math.min(0.9, 0.3 + coverage * 0.6);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

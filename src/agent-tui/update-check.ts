@@ -1,10 +1,14 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { globalDataDir } from "../agent-core/config";
+import { discardResponseBody, readBoundedResponseJson } from "../http-response";
+import { readBoundedFileTextSync, readBoundedFileTextSyncNoFollow } from "../file-read";
+import { atomicWriteFile } from "../agent-core/atomic-file";
+import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists } from "../agent-core/private-path";
 
 export const UPDATE_CACHE_TTL_MS = 20 * 60 * 60 * 1_000;
 export const UPDATE_CHECK_TIMEOUT_MS = 4_000;
 export const UPDATE_REGISTRY_URL = "https://registry.npmjs.org/farai/latest";
+const UPDATE_RESPONSE_MAX_BYTES = 64 * 1024;
 
 export type UpdateNotice = {
   currentVersion: string;
@@ -94,7 +98,9 @@ export function compareSemver(left: string, right: string): number {
 
 export function readUpdateCache(path = updateCachePath()): UpdateCache | undefined {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    ensurePrivateDirectory(dirname(path), "update cache directory");
+    ensurePrivateRegularFileIfExists(path, "update cache");
+    const parsed: unknown = JSON.parse(readBoundedFileTextSyncNoFollow(path, UPDATE_RESPONSE_MAX_BYTES, "update cache"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
     const value = parsed as Record<string, unknown>;
     if (typeof value.checkedAt !== "number" || !Number.isFinite(value.checkedAt)) return undefined;
@@ -112,7 +118,7 @@ export function updateCachePath(): string {
 function readCurrentVersion(): string | undefined {
   try {
     const packagePath = join(import.meta.dir, "..", "..", "package.json");
-    const parsed = JSON.parse(readFileSync(packagePath, "utf8")) as { version?: unknown };
+    const parsed = JSON.parse(readBoundedFileTextSync(packagePath, 1024 * 1024, "package metadata")) as { version?: unknown };
     return typeof parsed.version === "string" && parseSemver(parsed.version) ? parsed.version : undefined;
   } catch {
     return undefined;
@@ -145,8 +151,11 @@ async function fetchLatestVersion(fetcher: UpdateFetcher, timeoutMs: number): Pr
       headers: { accept: "application/json" },
       signal: controller.signal
     });
-    if (!response.ok) throw new Error(`npm registry returned ${response.status}`);
-    const parsed: unknown = await response.json();
+    if (!response.ok) {
+      await discardResponseBody(response);
+      throw new Error(`npm registry returned ${response.status}`);
+    }
+    const parsed: unknown = await readBoundedResponseJson(response, UPDATE_RESPONSE_MAX_BYTES, "npm registry response");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid npm registry response");
     const version = (parsed as Record<string, unknown>).version;
     if (typeof version !== "string" || !parseSemver(version)) throw new Error("invalid npm package version");
@@ -158,10 +167,9 @@ async function fetchLatestVersion(fetcher: UpdateFetcher, timeoutMs: number): Pr
 
 function writeUpdateCache(path: string, cache: UpdateCache): void {
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(cache)}\n`, "utf8");
-    renameSync(temporary, path);
+    ensurePrivateDirectory(dirname(path), "update cache directory");
+    ensurePrivateRegularFileIfExists(path, "update cache");
+    atomicWriteFile(path, `${JSON.stringify(cache)}\n`, 0o600);
   } catch {
   }
 }

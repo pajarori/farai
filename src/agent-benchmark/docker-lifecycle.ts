@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KaliContainerBackend, type ContainerExecResult, type ProcessRunner } from "../agent-container/kali";
+import { runCapturedProcess } from "../agent-tools/backends/captured-process";
+import { INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
 import type { ToolExecutionBackend } from "../agent-tools/shared/backend";
 import { hashPath } from "./hash";
 import type { BenchmarkManifest } from "./types";
@@ -29,6 +31,8 @@ export type BenchmarkDockerState = {
   agentState?: { running: boolean; exitCode: number };
   errors: string[];
 };
+
+const BENCHMARK_DOCKER_COMMAND_TIMEOUT_MS = 300_000;
 
 export class BenchmarkDockerLifecycle {
   private planValue: BenchmarkDockerPlan | undefined;
@@ -217,18 +221,11 @@ function safeName(value: string): string {
 }
 
 async function runProcess(command: string, args: string[], options: { env?: Record<string, string> } = {}): Promise<ContainerExecResult> {
-  const started = Date.now();
-  const child = Bun.spawn([command, ...args], {
+  return await runCapturedProcess(command, args, {
     env: { ...processEnv(), ...(options.env ?? {}) },
-    stdout: "pipe",
-    stderr: "pipe"
+    timeoutMs: BENCHMARK_DOCKER_COMMAND_TIMEOUT_MS,
+    maxOutputBytes: INTERNAL_PROCESS_OUTPUT_MAX_BYTES
   });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text()
-  ]);
-  return { exitCode, stdout, stderr, durationMs: Date.now() - started, timedOut: false };
 }
 
 function processEnv(): Record<string, string> {
