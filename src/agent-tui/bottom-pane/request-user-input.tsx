@@ -6,6 +6,7 @@ import { scrollWindowStart } from "../dialog/list-selection";
 import { truncateLine } from "../renderers";
 import { requestOptionCount, requestOptionIndex, requestQuestion } from "../request-user-input-state";
 import { COLOR } from "../theme";
+import { InputField, InputFieldPrompt, inputFieldHeight } from "./input-field";
 import { SelectionMenuHint, SelectionRow, selectionDescriptionColumn } from "../overlays/selection-row";
 import { fitFooterLine } from "./footer-state";
 import { useTuiDimensions } from "../context/terminal";
@@ -54,7 +55,7 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
     Math.max(1, dims().width - 4)
   ));
   const questionHeight = () => dims().height < 14 ? 1 : dims().height < 20 ? 2 : 3;
-  const answerAreaHeight = createMemo(() => requestAnswerAreaHeight(props.request, dims().height));
+  const answerAreaHeight = createMemo(() => requestAnswerAreaHeight(props.request, dims().height, textMode()));
   const allOptionRows = createMemo(() => props.request.questions.flatMap((item) => requestOptionRows(item)));
   const descriptionColumn = createMemo(() => selectionDescriptionColumn(allOptionRows().map((row) => ({
     number: row.index + 1,
@@ -166,8 +167,8 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
                 : item().recommended
                   ? `your answer · recommended: ${truncateLine(item().recommended!, Math.max(8, dims().width - 34))}`
                   : "your answer"}</text>
-              <box style={{ height: 1, flexDirection: "row", backgroundColor: COLOR.panelActive }}>
-                <text fg={COLOR.accent}>{"› "}</text>
+              <InputField>
+                <InputFieldPrompt />
                 <RequestTextInput
                   value={state()?.drafts[item().id] ?? state()?.answers[item().id] ?? ""}
                   onRef={(node) => { inputRef = node; }}
@@ -176,7 +177,7 @@ export function RequestUserInput(props: { request: PendingUserInput }): JSX.Elem
                     tui.actions.requestUserInputDraftSet(item().id, value);
                   }}
                 />
-              </box>
+              </InputField>
             </box>
           </Show>
         </>
@@ -236,7 +237,8 @@ export function requestVisibleOptionLimit(optionCount: number, terminalHeight: n
   return Math.min(optionCount, 7);
 }
 
-export function requestAnswerAreaHeight(request: PendingUserInput, terminalHeight: number): number {
+export function requestAnswerAreaHeight(request: PendingUserInput, terminalHeight: number, textMode = false): number {
+  if (textMode) return inputFieldHeight(terminalHeight) + 2;
   const optionCount = request.questions.reduce((largest, item) => Math.max(
     largest,
     item.choices?.length ? item.choices.length + 1 : 0

@@ -1,12 +1,13 @@
 import type { InputRenderable } from "@opentui/core";
-import { For, Show, createEffect, createMemo, onCleanup, type JSX } from "solid-js";
+import { Show, createEffect, createMemo, onCleanup, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { modelProviderProtocolLabel, modelProviderWizardStep, modelProviderWizardStepCount } from "../model-provider-state";
 import { COLOR } from "../theme";
 import { truncateLine } from "../renderers";
-import { isPrimaryClick } from "../input/mouse";
 import { fitTerminalPair } from "../terminal-text";
 import { useTuiDimensions } from "../context/terminal";
+import { InputField, InputFieldPrompt, inputFieldHeight } from "./input-field";
+import { WizardChoiceRows } from "./wizard-choice-rows";
 
 export function ModelProviderWizard(): JSX.Element {
   const tui = useTuiStore();
@@ -32,6 +33,8 @@ export function ModelProviderWizard(): JSX.Element {
   const step = () => `${modelProviderWizardStep(wizard().field)}/${modelProviderWizardStepCount()}`;
   const header = () => fitTerminalPair(title(), step(), Math.max(1, dims().width - 4), 4, 1);
   const isTextField = () => ["id", "baseUrl", "apiKey", "model"].includes(wizard().field);
+  const bodyHeight = () => isTextField() ? inputFieldHeight(dims().height) + 4 : 7;
+  const wizardHeight = () => bodyHeight() + 3;
   const maskedSecret = createMemo(() => {
     if (wizard().apiKey.length) return "•".repeat(Math.min(24, [...wizard().apiKey].length));
     if (wizard().credentialStored && !wizard().removeCredential) return "stored ••••••••";
@@ -77,20 +80,20 @@ export function ModelProviderWizard(): JSX.Element {
   });
 
   return (
-    <box id="model-provider-wizard" style={{ height: 8, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
+    <box id="model-provider-wizard" style={{ height: wizardHeight(), flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 2, paddingRight: 2 }}>
         <text fg={COLOR.text}>{header().left}</text>
         <text fg={COLOR.dim}>{header().right}</text>
       </box>
-      <box style={{ height: 5, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
+      <box style={{ height: bodyHeight(), flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
         <Show when={wizard().field === "protocol"} fallback={
           <Show when={wizard().field === "review"} fallback={
             <Show when={wizard().field} keyed>{(field) => (
               <box style={{ flexDirection: "column", paddingTop: 1, paddingLeft: 2, paddingRight: 1 }}>
                 <text fg={COLOR.dim}>{truncateLine(fieldLabel(field), Math.max(1, dims().width - 3))}</text>
                 <Show when={field === "apiKey"} fallback={
-                  <box style={{ height: 1, flexDirection: "row", marginTop: 1, backgroundColor: COLOR.panelActive }}>
-                    <text fg={COLOR.accent}>{"› "}</text>
+                  <InputField marginTop={1}>
+                    <InputFieldPrompt />
                     <input
                       id="model-provider-wizard-input"
                       ref={(node) => {
@@ -108,10 +111,10 @@ export function ModelProviderWizard(): JSX.Element {
                       style={{ flexGrow: 1, backgroundColor: COLOR.panelActive }}
                       onInput={(next) => updateField(tui, field, next)}
                     />
-                  </box>
+                  </InputField>
                 }>
-                  <box style={{ height: 1, flexDirection: "row", marginTop: 1, backgroundColor: COLOR.panelActive }}>
-                    <text fg={COLOR.accent}>{"› "}</text>
+                  <InputField marginTop={1}>
+                    <InputFieldPrompt />
                     <text selectable={false} fg={wizard().removeCredential ? COLOR.warning : COLOR.text}>{maskedSecret()}</text>
                     <input
                       id="model-provider-api-key-input"
@@ -135,7 +138,7 @@ export function ModelProviderWizard(): JSX.Element {
                         tui.actions.modelProviderWizardPatch({ apiKey: `${wizard().apiKey}${next}`, removeCredential: false, error: undefined });
                       }}
                     />
-                  </box>
+                  </InputField>
                 </Show>
               </box>
             )}</Show>
@@ -143,28 +146,16 @@ export function ModelProviderWizard(): JSX.Element {
             <ProviderReview />
           </Show>
         }>
-          <box style={{ flexDirection: "column", paddingTop: 1 }}>
-            <For each={[
+          <WizardChoiceRows
+            rows={[
               ["auto", "auto-detect", "choose from endpoint conventions"],
               ["openai-chat", "openai chat", "openai-compatible /v1 endpoints"],
               ["anthropic-messages", "anthropic messages", "native anthropic messages api"]
-            ] as const}>{(row) => {
-              const selected = () => wizard().protocol === row[0];
-              const content = () => fitTerminalPair(row[1], dims().width >= 56 ? row[2] : "", Math.max(1, dims().width - 2), 4, 2);
-              return (
-                <box
-                  style={{ flexDirection: "row" }}
-                  onMouseUp={(event) => {
-                    if (isPrimaryClick(event)) tui.actions.modelProviderWizardPatch({ protocol: row[0] });
-                  }}
-                >
-                  <text selectable={false} fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
-                  <text selectable={false} fg={COLOR.text}>{content().left}</text>
-                  <Show when={content().right}><text selectable={false} fg={COLOR.dim}>{`  ${content().right}`}</text></Show>
-                </box>
-              );
-            }}</For>
-          </box>
+            ] as const}
+            selected={() => wizard().protocol}
+            choose={(value) => tui.actions.modelProviderWizardPatch({ protocol: value as "auto" | "openai-chat" | "anthropic-messages" })}
+            descriptionMinWidth={56}
+          />
         </Show>
       </box>
       <box style={{ height: 1, paddingLeft: 2, paddingRight: 1 }}>

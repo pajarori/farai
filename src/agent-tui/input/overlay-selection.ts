@@ -2,7 +2,7 @@ import type { CommandContext } from "../command-registry";
 import type { TuiStoreValue } from "../context/store";
 import type { DialogOption } from "../dialog/fuzzy";
 import { filterOptions } from "../dialog/fuzzy";
-import { overlayOptions, type McpChoice, type ModelChoice } from "../overlay-options";
+import { overlayOptions, type EmailChoice, type McpChoice, type ModelChoice } from "../overlay-options";
 
 export function createOverlaySelection(tui: TuiStoreValue, commandContext: () => CommandContext) {
   function options(): DialogOption<unknown>[] {
@@ -38,6 +38,21 @@ export function createOverlaySelection(tui: TuiStoreValue, commandContext: () =>
     return tui.store.ui.mcpServers.find((server) => server.id === choice.serverID);
   }
 
+  function emailAccount() {
+    const frame = tui.store.ui.overlayStack.at(-1);
+    if (frame?.kind !== "email") return undefined;
+    const choice = selectedOption()?.value as EmailChoice | undefined;
+    if (choice?.kind !== "email" || !choice.persistent) return undefined;
+    return tui.store.ui.emailAccounts.find((account) => account.id === choice.emailId);
+  }
+
+  function selectedEmail() {
+    const frame = tui.store.ui.overlayStack.at(-1);
+    if (frame?.kind !== "email") return undefined;
+    const choice = selectedOption()?.value as EmailChoice | undefined;
+    return choice?.kind === "email" ? choice : undefined;
+  }
+
   return {
     options,
     count: () => options().length,
@@ -53,6 +68,12 @@ export function createOverlaySelection(tui: TuiStoreValue, commandContext: () =>
       return server
         ? { serverID: server.id, toggleable: server.toggleable, removable: server.removable }
         : { toggleable: false, removable: false };
+    },
+    emailAccount,
+    selectedEmail,
+    emailContext: () => {
+      const choice = selectedEmail();
+      return choice ? { emailId: choice.emailId, persistent: choice.persistent } : { persistent: false };
     }
   };
 }

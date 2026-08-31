@@ -17,6 +17,8 @@ export function composerHeightFromVisualLines(visualLines: number): number {
   return Math.min(6, Math.max(1, visualLines));
 }
 
+export const COMPOSER_PLACEHOLDER = "what should we investigate?";
+
 const focusTintStart = [22, 33, 38] as const;
 const focusTintEnd = [16, 16, 16] as const;
 const inactiveComposerBackground = RGBA.fromInts(...focusTintEnd);
@@ -197,7 +199,7 @@ export function Composer(props: { visible?: boolean; active?: boolean } = {}): J
               composer.setRef(node);
               scheduleComposerHeightRefresh();
             }}
-            placeholder="what should we investigate?"
+            placeholder={COMPOSER_PLACEHOLDER}
             placeholderColor={COLOR.dim}
             textColor={COLOR.text}
             focusedTextColor={COLOR.text}

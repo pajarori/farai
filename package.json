@@ -1,6 +1,6 @@
 {
   "name": "farai",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": false,
   "type": "module",
   "description": "Cyber-first freestyle local AI agent",
@@ -47,19 +47,21 @@
     "doctor": "bun run src/cli/index.ts doctor",
     "typecheck": "tsc --noEmit",
     "test": "bun test ./test",
+    "verify": "bun run typecheck && bun run test && bun run test:package",
+    "release:check": "bun run verify && bun audit",
     "eval:smoke": "bun run test/evals/smoke.ts",
     "prepare": "bun run scripts/prepare-package.ts",
-    "prepublishOnly": "bun run typecheck && bun run build",
+    "prepublishOnly": "bun run verify",
     "prepack": "bun run build",
     "pack:dry": "npm pack --dry-run",
     "test:package": "bun run scripts/test-packed-cli.ts"
   },
   "engines": {
-    "bun": ">=1.1.0",
-    "node": ">=20"
+    "bun": ">=1.1.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "@napi-rs/keyring": "2.0.0",
     "@opentui/core": "0.5.9",
     "ajv": "8.20.0",
     "bun-pty": "0.4.10",
@@ -67,11 +69,18 @@
     "figlet": "1.11.4",
     "fuzzysort": "3.1.0",
     "highlight.js": "11.11.1",
+    "imapflow": "1.7.6",
+    "mailparser": "3.9.17",
     "solid-js": "1.9.12"
   },
   "devDependencies": {
     "@opentui/solid": "0.5.9",
     "@types/bun": "^1.1.0",
+    "@types/mailparser": "3.4.6",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@babel/core": "7.29.7",
+    "brace-expansion": "2.1.4"
   }
 }

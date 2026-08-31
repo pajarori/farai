@@ -15,7 +15,10 @@ export type McpChoice =
   | { kind: "mcp_server"; serverID: string }
   | { kind: "mcp_detail"; serverID: string; itemID: string }
   | { kind: "mcp_action"; action: "add" };
-export type OverlayOptionValue = Command | string | ModelChoice | McpChoice | AgentThreadSummary;
+export type EmailChoice =
+  | { kind: "email"; emailId: string; persistent: boolean }
+  | { kind: "email_action"; action: "add" };
+export type OverlayOptionValue = Command | string | ModelChoice | McpChoice | EmailChoice | AgentThreadSummary;
 
 export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreValue, ctx: CommandContext): DialogOption<OverlayOptionValue>[] {
   if (!frame) return [];
@@ -154,9 +157,45 @@ export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreVal
         value: ""
       }, ...servers];
     }
+    case "email": {
+      const session = tui.store.snapshot.session;
+      const configured = tui.store.ui.emailAccounts.map((account) => ({
+        id: `email-${account.id}`,
+        title: account.label,
+        description: [account.address, account.provider, account.credentialConfigured ? "ready" : "credential needed", account.id].join(" · "),
+        badge: emailRole(session, account.id),
+        value: { kind: "email" as const, emailId: account.id, persistent: true }
+      }));
+      const temporary = tui.store.snapshot.disposableInboxes.map((inbox) => ({
+        id: `email-${inbox.id}`,
+        title: inbox.label ?? "temporary email",
+        description: [inbox.address, inbox.provider, inbox.status, inbox.id].join(" · "),
+        badge: emailRole(session, inbox.id),
+        value: { kind: "email" as const, emailId: inbox.id, persistent: false }
+      }));
+      return [
+        ...configured,
+        ...temporary,
+        {
+          id: "email-action-add",
+          title: "+ add email",
+          description: "connect a read-only imap account",
+          numbered: false,
+          separatorBefore: configured.length + temporary.length > 0,
+          value: { kind: "email_action" as const, action: "add" as const }
+        }
+      ];
+    }
     default:
       return [];
   }
+}
+
+function emailRole(session: TuiStoreValue["store"]["snapshot"]["session"], emailId: string): string {
+  return [
+    session?.emailPrimaryId === emailId ? "primary" : undefined,
+    session?.emailSecondaryId === emailId ? "secondary" : undefined
+  ].filter(Boolean).join(" · ");
 }
 
 function mcpDetailOptions(
@@ -288,5 +327,6 @@ export function overlayTitle(frame: OverlayFrame): string {
     case "agents": return "agents";
     case "model": return "select model";
     case "mcp": return "mcp servers";
+    case "email": return "email";
   }
 }

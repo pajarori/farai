@@ -13,6 +13,7 @@ type RouterContextInput = {
   terminalHeight: number;
   modelOverlay?: RouterContext["modelOverlay"];
   mcpOverlay?: RouterContext["mcpOverlay"];
+  emailOverlay?: RouterContext["emailOverlay"];
 };
 
 export function buildRouterContext(input: RouterContextInput): RouterContext {
@@ -64,7 +65,16 @@ export function buildRouterContext(input: RouterContextInput): RouterContext {
       }
     } : {}),
     ...(tui.store.ui.mcpServerRemoval ? { mcpServerRemoval: { busy: tui.store.ui.mcpServerRemoval.busy } } : {}),
+    ...(tui.store.ui.emailAccountWizard ? {
+      emailAccountWizard: {
+        field: tui.store.ui.emailAccountWizard.field,
+        busy: tui.store.ui.emailAccountWizard.busy,
+        cancellable: tui.store.ui.emailAccountWizard.busyKind === "probe"
+      }
+    } : {}),
+    ...(tui.store.ui.emailAccountRemoval ? { emailAccountRemoval: { busy: tui.store.ui.emailAccountRemoval.busy } } : {}),
     ...(input.modelOverlay ? { modelOverlay: input.modelOverlay } : {}),
-    ...(input.mcpOverlay ? { mcpOverlay: input.mcpOverlay } : {})
+    ...(input.mcpOverlay ? { mcpOverlay: input.mcpOverlay } : {}),
+    ...(input.emailOverlay ? { emailOverlay: input.emailOverlay } : {})
   };
 }

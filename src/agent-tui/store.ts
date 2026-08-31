@@ -9,18 +9,22 @@ import type { CompactionBoundary, Evidence, Finding, MemoryItem, MessageWithPart
 import type { OverlayKind } from "./input/router";
 import { subagentActivityFromJob, type AgentThreadSummary, type BackgroundActivitySummary, type SessionListItem, type SessionSnapshot, type SubagentActivity } from "./runtime-port";
 import type { BrowserContextActivity } from "../agent-tools/browser/context-manager";
+import type { DisposableInboxActivity } from "../agent-email/types";
 import { clampIndex as clampRequestIndex, syncRequestUserInputUiState, wrapIndex as wrapRequestIndex, type RequestUserInputUiState } from "./request-user-input-state";
 import type { ModelProviderInfo } from "../agent-core/model-provider-management";
 import { createModelProviderWizard, type ModelProviderWizardState } from "./model-provider-state";
 import type { UpdateNotice } from "./update-check";
 import type { McpServerInfo } from "../agent-core/mcp-server-management";
 import { createMcpServerWizard, type McpServerWizardState } from "./mcp-server-state";
+import type { EmailAccountInfo } from "../agent-email/types";
+import { createEmailAccountWizard, type EmailAccountWizardState } from "./email-account-state";
 
 export type OverlayFrame =
   | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory"; query: string; index: number }
   | { kind: "agents"; query: string; index: number; expandedId?: string }
   | { kind: "model"; query: string; index: number; providerID?: string }
-  | { kind: "mcp"; query: string; index: number; serverID?: string };
+  | { kind: "mcp"; query: string; index: number; serverID?: string }
+  | { kind: "email"; query: string; index: number };
 
 export type CenterSurfaceFrame =
   | { kind: "detail"; title: string; body: string }
@@ -44,6 +48,12 @@ export type ModelProviderRemovalState = {
 
 export type McpServerRemovalState = {
   server: McpServerInfo;
+  busy: boolean;
+  error: string | undefined;
+};
+
+export type EmailAccountRemovalState = {
+  account: EmailAccountInfo;
   busy: boolean;
   error: string | undefined;
 };
@@ -77,6 +87,7 @@ export type StoreSnapshot = {
   toolInputPreviews: ToolInputPreview[];
   backgroundActivities: BackgroundActivitySummary[];
   browserContexts: BrowserContextActivity[];
+  disposableInboxes: DisposableInboxActivity[];
   subagents: SubagentActivity[];
   todos: TodoItem[];
   evidence: Evidence[];
@@ -132,6 +143,9 @@ export type FaraiTuiStore = {
     mcpServerRemoval: McpServerRemovalState | undefined;
     mcpStatuses: McpServerRuntimeStatus[];
     mcpStatusError: string | undefined;
+    emailAccounts: EmailAccountInfo[];
+    emailAccountWizard: EmailAccountWizardState | undefined;
+    emailAccountRemoval: EmailAccountRemovalState | undefined;
     messageNavigation: { direction: "next" | "prev"; sequence: number };
     centerScroll: { action: "up" | "down" | "pageUp" | "pageDown" | "home" | "end"; sequence: number };
     sessionStats: Record<string, Omit<SessionListItem, "session">>;
@@ -229,6 +243,13 @@ export type StoreActions = {
   mcpServerRemovalClose: () => void;
   mcpStatusesSet: (statuses: McpServerRuntimeStatus[]) => void;
   mcpStatusErrorSet: (message: string | undefined) => void;
+  emailCatalogSet: (accounts: EmailAccountInfo[]) => void;
+  emailAccountWizardOpen: (account?: EmailAccountInfo) => void;
+  emailAccountWizardPatch: (patch: Partial<EmailAccountWizardState>) => void;
+  emailAccountWizardClose: () => void;
+  emailAccountRemovalOpen: (account: EmailAccountInfo) => void;
+  emailAccountRemovalPatch: (patch: Partial<Omit<EmailAccountRemovalState, "account">>) => void;
+  emailAccountRemovalClose: () => void;
   agentThreadsSet: (threads: AgentThreadSummary[]) => void;
   messageNavigationRequested: (direction: "next" | "prev") => void;
   centerScrollRequested: (action: FaraiTuiStore["ui"]["centerScroll"]["action"]) => void;
@@ -277,6 +298,7 @@ function emptySnapshot(): StoreSnapshot {
     toolInputPreviews: [],
     backgroundActivities: [],
     browserContexts: [],
+    disposableInboxes: [],
     subagents: [],
     todos: [],
     evidence: [],
@@ -334,6 +356,9 @@ export function initialStore(workspace: string): FaraiTuiStore {
       mcpServerRemoval: undefined,
       mcpStatuses: [],
       mcpStatusError: undefined,
+      emailAccounts: [],
+      emailAccountWizard: undefined,
+      emailAccountRemoval: undefined,
       messageNavigation: { direction: "next", sequence: 0 },
       centerScroll: { action: "down", sequence: 0 },
       sessionStats: {},
@@ -406,6 +431,9 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.agentThreads = [];
         s.ui.centerScroll = { action: "down", sequence: 0 };
         s.ui.mcpStatusError = undefined;
+        s.ui.emailAccounts = [];
+        s.ui.emailAccountWizard = undefined;
+        s.ui.emailAccountRemoval = undefined;
         s.ui.lastError = undefined;
         s.ui.requestUserInput = undefined;
       }));
@@ -417,7 +445,7 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         ? store.snapshot.toolInputPreviews.filter((preview) => preview.turnId === next.runningTurnId)
         : [];
       batch(() => {
-        applySnapshotPatch(setStore, { ...next, toolInputPreviews });
+        applySnapshotPatch(setStore, { ...next, disposableInboxes: next.disposableInboxes ?? [], toolInputPreviews });
         setStore("ui", "requestUserInput", syncRequestUserInputUiState(store.ui.requestUserInput, next.pendingUserInput));
         if (next.runningTurnId) setStore("ui", "submitting", false);
         syncTurnLifecycle(store, setStore, previousTurnId, next.runningTurnId, next.runningTurnStartedAt);
@@ -877,6 +905,45 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     mcpStatusErrorSet(message: string | undefined): void {
       setStore("ui", "mcpStatusError", message);
     },
+    emailCatalogSet(accounts: EmailAccountInfo[]): void {
+      setStore("ui", "emailAccounts", reconcile(accounts, { key: "id" }));
+    },
+    emailAccountWizardOpen(account?: EmailAccountInfo): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.emailAccountWizard = createEmailAccountWizard(account);
+      }));
+    },
+    emailAccountWizardPatch(patch: Partial<EmailAccountWizardState>): void {
+      setStore(produce((s) => {
+        if (!s.ui.emailAccountWizard) return;
+        Object.assign(s.ui.emailAccountWizard, patch);
+      }));
+    },
+    emailAccountWizardClose(): void {
+      setStore(produce((s) => {
+        s.ui.emailAccountWizard = undefined;
+        s.ui.lastError = undefined;
+      }));
+    },
+    emailAccountRemovalOpen(account: EmailAccountInfo): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.emailAccountRemoval = { account, busy: false, error: undefined };
+      }));
+    },
+    emailAccountRemovalPatch(patch: Partial<Omit<EmailAccountRemovalState, "account">>): void {
+      setStore(produce((s) => {
+        if (!s.ui.emailAccountRemoval) return;
+        Object.assign(s.ui.emailAccountRemoval, patch);
+      }));
+    },
+    emailAccountRemovalClose(): void {
+      setStore(produce((s) => {
+        s.ui.emailAccountRemoval = undefined;
+        s.ui.lastError = undefined;
+      }));
+    },
     agentThreadsSet(threads: AgentThreadSummary[]): void {
       setStore("ui", "agentThreads", reconcile(threads, { key: "id" }));
     },
@@ -1219,6 +1286,7 @@ function defaultOverlayFrame(kind: OverlayFrame["kind"]): OverlayFrame {
     case "agents":
     case "model":
     case "mcp":
+    case "email":
       return { kind, query: "", index: 0 };
   }
 }
@@ -1245,6 +1313,7 @@ function isSelectorOverlayKind(kind: OverlayKind): kind is OverlayFrame["kind"] 
     case "agents":
     case "model":
     case "mcp":
+    case "email":
       return true;
     case "detail":
     case "report":

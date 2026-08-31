@@ -11,6 +11,7 @@ import { buildRouterContext } from "./router-context";
 import { createOverlaySelection } from "./overlay-selection";
 import { createModelProviderController } from "./model-provider-controller";
 import { createMcpServerController } from "./mcp-server-controller";
+import { createEmailAccountController } from "./email-account-controller";
 import { createRequestUserInputController } from "./request-user-input-controller";
 import { createCenterSurfaceController } from "./center-surface-controller";
 import { createOverlayController } from "./overlay-controller";
@@ -41,6 +42,7 @@ export function KeyboardController(): JSX.Element {
   const overlaySelection = createOverlaySelection(tui, commandContext);
   const modelProvider = createModelProviderController({ tui, port, selection: overlaySelection, isDisposed: () => disposed });
   const mcpServer = createMcpServerController({ tui, port, selection: overlaySelection, isDisposed: () => disposed });
+  const emailAccount = createEmailAccountController({ tui, port, selection: overlaySelection, isDisposed: () => disposed });
   const requestUserInput = createRequestUserInputController(tui, () => composer.focus());
   const centerSurface = createCenterSurfaceController({ tui, port, captureOwner: captureSessionOwner, owns: ownsSession });
   const composerActions = createComposerController({
@@ -64,7 +66,8 @@ export function KeyboardController(): JSX.Element {
     captureOwner: captureSessionOwner,
     owns: ownsSession,
     openModelProvider: modelProvider.openAdd,
-    openMcpServer: mcpServer.openAdd
+    openMcpServer: mcpServer.openAdd,
+    openEmailAccount: emailAccount.openAdd
   });
   let modelOverlayKey: string | undefined;
   let mcpOverlayKey: string | undefined;
@@ -76,6 +79,7 @@ export function KeyboardController(): JSX.Element {
     transcript.reset();
     modelProvider.reset();
     mcpServer.reset();
+    emailAccount.reset();
     overlay.reset();
     composerActions.resetSession();
   }));
@@ -118,7 +122,8 @@ export function KeyboardController(): JSX.Element {
       ...(cursor === undefined ? {} : { composerCursor: cursor }),
       terminalHeight: dims().height,
       ...(top?.kind === "model" ? { modelOverlay: overlaySelection.modelContext() } : {}),
-      ...(top?.kind === "mcp" ? { mcpOverlay: overlaySelection.mcpContext() } : {})
+      ...(top?.kind === "mcp" ? { mcpOverlay: overlaySelection.mcpContext() } : {}),
+      ...(top?.kind === "email" ? { emailOverlay: overlaySelection.emailContext() } : {})
     }));
     if (routed.type === "passthrough") return;
     event.preventDefault();
@@ -143,6 +148,7 @@ export function KeyboardController(): JSX.Element {
     composerActions.dispose();
     modelProvider.dispose();
     mcpServer.dispose();
+    emailAccount.dispose();
   });
 
   function dispatchAction(action: RouterAction): void {
@@ -163,6 +169,48 @@ export function KeyboardController(): JSX.Element {
 
   async function applyAction(action: RouterAction): Promise<void> {
     switch (action.kind) {
+      case "emailAccount.next":
+        await emailAccount.next(action.test);
+        return;
+      case "emailAccount.back":
+        emailAccount.back();
+        return;
+      case "emailAccount.providerMove":
+        emailAccount.providerMove(action.delta);
+        return;
+      case "emailAccount.storageMove":
+        emailAccount.storageMove(action.delta);
+        return;
+      case "emailAccount.secretBackspace":
+        emailAccount.secretBackspace();
+        return;
+      case "emailAccount.credentialRemove":
+        emailAccount.toggleCredentialRemoval();
+        return;
+      case "emailAccountRemoval.confirm":
+        await emailAccount.confirmRemoval();
+        return;
+      case "emailAccountRemoval.cancel":
+        emailAccount.cancelRemoval();
+        return;
+      case "email.add":
+        emailAccount.openAdd();
+        return;
+      case "email.edit":
+        emailAccount.openEdit();
+        return;
+      case "email.test":
+        await emailAccount.testSelected();
+        return;
+      case "email.remove":
+        emailAccount.requestRemoval();
+        return;
+      case "email.primary":
+        await emailAccount.setRole("primary");
+        return;
+      case "email.secondary":
+        await emailAccount.setRole("secondary");
+        return;
       case "requestUserInput.optionMove": {
         requestUserInput.moveOption(action.delta);
         return;

@@ -4,6 +4,7 @@ export type DialogOption<TValue = unknown> = {
   description?: string;
   category?: string;
   footer?: string;
+  badge?: string;
   numbered?: boolean;
   separatorBefore?: boolean;
   disabled?: boolean;

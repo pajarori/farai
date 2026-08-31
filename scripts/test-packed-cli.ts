@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -28,8 +28,13 @@ try {
   }
 
   const version = (await run([bin, "--version"], scratch)).trim();
-  const manifest = await Bun.file(join(root, "package.json")).json() as { version: string };
+  const manifest = await Bun.file(join(root, "package.json")).json() as { version: string; engines?: Record<string, string> };
   if (version !== manifest.version) throw new Error(`packed CLI reported ${version}, expected ${manifest.version}`);
+  const packedManifest = await Bun.file(join(packageRoot, "package.json")).json() as { engines?: Record<string, string> };
+  if (packedManifest.engines?.bun !== ">=1.1.0" || packedManifest.engines?.node) throw new Error("packed CLI must declare Bun, not Node, as its runtime");
+  if (!readFileSync(join(packageRoot, "dist", "cli", "index.js"), "utf8").startsWith("#!/usr/bin/env bun\n")) throw new Error("packed CLI is missing its Bun shebang");
+  const help = await run([bin, "--help"], scratch);
+  if (!help.includes("farai setup") || !help.includes("farai resume")) throw new Error("packed CLI help is incomplete");
   for (const skill of ["ctf-solving", "web-assessment", "binary-reversing", "packet-analysis", "source-security-review"]) {
     const path = join(packageRoot, "src", "agent-skills", "library", skill, "SKILL.md");
     if (!existsSync(path)) throw new Error(`packed CLI is missing built-in skill: ${skill}`);

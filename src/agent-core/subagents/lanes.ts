@@ -35,6 +35,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     tools: [
       "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_click", "browser_fill_form", "browser_type",
       "browser_press_key", "browser_wait_for", "browser_tabs", "browser_network_requests", "browser_network_request",
+      "email_list", "email_create", "email_inbox", "email_read", "email_wait",
       "http_request", "dir_enum", "exploit_search", "kali_tool_search", "shell_exec", "campaign_observe",
       "campaign_hypothesis", "campaign_test", "notes_add", "evidence_save", "session_poll", "session_stop", "tool_output_read"
     ]

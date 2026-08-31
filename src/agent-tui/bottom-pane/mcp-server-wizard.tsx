@@ -1,12 +1,13 @@
 import type { InputRenderable } from "@opentui/core";
-import { For, Show, createEffect, createMemo, onCleanup, type JSX } from "solid-js";
+import { Show, createEffect, createMemo, onCleanup, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { useTuiDimensions } from "../context/terminal";
-import { isPrimaryClick } from "../input/mouse";
 import { mcpWizardFields, mcpWizardStep } from "../mcp-server-state";
 import { truncateLine } from "../renderers";
 import { fitTerminalPair } from "../terminal-text";
 import { COLOR } from "../theme";
+import { InputField, InputFieldPrompt, inputFieldHeight } from "./input-field";
+import { WizardChoiceRows } from "./wizard-choice-rows";
 
 export function McpServerWizard(): JSX.Element {
   const tui = useTuiStore();
@@ -29,6 +30,8 @@ export function McpServerWizard(): JSX.Element {
     return "";
   };
   const isTextField = () => ["id", "endpoint", "credential", "oauth", "environment", "behavior", "tools"].includes(wizard().field);
+  const bodyHeight = () => isTextField() ? inputFieldHeight(dims().height) + 4 : 7;
+  const wizardHeight = () => bodyHeight() + 3;
   const maskedSecret = createMemo(() => {
     if (wizard().credential.length) return "•".repeat(Math.min(24, [...wizard().credential].length));
     if (wizard().credentialStored && !wizard().removeCredential) return "stored ••••••••";
@@ -74,33 +77,33 @@ export function McpServerWizard(): JSX.Element {
   });
 
   return (
-    <box id="mcp-server-wizard" style={{ height: 8, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
+    <box id="mcp-server-wizard" style={{ height: wizardHeight(), flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
       <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 2, paddingRight: 2 }}>
         <text fg={COLOR.text}>{header().left}</text>
         <text fg={COLOR.dim}>{header().right}</text>
       </box>
-      <box style={{ height: 5, flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
+      <box style={{ height: bodyHeight(), flexShrink: 0, flexDirection: "column", overflow: "hidden" }}>
         <Show when={wizard().field === "transport"} fallback={
           <Show when={wizard().field === "authentication"} fallback={
             <Show when={wizard().field === "review"} fallback={<WizardInput />}>
               <McpReview />
             </Show>
           }>
-            <ChoiceRows rows={[
+            <WizardChoiceRows rows={[
               ["none", "no auth", "anonymous connection"],
               ["bearer", "bearer token", "stored token, environment token, or authorization header"],
               ["oauth", "oauth", "authorization code flow with persistent credentials"]
-            ]} value={wizard().auth} onSelect={(auth) => tui.actions.mcpServerWizardPatch({ auth: auth as "none" | "bearer" | "oauth", error: undefined })} />
+            ]} selected={() => wizard().auth} choose={(auth) => tui.actions.mcpServerWizardPatch({ auth: auth as "none" | "bearer" | "oauth", error: undefined })} descriptionMinWidth={64} />
           </Show>
         }>
-          <ChoiceRows rows={[
+          <WizardChoiceRows rows={[
             ["stdio", "stdio", "launch a local command or docker process"],
             ["http", "streamable http", "connect to a remote mcp endpoint"]
-          ]} value={wizard().transport} onSelect={(transport) => tui.actions.mcpServerWizardPatch({
+          ]} selected={() => wizard().transport} choose={(transport) => tui.actions.mcpServerWizardPatch({
             transport: transport as "stdio" | "http",
             auth: transport === "http" ? wizard().auth : "none",
             error: undefined
-          })} />
+          })} descriptionMinWidth={64} />
         </Show>
       </box>
       <box style={{ height: 1, paddingLeft: 2, paddingRight: 1 }}>
@@ -118,8 +121,8 @@ export function McpServerWizard(): JSX.Element {
     return (
       <box style={{ flexDirection: "column", paddingTop: 1, paddingLeft: 2, paddingRight: 1 }}>
         <text fg={COLOR.dim}>{truncateLine(fieldLabel(field(), wizard().transport), Math.max(1, dims().width - 3))}</text>
-        <box style={{ height: 1, flexDirection: "row", marginTop: 1, backgroundColor: COLOR.panelActive }}>
-          <text fg={COLOR.accent}>{"› "}</text>
+        <InputField marginTop={1}>
+          <InputFieldPrompt />
           <Show when={secret()}>
             <text selectable={false} fg={wizard().removeCredential ? COLOR.warning : COLOR.text}>{maskedSecret()}</text>
           </Show>
@@ -141,7 +144,7 @@ export function McpServerWizard(): JSX.Element {
             style={{ flexGrow: 1, ...(secret() ? { width: 1 } : {}), backgroundColor: COLOR.panelActive }}
             onInput={(next) => updateField(next)}
           />
-        </box>
+        </InputField>
       </box>
     );
   }
@@ -162,25 +165,6 @@ export function McpServerWizard(): JSX.Element {
     if (field === "behavior") tui.actions.mcpServerWizardPatch({ behavior: next, probe: undefined, error: undefined });
     if (field === "tools") tui.actions.mcpServerWizardPatch({ tools: next, probe: undefined, error: undefined });
   }
-}
-
-function ChoiceRows(props: { rows: readonly (readonly [string, string, string])[]; value: string; onSelect: (value: string) => void }): JSX.Element {
-  const dims = useTuiDimensions();
-  return (
-    <box style={{ flexDirection: "column", paddingTop: 1 }}>
-      <For each={props.rows}>{(row) => {
-        const selected = () => props.value === row[0];
-        const content = () => fitTerminalPair(row[1], dims().width >= 64 ? row[2] : "", Math.max(1, dims().width - 2), 4, 2);
-        return (
-          <box style={{ flexDirection: "row" }} onMouseUp={(event) => { if (isPrimaryClick(event)) props.onSelect(row[0]); }}>
-            <text selectable={false} fg={selected() ? COLOR.accent : COLOR.dim}>{selected() ? "› " : "  "}</text>
-            <text selectable={false} fg={COLOR.text}>{content().left}</text>
-            <Show when={content().right}><text selectable={false} fg={COLOR.dim}>{`  ${content().right}`}</text></Show>
-          </box>
-        );
-      }}</For>
-    </box>
-  );
 }
 
 function McpReview(): JSX.Element {
@@ -204,8 +188,8 @@ function fieldLabel(field: string, transport: "stdio" | "http"): string {
   if (field === "credential") return "bearer token · optional · ctrl+r remove stored token";
   if (field === "oauth") return "oauth · client_id=…; callback_url=…; scopes=a,b";
   if (field === "environment") return transport === "http"
-    ? "headers · Name=value; Name=$ENV; bearer=$TOKEN_ENV"
-    : "environment · cwd=/path; KEY=value; $FORWARDED_ENV";
+    ? "headers · Name=value; Name=$ENV; Name=!stored-secret; bearer=$TOKEN_ENV"
+    : "environment · cwd=/path; KEY=value; KEY=!stored-secret; $FORWARDED_ENV";
   if (field === "behavior") return "behavior · auto_start=true required=false startup=10 tool=60 container=true";
   if (field === "tools") return "tool filters · allow=tool_a,tool_b deny=tool_c";
   return field;

@@ -194,6 +194,8 @@ export type Session = {
   campaignId?: string;
   provider?: string;
   model?: string;
+  emailPrimaryId?: string;
+  emailSecondaryId?: string;
   summary?: string;
   summaryUpdatedAt?: string;
   toolScope?: string[];

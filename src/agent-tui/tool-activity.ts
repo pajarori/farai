@@ -15,6 +15,7 @@ export type ToolActivityFamily =
   | "agent"
   | "mcp"
   | "media"
+  | "email"
   | "generic";
 
 export type ToolActivityPresentation = {
@@ -117,6 +118,7 @@ function toolFamily(tool: string): ToolActivityFamily {
   if (tool.startsWith("agent_")) return "agent";
   if (tool.startsWith("mcp_")) return "mcp";
   if (tool === "image_view") return "media";
+  if (tool.startsWith("email_")) return "email";
   return "generic";
 }
 
@@ -145,6 +147,10 @@ function activityGrouping(
     const server = stringValue(args.server) ?? "mcp";
     return { groupKey: `mcp:${server}`, groupPast: `queried ${server}`, groupActive: `querying ${server}` };
   }
+  if (family === "email" && tool !== "email_create") {
+    const emailId = stringValue(args.emailId) ?? stringValue(metadata.emailId) ?? "email";
+    return { groupKey: `email:${emailId}`, groupPast: "checked email", groupActive: "checking email" };
+  }
   return undefined;
 }
 
@@ -152,7 +158,7 @@ function toolStandalone(tool: string, input: ToolActivityInput, warning: boolean
   if (input.status === "error" || input.toolResult?.ok === false || input.status === "running_background") return true;
   if (input.toolResult?.attachments?.length || input.toolResult?.evidence?.length || input.toolResult?.outputArtifactId) return true;
   if (warning) return true;
-  if (family === "recon" || family === "campaign" || family === "agent" || family === "media") return true;
+  if (family === "recon" || family === "campaign" || family === "agent" || family === "media" || family === "email") return true;
   if (tool === "browser_context" || tool === "internet_search" || tool === "internet_fetch") return true;
   if (family === "browser") return false;
   const definition = toolDefinition(tool);
@@ -216,6 +222,16 @@ function toolOutcome(
     const action = stringValue(metadata.browserContextAction) ?? stringValue(args.action);
     if (action === "list") return `${arrayValue(metadata.browserContexts).length} browser context${arrayValue(metadata.browserContexts).length === 1 ? "" : "s"}`;
     return stringValue(metadata.browserContextName) ?? result?.summary;
+  }
+  if (tool === "email_list") return `${arrayValue(metadata.emails).length} email${arrayValue(metadata.emails).length === 1 ? "" : "s"}`;
+  if (tool === "email_create") {
+    const email = objectValue(metadata.email);
+    return email ? `${String(email.address ?? "email")} · ${String(email.id ?? "")}`.replace(/ · $/, "") : cleanSummary(result?.summary);
+  }
+  if (tool === "email_inbox") return `${arrayValue(metadata.messages).length} message${arrayValue(metadata.messages).length === 1 ? "" : "s"}`;
+  if (tool === "email_read" || tool === "email_wait") {
+    const message = objectValue(metadata.message);
+    return message ? `${String(message.from ?? "sender")} · ${String(message.subject ?? "email")}` : cleanSummary(result?.summary);
   }
   if (tool === "fs_read") return cleanSummary(result?.summary) ?? `${semanticLines(text, Number.MAX_SAFE_INTEGER).length} lines`;
   if (tool === "fs_list") {
@@ -281,12 +297,35 @@ function toolPreview(
     return withMore(lines, results.length, 5);
   }
   if (tool === "browser_context") return browserContextPreview(metadata);
+  if (tool === "email_list") return emailResourcePreview(arrayValue(metadata.emails));
+  if (tool === "email_create") return emailResourcePreview([metadata.email]);
+  if (tool === "email_inbox") return emailMessagePreview(arrayValue(metadata.messages));
+  if (tool === "email_read" || tool === "email_wait") return emailMessagePreview([metadata.message]);
   if (tool.startsWith("proxy_")) {
     const flow = proxyOutcome(metadata, undefined, text);
     if (flow) return [flow, ...semanticLines(text, 3).filter((line) => line !== flow)];
   }
   if (active) return boundedTailLines(text, 4);
   return boundedPreviewLines(text, 5);
+}
+
+function emailResourcePreview(values: unknown[]): string[] {
+  const rows = values.flatMap((value) => {
+    const email = objectValue(value);
+    if (!email) return [];
+    const roles = arrayValue(email.roles).map(String).join(" · ");
+    return [`${String(email.address ?? "email")} · ${String(email.type ?? email.provider ?? "email")}${roles ? ` · ${roles}` : ""}`, `id: ${String(email.id ?? "unknown")}`];
+  });
+  return withMore(rows.slice(0, 6), rows.length, 6);
+}
+
+function emailMessagePreview(values: unknown[]): string[] {
+  const rows = values.flatMap((value) => {
+    const message = objectValue(value);
+    if (!message) return [];
+    return [`${String(message.from ?? "sender")} · ${String(message.subject ?? "(no subject)")}`, `id: ${String(message.id ?? "unknown")}`];
+  });
+  return withMore(rows.slice(0, 6), rows.length, 6);
 }
 
 function browserOutcome(text: string, metadata: Record<string, unknown>): string | undefined {

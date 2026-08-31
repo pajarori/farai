@@ -5,65 +5,88 @@ import { resolveDefaultModel } from "../agent-core/model-registry";
 import { buildModelCatalog, resolveDefaultCatalogModel } from "../agent-core/model-catalog";
 import { addModelProfile, loadModelProfiles, modelProfilePaths, type ModelProfileLocation } from "../agent-core/model-profiles";
 import { ensureDefaultUserConfig, globalConfigPath, loadGlobalConfig } from "../agent-core/global-config";
-import { authPath, loadConfig, updateConfig } from "../agent-core/config";
+import { loadConfig, updateConfig } from "../agent-core/config";
 import { FARAI_BANNER } from "../branding";
 import { FARAI_VERSION } from "../version";
+import {
+  parseBenchmarkArguments,
+  parseInitArguments,
+  parseModelArguments,
+  parseNoArguments,
+  parseResumeArguments,
+  parseRunArguments,
+  parseSetupArguments,
+  type ModelAddArguments
+} from "./command-arguments";
+import { readSecretFromStdin } from "./secret-input";
 
-const [, , command, ...args] = process.argv;
+await main().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`error: ${message}`);
+  if (process.env.FARAI_DEBUG === "1" || process.env.FARAI_DEBUG === "true") {
+    if (error instanceof Error && error.stack) console.error(error.stack);
+  }
+  process.exitCode = 1;
+});
 
-if (command === "--version" || command === "-v" || command === "version") {
-  console.log(FARAI_VERSION);
-  process.exit(0);
-}
-
-switch (command) {
-  case undefined:
-    await launchTui(process.cwd(), undefined);
-    break;
-  case "help":
-  case "-h":
-  case "--help":
-    help(args[0]);
-    break;
-  case "doctor":
-    if (wantsHelp(args)) { help("doctor"); break; }
-    await doctor();
-    break;
-  case "setup":
-    if (wantsHelp(args)) { help("setup"); break; }
-    await setup(args);
-    break;
-  case "init":
-  case "init-lab":
-    if (wantsHelp(args)) { help("init"); break; }
-    await initLab(args);
-    break;
-  case "resume":
-    if (wantsHelp(args)) { help("resume"); break; }
-    await launchTui(process.cwd(), args[0] && !args[0].startsWith("-") ? args[0] : flag(args, "--session"));
-    break;
-  case "run":
-    if (wantsHelp(args)) { help("run"); break; }
-    await run(args);
-    break;
-  case "bench":
-    if (wantsHelp(args)) { help("bench"); break; }
-    await benchmark(args);
-    break;
-  case "model":
-    if (wantsHelp(args)) { help("model"); break; }
-    await models(args);
-    break;
-  case "config":
-    if (wantsHelp(args)) { help("config"); break; }
-    ensureDefaultUserConfig();
-    console.log(globalConfigPath());
-    console.log(authPath("global"));
-    break;
-  default:
-    console.error(`Unknown command: ${command}`);
-    help();
-    process.exitCode = 1;
+async function main(): Promise<void> {
+  const [, , command, ...args] = process.argv;
+  if (command === "--version" || command === "-v" || command === "version") {
+    parseNoArguments("version", args);
+    console.log(FARAI_VERSION);
+    return;
+  }
+  switch (command) {
+    case undefined:
+      await launchTui(process.cwd(), undefined);
+      break;
+    case "help":
+    case "-h":
+    case "--help":
+      if (args.length > 1) throw new Error(`unexpected argument: ${args[1]}`);
+      help(args[0]);
+      break;
+    case "doctor":
+      if (wantsHelp(args)) { help("doctor"); break; }
+      parseNoArguments("doctor", args);
+      await doctor();
+      break;
+    case "setup":
+      if (wantsHelp(args)) { help("setup"); break; }
+      await setup(args);
+      break;
+    case "init":
+    case "init-lab":
+      if (wantsHelp(args)) { help("init"); break; }
+      await initLab(args);
+      break;
+    case "resume":
+      if (wantsHelp(args)) { help("resume"); break; }
+      await launchTui(process.cwd(), parseResumeArguments(args));
+      break;
+    case "run":
+      if (wantsHelp(args)) { help("run"); break; }
+      await run(args);
+      break;
+    case "bench":
+      if (wantsHelp(args)) { help("bench"); break; }
+      await benchmark(args);
+      break;
+    case "model":
+      if (wantsHelp(args)) { help("model"); break; }
+      await models(args);
+      break;
+    case "config":
+      if (wantsHelp(args)) { help("config"); break; }
+      parseNoArguments("config", args);
+      ensureDefaultUserConfig();
+      console.log(globalConfigPath());
+      break;
+    default:
+      console.error(`unknown command: ${command}`);
+      help();
+      process.exitCode = 1;
+  }
 }
 
 async function doctor(): Promise<void> {
@@ -80,7 +103,7 @@ async function doctor(): Promise<void> {
   console.log(`model providers: ${profiles.length ? profiles.map((p) => p.name).join(", ") : "none"}`);
   console.log(`mcp servers: ${Object.keys(config.mcpServers ?? {}).join(", ") || "none"}`);
   console.log(`config: ${globalConfigPath()}`);
-  console.log(`auth: ${authPath("global")}`);
+  console.log("secrets: system keyring");
   console.log(`config paths: ${modelProfilePaths(process.cwd()).join(", ")}`);
   const backend = new KaliContainerBackend({ workspace: process.cwd() });
   const image = await backend.resolveImage();
@@ -91,31 +114,27 @@ async function doctor(): Promise<void> {
 }
 
 async function setup(args: string[]): Promise<void> {
+  const parsed = parseSetupArguments(args);
   ensureDefaultUserConfig();
-  const skipDocker = args.includes("--no-docker");
-  const skipKb = args.includes("--no-kb") || args.includes("--no-knowledge");
-  const model = flag(args, "--model");
-  const baseUrl = flag(args, "--base-url") ?? flag(args, "--baseURL");
-  const apiKeyEnv = flag(args, "--api-key-env");
-  const setDefault = args.includes("--set-default") || args.includes("--default") || Boolean(model);
 
   console.log(FARAI_BANNER);
   console.log();
   console.log("[*] setting up farai");
   console.log(`[+] config: ${globalConfigPath()}`);
-  console.log(`[+] auth: ${authPath("global")}`);
+  console.log("[+] secrets: system keyring");
 
-  if (model) {
+  if (parsed.model) {
     const addArgs = [
-      model,
-      ...(baseUrl ? ["--base-url", baseUrl] : []),
-      ...(apiKeyEnv ? ["--api-key-env", apiKeyEnv] : []),
-      ...(setDefault ? ["--set-default"] : [])
+      parsed.model,
+      ...(parsed.baseUrl ? ["--base-url", parsed.baseUrl] : []),
+      ...(parsed.apiKeyEnv ? ["--api-key-env", parsed.apiKeyEnv] : []),
+      ...(parsed.apiKeyStdin ? ["--api-key-stdin"] : []),
+      "--set-default"
     ];
     await addModel(addArgs);
   }
 
-  if (!skipDocker) {
+  if (!parsed.skipDocker) {
     console.log("[*] building Farai Kali image");
     const code = await buildContainer();
     if (code !== 0) {
@@ -127,7 +146,7 @@ async function setup(args: string[]): Promise<void> {
     console.log("[*] skipping Docker image build");
   }
 
-  if (!skipKb) {
+  if (!parsed.skipKnowledge) {
     console.log("[*] building Farai knowledge base");
     const code = await (await import("../agent-knowledge/command")).runKbCommand(["build", "all"]);
     if (code !== 0) {
@@ -144,12 +163,13 @@ async function setup(args: string[]): Promise<void> {
 }
 
 async function models(args: string[] = []): Promise<void> {
+  const parsed = parseModelArguments(args);
   ensureDefaultUserConfig();
-  if (args[0] === "add") {
-    await addModel(args.slice(1));
+  if (parsed.kind === "add") {
+    await addParsedModel(parsed);
     return;
   }
-  if (args[0] === "path") {
+  if (parsed.kind === "path") {
     console.log(modelProfilePaths(process.cwd()).join("\n"));
     return;
   }
@@ -173,27 +193,26 @@ async function models(args: string[] = []): Promise<void> {
 }
 
 async function addModel(args: string[]): Promise<void> {
-  const id = args.find((arg) => !arg.startsWith("-"));
-  if (!id) throw new Error("model add requires <provider[/model]>.");
-  const parsed = parseProviderModel(id);
-  const baseUrl = flag(args, "--base-url") ?? flag(args, "--baseURL");
-  const apiKeyEnv = flag(args, "--api-key-env");
-  const apiKey = flag(args, "--api-key");
-  const contextWindow = numberFlag(args, "--context-window");
-  const maxOutputTokens = numberFlag(args, "--max-output-tokens");
-  const location: ModelProfileLocation = args.includes("--project") ? "project" : "global";
-  const result = addModelProfile(process.cwd(), {
+  const parsed = parseModelArguments(["add", ...args]);
+  if (parsed.kind !== "add") throw new Error("model add requires <provider[/model]>");
+  await addParsedModel(parsed);
+}
+
+async function addParsedModel(parsed: ModelAddArguments): Promise<void> {
+  const apiKey = parsed.apiKeyStdin ? await readSecretFromStdin("--api-key-stdin") : undefined;
+  const location: ModelProfileLocation = parsed.project ? "project" : "global";
+  const result = await addModelProfile(process.cwd(), {
     name: parsed.provider,
     ...(parsed.model ? { model: parsed.model } : {}),
-    ...(baseUrl ? { baseUrl } : {}),
-    ...(apiKeyEnv ? { apiKeyEnv } : {}),
+    ...(parsed.baseUrl ? { baseUrl: parsed.baseUrl } : {}),
+    ...(parsed.apiKeyEnv ? { apiKeyEnv: parsed.apiKeyEnv } : {}),
     ...(apiKey ? { apiKey } : {}),
-    ...(contextWindow ? { contextWindow } : {}),
-    ...(maxOutputTokens ? { maxOutputTokens } : {})
+    ...(parsed.contextWindow ? { contextWindow: parsed.contextWindow } : {}),
+    ...(parsed.maxOutputTokens ? { maxOutputTokens: parsed.maxOutputTokens } : {})
   }, location);
 
   const selection = parsed.model ? `${parsed.provider}:${parsed.model}` : parsed.provider;
-  if (args.includes("--set-default") || args.includes("--default")) {
+  if (parsed.setDefault) {
     if (!parsed.model) throw new Error("--set-default requires <provider/model>.");
     updateConfig((config) => ({ ...config, model: selection }));
   }
@@ -206,10 +225,8 @@ async function addModel(args: string[]): Promise<void> {
 }
 
 async function initLab(args: string[]): Promise<void> {
+  const { name, target, model } = parseInitArguments(args);
   ensureDefaultUserConfig();
-  const name = flag(args, "--name") ?? "lab";
-  const target = flag(args, "--target");
-  const model = flag(args, "--model");
   const runtime = new AgentRuntime(process.cwd());
   try {
     const session = await runtime.createSession({ ...(model ? { model } : {}), title: target ? `${name}: ${target}` : name });
@@ -238,11 +255,8 @@ async function launchTui(workspace: string, sessionId: string | undefined): Prom
 }
 
 async function run(args: string[]): Promise<void> {
+  const { sessionId, text, json } = parseRunArguments(args);
   ensureDefaultUserConfig();
-  const sessionId = flag(args, "--session");
-  const text = flag(args, "--text") ?? args.filter((arg) => arg !== "--json").join(" ");
-  const json = args.includes("--json");
-  if (!text) throw new Error("run requires text");
   const runtime = new AgentRuntime(process.cwd());
   try {
     const session = sessionId
@@ -261,47 +275,32 @@ async function run(args: string[]): Promise<void> {
 }
 
 async function benchmark(args: string[]): Promise<void> {
-  const subcommand = args[0] ?? "run";
-  if (subcommand === "csi" && args[1] === "generate") {
-    const configPath = args[2] && !args[2].startsWith("-") ? args[2] : flag(args, "--config");
-    const materialRoot = flag(args, "--materials");
-    const output = flag(args, "--output");
-    if (!configPath) throw new Error("bench csi generate requires a campaign config json path");
-    if (!materialRoot) throw new Error("bench csi generate requires --materials <protected-dir>");
-    if (!output) throw new Error("bench csi generate requires --output <suite.json>");
+  const parsed = parseBenchmarkArguments(args);
+  if (parsed.kind === "csi-generate") {
     const { generateCsiBenchmarkSuite, loadCsiCampaignConfig, writeCsiBenchmarkSuite } = await import("../agent-benchmark/csi-suite");
-    const suite = await generateCsiBenchmarkSuite(await loadCsiCampaignConfig(configPath), materialRoot);
-    writeCsiBenchmarkSuite(suite, output);
-    console.log(JSON.stringify({ output, challenges: suite.runs.length, repetitions: suite.repetitions, runs: suite.runs.length * suite.repetitions }, null, 2));
+    const suite = await generateCsiBenchmarkSuite(await loadCsiCampaignConfig(parsed.configPath), parsed.materialRoot);
+    writeCsiBenchmarkSuite(suite, parsed.output);
+    console.log(JSON.stringify({ output: parsed.output, challenges: suite.runs.length, repetitions: suite.repetitions, runs: suite.runs.length * suite.repetitions }, null, 2));
     return;
   }
-  if (subcommand === "run") {
-    const manifestPath = args[1] && !args[1].startsWith("-") ? args[1] : flag(args, "--manifest");
-    if (!manifestPath) throw new Error("bench run requires a manifest json path");
-    const output = flag(args, "--output");
-    const workspace = flag(args, "--workspace");
-    const artifactsDir = flag(args, "--artifacts");
+  if (parsed.kind === "run") {
     const { loadBenchmarkManifest, runBenchmark, writeBenchmarkResult } = await import("../agent-benchmark/runner");
-    const result = await runBenchmark(await loadBenchmarkManifest(manifestPath), {
-      ...(workspace ? { workspace } : {}),
-      ...(artifactsDir ? { artifactsDir } : {})
+    const result = await runBenchmark(await loadBenchmarkManifest(parsed.manifestPath), {
+      ...(parsed.workspace ? { workspace: parsed.workspace } : {}),
+      ...(parsed.artifactsDir ? { artifactsDir: parsed.artifactsDir } : {})
     });
-    if (output) writeBenchmarkResult(result, output);
+    if (parsed.output) writeBenchmarkResult(result, parsed.output);
     console.log(JSON.stringify(result, null, 2));
     if (!result.solved) process.exitCode = 2;
     return;
   }
-  if (subcommand === "suite") {
-    const manifestPath = args[1] && !args[1].startsWith("-") ? args[1] : flag(args, "--manifest");
-    if (!manifestPath) throw new Error("bench suite requires a suite manifest json path");
-    const artifactsDir = flag(args, "--artifacts");
+  if (parsed.kind === "suite") {
     const { loadBenchmarkSuiteManifest, runBenchmarkSuite } = await import("../agent-benchmark/suite");
-    const result = await runBenchmarkSuite(await loadBenchmarkSuiteManifest(manifestPath), { ...(artifactsDir ? { artifactsDir } : {}) });
+    const result = await runBenchmarkSuite(await loadBenchmarkSuiteManifest(parsed.manifestPath), { ...(parsed.artifactsDir ? { artifactsDir: parsed.artifactsDir } : {}) });
     console.log(JSON.stringify(result, null, 2));
     if (result.solvedChallenges === 0) process.exitCode = 2;
     return;
   }
-  throw new Error(`unknown bench command: ${subcommand}`);
 }
 
 async function buildContainer(): Promise<number> {
@@ -313,33 +312,8 @@ async function buildContainer(): Promise<number> {
   return code;
 }
 
-function flag(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index === -1) return undefined;
-  return args[index + 1];
-}
-
-function numberFlag(args: string[], name: string): number | undefined {
-  const value = flag(args, name);
-  if (!value) return undefined;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be a positive number`);
-  return parsed;
-}
-
 function wantsHelp(args: string[]): boolean {
   return args.includes("--help") || args.includes("-h") || args[0] === "help";
-}
-
-function parseProviderModel(value: string): { provider: string; model?: string } {
-  const slash = value.indexOf("/");
-  const colon = value.indexOf(":");
-  const separator = slash > 0 ? slash : colon > 0 ? colon : -1;
-  if (separator === -1) return { provider: value.trim().toLowerCase() };
-  const provider = value.slice(0, separator).trim().toLowerCase();
-  const model = value.slice(separator + 1).trim();
-  if (!provider || !model) throw new Error("Model must be <provider>/<model> or <provider>:<model>.");
-  return { provider, model };
 }
 
 function help(topic?: string): void {
@@ -353,12 +327,14 @@ Options:
   --model <provider:model>      Add and set the default model
   --base-url <url>              OpenAI-compatible provider URL
   --api-key-env <ENV>           Environment variable containing the API key
+  --api-key-stdin               Read the API key from stdin
   --no-docker                   Skip Farai Kali image build
   --no-kb, --no-knowledge       Skip local knowledge base build
 
 Examples:
   farai setup
   farai setup --model openai:gpt-5 --base-url https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
+  printenv OPENAI_API_KEY | farai setup --model openai:gpt-5 --base-url https://api.openai.com/v1 --api-key-stdin
   farai setup --no-kb`,
     run: `Farai run
 
@@ -393,7 +369,7 @@ Usage:
 Options for model add:
   --base-url <url>
   --api-key-env <ENV>
-  --api-key <key>
+  --api-key-stdin               Read the API key from stdin
   --context-window <tokens>
   --max-output-tokens <tokens>
   --set-default
@@ -409,13 +385,14 @@ Usage:
 Usage:
   farai config`
   };
-  console.log(pages[topic ?? ""] ?? `Farai
+  if (topic && !pages[topic]) throw new Error(`unknown help topic: ${topic}`);
+  console.log((topic ? pages[topic] : undefined) ?? `Farai
 
 Usage:
   farai
   farai resume [session-name-or-id]
   farai run <prompt> [--session <id>] [--json]
-  farai setup [--model provider:model] [--base-url url] [--api-key-env ENV] [--no-docker] [--no-kb]
+  farai setup [--model provider:model] [--base-url url] [--api-key-env ENV | --api-key-stdin] [--no-docker] [--no-kb]
   farai init [--target <ip-or-host>] [--name <name>] [--model provider:model]
   farai doctor
   farai model
@@ -424,7 +401,7 @@ Usage:
   farai bench suite <suite.json> [--artifacts dir]
   farai config
 
-All settings live in ~/.local/pajarori/farai/config.toml; API keys in auth.json.
+settings live in ~/.local/pajarori/farai/config.toml; credentials use the system keyring.
 
 Examples:
   farai

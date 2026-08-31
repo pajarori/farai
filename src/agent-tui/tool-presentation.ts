@@ -38,7 +38,7 @@ const TOOL_NAMESPACES = [
   "callback", "campaign", "evidence", "exploit", "memory", "session",
   "report", "notes", "shell", "skill", "patch", "code", "todo",
   "tool", "port", "nmap", "http", "dir", "git", "mcp", "fs",
-  "browser", "proxy", "web", "image", "notebook", "worktree", "agent"
+  "browser", "proxy", "web", "image", "notebook", "worktree", "agent", "email"
 ] as const;
 
 const PAST_ACTIONS: Record<string, string> = {
@@ -133,7 +133,12 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
   browser_wait_for: ["waited for", "waiting for"],
   browser_tabs: ["managed", "managing"],
   browser_network_requests: ["inspected", "inspecting"],
-  browser_network_request: ["inspected", "inspecting"]
+  browser_network_request: ["inspected", "inspecting"],
+  email_list: ["listed emails", "listing emails"],
+  email_create: ["created email", "creating email"],
+  email_inbox: ["checked inbox", "checking inbox"],
+  email_read: ["read email", "reading email"],
+  email_wait: ["received email", "waiting for email"]
 };
 
 const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
@@ -169,7 +174,12 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   browser_wait_for: ["text", "textGone", "time"],
   browser_tabs: ["action", "index", "url"],
   browser_network_requests: ["filter", "filename"],
-  browser_network_request: ["index", "part"]
+  browser_network_request: ["index", "part"],
+  email_list: [],
+  email_create: ["label"],
+  email_inbox: ["emailId"],
+  email_read: ["messageId"],
+  email_wait: ["emailId", "from", "subject"]
 };
 
 export type ToolInputKind = "shell" | "edit" | "write" | "patch" | "json";
@@ -207,11 +217,12 @@ export function toolActionLabel(toolName: unknown, active: boolean): string {
 
 export function toolTitle(toolName: unknown, args: unknown, status: string, max = 120): string {
   const active = isActiveToolStatus(status);
+  const failed = status === "error";
   const canonical = canonicalToolName(toolName);
   const inputObject = toolInputObject(args);
   const browserTitle = inputObject ? browserToolTitle(canonical, inputObject, active) : undefined;
   if (browserTitle) return truncateLine(browserTitle, max);
-  const nativeTitle = inputObject ? nativeToolTitle(canonical, inputObject, active) : undefined;
+  const nativeTitle = inputObject ? nativeToolTitle(canonical, inputObject, active, failed) : undefined;
   if (nativeTitle) return truncateLine(nativeTitle, max);
   if (canonical === "session_poll" || canonical === "session_stop") return truncateLine(toolActionLabel(canonical, active), max);
   if (status === "running_background") {
@@ -374,7 +385,15 @@ function browserToolTitle(tool: string, input: Record<string, unknown>, active: 
   return undefined;
 }
 
-function nativeToolTitle(tool: string, input: Record<string, unknown>, active: boolean): string | undefined {
+function nativeToolTitle(tool: string, input: Record<string, unknown>, active: boolean, failed = false): string | undefined {
+  if (tool === "email_list") return failed ? "failed to list emails" : active ? "listing emails" : "listed emails";
+  if (tool === "email_create") {
+    const label = typeof input.label === "string" && input.label.trim() ? ` ${input.label.trim()}` : "";
+    return `${failed ? "failed to create" : active ? "creating" : "created"} email${label}`;
+  }
+  if (tool === "email_inbox") return `${failed ? "failed to check" : active ? "checking" : "checked"} inbox ${typeof input.emailId === "string" ? input.emailId : ""}`.trim();
+  if (tool === "email_read") return `${failed ? "failed to read" : active ? "reading" : "read"} email ${typeof input.messageId === "string" ? input.messageId : ""}`.trim();
+  if (tool === "email_wait") return `${failed ? "failed waiting for" : active ? "waiting for" : "received"} email${typeof input.subject === "string" && input.subject.trim() ? ` · ${input.subject.trim()}` : ""}`;
   if (tool === "callback_host_info") return active ? "inspecting host network" : "inspected host network";
   if (tool === "callback_oast") return active ? "starting oast session" : "started oast session";
   if (tool === "notebook_edit") {

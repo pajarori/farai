@@ -24,7 +24,7 @@ For CSI/CyBench materials and exploratory benchmark artifacts, see [farai-csi-be
 ## Installation
 
 ```bash
-bun install -g farai
+npm install -g farai
 ```
 
 Requirements:

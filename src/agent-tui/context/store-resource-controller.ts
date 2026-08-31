@@ -1,5 +1,5 @@
 import type { ProxyFlowQuery, ProxyFlowSummary } from "../../agent-tools/services/mitmproxy/flows";
-import type { McpCatalogSnapshot, TuiRuntimePort } from "../runtime-port";
+import type { EmailCatalogSnapshot, McpCatalogSnapshot, TuiRuntimePort } from "../runtime-port";
 import type { FaraiTuiStore, StoreActions } from "../store";
 import type { createStoreSessionController, StoreSessionOwner } from "./store-session-controller";
 
@@ -27,11 +27,16 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
   let modelRefreshGeneration = 0;
   let modelOverlayGeneration = 0;
   let mcpOverlayGeneration = 0;
+  let emailOverlayGeneration = 0;
 
   async function loadMcpCatalog(): Promise<McpCatalogSnapshot> {
     const loader = (port as typeof port & { loadMcpCatalog?: () => Promise<McpCatalogSnapshot> }).loadMcpCatalog;
     if (typeof loader === "function") return await loader.call(port);
     return { servers: store.ui.mcpServers, statuses: await port.listMcpStatuses() };
+  }
+
+  async function loadEmailCatalog(): Promise<EmailCatalogSnapshot> {
+    return await port.loadEmailCatalog();
   }
 
   function refreshSessionMcp(sessionId: string): Promise<void> {
@@ -214,6 +219,25 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     }
   }
 
+  async function openEmailOverlay(): Promise<void> {
+    const owner = sessions.captureOwner();
+    if (!owner) return;
+    const generation = ++emailOverlayGeneration;
+    input.setStatusDetail("loading email");
+    actions.overlayOpen("email");
+    try {
+      const catalog = await loadEmailCatalog();
+      if (emailOverlayGeneration !== generation || !sessions.owns(owner)) return;
+      actions.emailCatalogSet(catalog.accounts);
+    } catch (error) {
+      if (emailOverlayGeneration === generation && sessions.owns(owner)) actions.errorSet(errorMessage(error));
+    } finally {
+      if (emailOverlayGeneration === generation && sessions.owns(owner) && store.ui.statusDetail === "loading email") {
+        input.setStatusDetail(undefined);
+      }
+    }
+  }
+
   function toggleContainer(options: { reportError?: boolean } = {}): Promise<void> {
     const owner = sessions.captureOwner();
     if (!owner) return Promise.resolve();
@@ -263,6 +287,7 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     modelRefreshGeneration += 1;
     modelOverlayGeneration += 1;
     mcpOverlayGeneration += 1;
+    emailOverlayGeneration += 1;
     proxyRefreshes.clear();
     mcpRefreshes.clear();
     agentThreadRefreshes.clear();
@@ -279,6 +304,7 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     refreshAgentThreads,
     openAgentsOverlay,
     openMcpOverlay,
+    openEmailOverlay,
     toggleContainer,
     dispose
   };

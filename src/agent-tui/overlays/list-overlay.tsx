@@ -40,7 +40,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
     const start = scrollWindowStart(all.length, cap, selectedIndex);
     return all.slice(start, start + cap);
   });
-  const standardRowHeight = () => props.frame.kind === "mcp"
+  const standardRowHeight = () => props.frame.kind === "mcp" || props.frame.kind === "email"
     ? Math.max(1, Math.min(maxRows(), allRows().length))
     : maxRows();
   const standardHeight = () => Math.max(1, Math.min(bottomPaneOverlayHeightLimit(dims().height), standardRowHeight() + 5));
@@ -48,7 +48,7 @@ export function ListOverlay(props: ListOverlayProps): JSX.Element {
   const standardTop = () => Math.max(0, dims().height - standardHeight() - 1);
   const descCol = () => descriptionColumn(allRows(), width());
   const subtitle = () => overlaySubtitle(props.frame);
-  const status = () => props.frame.kind === "model" || props.frame.kind === "mcp" ? tui.store.ui.statusDetail : undefined;
+  const status = () => props.frame.kind === "model" || props.frame.kind === "mcp" || props.frame.kind === "email" ? tui.store.ui.statusDetail : undefined;
   const notice = () => props.frame.kind === "mcp"
     ? tui.store.ui.lastError ?? tui.store.ui.mcpStatusError
     : tui.store.ui.lastError;
@@ -197,6 +197,7 @@ function OptionRow(props: OptionRowProps): JSX.Element {
       title={option().title}
       description={option().description}
       current={option().footer === "current"}
+      badge={option().badge}
       selected={props.row.selected}
       disabled={props.row.disabled}
       width={props.width}
@@ -544,13 +545,15 @@ function descriptionColumn(rows: OverlayRow[], width: number): number {
     .map((row) => ({
       ...(row.number === undefined ? {} : { number: row.number }),
       title: row.option.title,
-      current: row.option.footer === "current"
+      current: row.option.footer === "current",
+      badge: row.option.badge
     })), width);
 }
 
 function overlaySubtitle(frame: OverlayFrame): string {
   if (frame.kind === "model") return "choose what model to use";
   if (frame.kind === "mcp") return frame.serverID ? "auth, tools, resources, and templates" : "review configured mcp servers";
+  if (frame.kind === "email") return "choose primary and secondary inboxes or add imap";
   if (frame.kind === "sessions") return "resume a saved chat";
   if (frame.kind === "agents") return "inspect subagent sessions and background work";
   if (frame.kind === "palette") return "run a tui action";
@@ -568,7 +571,7 @@ function overlayHint(
 ): string {
   const enabled = matches.filter((match) => !match.option.disabled);
   const index = selectableIndex(matches, frame.index);
-  const selected = index >= 0 ? enabled[index]?.option.value as { kind?: string; providerID?: string } | undefined : undefined;
+  const selected = index >= 0 ? enabled[index]?.option.value as { kind?: string; providerID?: string; emailId?: string; persistent?: boolean } | undefined : undefined;
   if (frame.kind === "mcp") {
     const serverID = frame.serverID ?? (selected?.kind === "mcp_server" ? (selected as { serverID?: string }).serverID : undefined);
     const server = mcpServers.find((item) => item.id === serverID);
@@ -583,6 +586,13 @@ function overlayHint(
     if (frame.serverID) return actions;
     if (selected?.kind === "mcp_action") return "enter add · ctrl+a add server · esc back";
     return `enter details · ctrl+a add · ${actions}`;
+  }
+  if (frame.kind === "email") {
+    if (selected?.kind === "email_action") return "enter add email · ctrl+a add · esc back";
+    if (selected?.kind !== "email") return "ctrl+a add email · esc back";
+    return selected.persistent
+      ? "ctrl+p primary · ctrl+s secondary · ctrl+e edit · ctrl+t test · ctrl+d remove · esc back"
+      : "ctrl+p primary · ctrl+s secondary · esc back";
   }
   if (frame.kind !== "model") return "press enter to confirm or esc to go back";
   if (selected?.kind === "model_action") return "enter add provider · ctrl+a add · esc back";

@@ -21,6 +21,7 @@ import { interactionTools } from "./interaction";
 import { mcpResourceTools } from "./mcp-resources";
 import { worktreeTools } from "./worktree";
 import { proxyTools } from "./proxy";
+import { emailTools } from "./email";
 import { getMcpTool, listMcpTools } from "./mcp-manager";
 
 export const baseTools: ToolDefinition[] = [
@@ -44,7 +45,8 @@ export const baseTools: ToolDefinition[] = [
   ...interactionTools,
   ...mcpResourceTools,
   ...worktreeTools,
-  ...proxyTools
+  ...proxyTools,
+  ...emailTools
 ];
 
 export function registerTool(tool: ToolDefinition): void {

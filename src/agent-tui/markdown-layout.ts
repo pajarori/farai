@@ -9,6 +9,7 @@ import { terminalWidth } from "./terminal-text";
 import { COLOR } from "./theme";
 
 const tableRuleColor = parseColor(COLOR.dim);
+const tableMaxWidth = 120;
 const tableResizeHooks = new WeakSet<TextTableRenderable>();
 const enhancedTables = new WeakMap<TextTableRenderable, {
   source: TextChunk[][][];
@@ -51,15 +52,21 @@ function applyTableHeaderRule(table: TextTableRenderable): void {
   table.cellPaddingX = 1;
   table.cellPaddingY = 0;
   table.columnGap = 2;
+  table.maxWidth = tableMaxWidth;
   table.border = false;
   table.outerBorder = false;
   table.showBorders = false;
 
   if (state.source.length < 2) return;
-  const width = Math.max(1, table.width || table.ctx.width);
+  const parentWidth = table.parent?.width || table.ctx.width;
+  const width = Math.max(1, Math.min(tableMaxWidth, parentWidth));
   if (state.decorated !== state.source && state.width === width && table.content === state.decorated) return;
   state.width = width;
-  state.decorated = [state.source[0]!, tableSeparatorRow(state.source, width), ...state.source.slice(1)];
+  state.decorated = [
+    state.source[0]!,
+    tableSeparatorRow(state.source, width),
+    ...state.source.slice(1)
+  ];
   table.content = state.decorated;
 
   if (tableResizeHooks.has(table)) return;

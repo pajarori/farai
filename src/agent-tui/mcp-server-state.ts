@@ -1,4 +1,5 @@
 import type { McpServerInfo, SaveMcpServerInput } from "../agent-core/mcp-server-management";
+import { isSensitiveMcpField } from "../agent-core/mcp-secret-fields";
 import type { McpServerProbeResult } from "../agent-tools/mcp-manager";
 
 export type McpServerWizardField = "id" | "transport" | "endpoint" | "authentication" | "credential" | "oauth" | "environment" | "behavior" | "tools" | "review";
@@ -136,6 +137,8 @@ export function mcpWizardSaveInput(state: McpServerWizardState): SaveMcpServerIn
       auth: state.auth,
       ...(state.auth === "bearer" && environment.bearerTokenEnvVar ? { bearerTokenEnvVar: environment.bearerTokenEnvVar } : {}),
       httpHeaders: environment.values,
+      secretHttpHeaders: environment.secrets,
+      retainedSecretHttpHeaders: environment.retained,
       envHttpHeaders: environment.references,
       ...(state.auth === "oauth" && toText(oauth.client_id) ? { oauthClientId: toText(oauth.client_id) } : {}),
       ...(state.auth === "oauth" && toText(oauth.callback_url) ? { oauthCallbackUrl: toText(oauth.callback_url) } : {}),
@@ -151,6 +154,8 @@ export function mcpWizardSaveInput(state: McpServerWizardState): SaveMcpServerIn
     args: parts.slice(1),
     ...(environment.cwd ? { cwd: environment.cwd } : {}),
     env: environment.values,
+    secretEnv: environment.secrets,
+    retainedSecretEnv: environment.retained,
     envVars: environment.forwarded,
     runInContainer: parseBoolean(behavior.container, true)
   };
@@ -168,6 +173,7 @@ function serializeEnvironment(server: McpServerInfo): string {
   if (server.transport === "http") {
     return [
       ...Object.entries(server.httpHeaders).map(([name, value]) => `${name}=${value}`),
+      ...(server.secretHttpHeaders ?? []).map((name) => `${name}=<stored>`),
       ...Object.entries(server.envHttpHeaders).map(([name, env]) => `${name}=$${env}`),
       server.bearerTokenEnvVar ? `bearer=$${server.bearerTokenEnvVar}` : undefined
     ].filter(Boolean).join("; ");
@@ -175,6 +181,7 @@ function serializeEnvironment(server: McpServerInfo): string {
   return [
     server.cwd ? `cwd=${server.cwd}` : undefined,
     ...Object.entries(server.env).map(([name, value]) => `${name}=${value}`),
+    ...(server.secretEnvVars ?? []).map((name) => `${name}=<stored>`),
     ...server.envVars.map((name) => `$${name}`)
   ].filter(Boolean).join("; ");
 }
@@ -204,11 +211,15 @@ function parseEnvironment(value: string, transport: "stdio" | "http"): {
   cwd?: string;
   bearerTokenEnvVar?: string;
   values: Record<string, string>;
+  secrets: Record<string, string>;
   references: Record<string, string>;
+  retained: string[];
   forwarded: string[];
 } {
   const values: Record<string, string> = {};
+  const secrets: Record<string, string> = {};
   const references: Record<string, string> = {};
+  const retained: string[] = [];
   const forwarded: string[] = [];
   let cwd: string | undefined;
   let bearerTokenEnvVar: string | undefined;
@@ -237,13 +248,21 @@ function parseEnvironment(value: string, transport: "stdio" | "http"): {
       } else {
         references[name] = reference;
       }
+    } else if (entry === "<stored>") {
+      retained.push(name);
+    } else if (entry.startsWith("!") || isSensitiveMcpField(transport === "stdio" ? "env" : "http-header", name)) {
+      const secret = entry.startsWith("!") ? entry.slice(1) : entry;
+      if (!secret) throw new Error(`${name} secret cannot be empty`);
+      secrets[name] = secret;
     } else values[name] = entry;
   }
   return {
     ...(cwd ? { cwd } : {}),
     ...(bearerTokenEnvVar ? { bearerTokenEnvVar } : {}),
     values,
+    secrets,
     references,
+    retained: [...new Set(retained)],
     forwarded
   };
 }

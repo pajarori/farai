@@ -11,6 +11,7 @@ import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } fr
 import { isMcpBackboneServer } from "./mcp-builtins";
 import { takeBytes } from "./shared/output-bound";
 import { FARAI_VERSION } from "../version";
+import { deleteMcpHeader, mergeMcpHeaders } from "../agent-core/mcp-headers";
 
 type ExternalMcpServerCommon = {
   name: string;
@@ -36,6 +37,7 @@ export type ExternalMcpServer = ExternalMcpServerCommon & {
   cwd?: string;
   env?: Record<string, string>;
   envVars?: string[];
+  secretEnvVars?: string[];
   runInContainer: boolean;
   url?: string;
   auth?: "none" | "oauth";
@@ -48,6 +50,7 @@ export type ExternalMcpServer = ExternalMcpServerCommon & {
   bearerToken?: string;
   httpHeaders?: Record<string, string>;
   envHttpHeaders?: Record<string, string>;
+  secretHttpHeaders?: string[];
 };
 
 export type ExternalMcpHttpServer = ExternalMcpServer & { type: "http"; url: string };
@@ -240,8 +243,9 @@ export function normalizeMcpServerEntry(entry: Record<string, unknown>): Externa
     ...(isRecord(obj.mitmproxy) ? { mitmproxy: normalizeMitmproxyConfig(obj.mitmproxy) } : {})
   } satisfies ExternalMcpServerCommon;
   if (url) {
-    const httpHeaders = stringRecord(obj.http_headers ?? obj.httpHeaders);
-    const envHttpHeaders = stringRecord(obj.env_http_headers ?? obj.envHttpHeaders);
+    const httpHeaders = mergeMcpHeaders(stringRecord(obj.http_headers ?? obj.httpHeaders));
+    const envHttpHeaders = mergeMcpHeaders(stringRecord(obj.env_http_headers ?? obj.envHttpHeaders));
+    const secretHttpHeaders = stringArray(obj.secret_http_headers ?? obj.secretHttpHeaders);
     return {
       ...common,
       type: "http",
@@ -257,14 +261,16 @@ export function normalizeMcpServerEntry(entry: Record<string, unknown>): Externa
       ...(typeof (obj.bearer_token ?? obj.bearerToken) === "string"
         ? { bearerToken: String(obj.bearer_token ?? obj.bearerToken) }
         : {}),
-      ...(httpHeaders ? { httpHeaders } : {}),
-      ...(envHttpHeaders ? { envHttpHeaders } : {})
+      ...(Object.keys(httpHeaders).length ? { httpHeaders } : {}),
+      ...(Object.keys(envHttpHeaders).length ? { envHttpHeaders } : {}),
+      ...(secretHttpHeaders.length ? { secretHttpHeaders } : {})
     };
   }
   const env = isRecord(obj.env)
     ? Object.fromEntries(Object.entries(obj.env).filter((item): item is [string, string] => typeof item[1] === "string"))
     : undefined;
   const envVars = obj.env_vars ?? obj.envVars;
+  const secretEnvVars = stringArray(obj.secret_env ?? obj.secretEnv);
   return {
     ...common,
     type: "stdio",
@@ -273,6 +279,7 @@ export function normalizeMcpServerEntry(entry: Record<string, unknown>): Externa
     ...(typeof obj.cwd === "string" ? { cwd: obj.cwd } : {}),
     ...(env && Object.keys(env).length > 0 ? { env } : {}),
     ...(Array.isArray(envVars) ? { envVars: envVars.map(String) } : {}),
+    ...(secretEnvVars.length ? { secretEnvVars } : {}),
     runInContainer: (obj.run_in_container ?? obj.runInContainer) !== false
   };
 }
@@ -1648,10 +1655,13 @@ function normalizeMcpUrl(value: string): string {
 }
 
 function resolveHttpHeaders(server: ExternalMcpHttpServer): Record<string, string> {
-  const headers = { ...(server.httpHeaders ?? {}) };
+  const headers = mergeMcpHeaders(server.httpHeaders);
   for (const [name, envName] of Object.entries(server.envHttpHeaders ?? {})) {
     const value = process.env[envName];
-    if (value !== undefined) headers[name] = value;
+    if (value !== undefined) {
+      deleteMcpHeader(headers, name);
+      headers[name] = value;
+    }
   }
   const token = server.bearerToken ?? (server.bearerTokenEnvVar ? process.env[server.bearerTokenEnvVar] : undefined);
   if (token && !Object.keys(headers).some((name) => name.toLowerCase() === "authorization")) {
@@ -1685,6 +1695,10 @@ function secondsOrMs(secondsValue: unknown, msValue: unknown, fallback: number):
   if (typeof secondsValue === "number" && Number.isFinite(secondsValue) && secondsValue > 0) return Math.round(secondsValue * 1000);
   if (typeof msValue === "number" && Number.isFinite(msValue) && msValue > 0) return Math.round(msValue);
   return fallback;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))] : [];
 }
 
 function normalizeMitmproxyConfig(value: Record<string, unknown>): NonNullable<ExternalMcpServer["mitmproxy"]> {

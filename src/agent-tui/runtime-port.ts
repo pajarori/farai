@@ -36,6 +36,9 @@ import { HEURISTIC_MODEL_ID } from "../agent-core/model-registry";
 import type { ContextManifest } from "../agent-core/context-engine";
 import { browserContextManager, type BrowserContextActivity } from "../agent-tools/browser/context-manager";
 import { listConfiguredMcpServers, removeMcpServer, saveMcpServer, setMcpServerEnabled, type McpServerInfo, type SaveMcpServerInput } from "../agent-core/mcp-server-management";
+import { listEmailAccounts, probeEmailAccount, removeEmailAccount, saveEmailAccount } from "../agent-email/accounts";
+import { disposableInboxManager } from "../agent-email/tempmail";
+import type { DisposableInboxActivity, EmailAccountInfo, EmailAccountProbe, ProbeEmailAccountInput, SaveEmailAccountInput } from "../agent-email/types";
 
 export type TuiEvent =
   | { type: "event.appended"; sessionId: string; event: SessionEvent }
@@ -57,6 +60,7 @@ export type SessionSnapshot = {
   toolInputPreviews: import("../types").ToolInputPreview[];
   backgroundActivities: BackgroundActivitySummary[];
   browserContexts: BrowserContextActivity[];
+  disposableInboxes?: DisposableInboxActivity[];
   subagents?: SubagentActivity[];
   todos: TodoItem[];
   evidence: Evidence[];
@@ -71,7 +75,7 @@ export type SessionSnapshot = {
   pendingUserInput?: PendingUserInput | undefined;
 };
 
-export type ActivityState = Pick<SessionSnapshot, "backgroundActivities" | "browserContexts" | "subagents" | "pendingSteers" | "queuedPrompts">;
+export type ActivityState = Pick<SessionSnapshot, "backgroundActivities" | "browserContexts" | "disposableInboxes" | "subagents" | "pendingSteers" | "queuedPrompts">;
 
 export type BackgroundActivitySummary = {
   id: string;
@@ -140,6 +144,17 @@ export type McpCatalogSnapshot = {
   statuses: McpServerRuntimeStatus[];
 };
 
+export type EmailCatalogSnapshot = {
+  accounts: EmailAccountInfo[];
+};
+
+export type RemoveEmailAccountResult = {
+  id: string;
+  location: "global" | "project";
+  accountRemains: boolean;
+  updatedSessions: number;
+};
+
 export interface TuiRuntimePort {
   listSessions(): Promise<Session[]>;
   listSessionItems(): Promise<SessionListItem[]>;
@@ -161,6 +176,10 @@ export interface TuiRuntimePort {
   probeModelProvider(input: ProbeModelProviderInput, signal?: AbortSignal): Promise<ModelProviderProbe>;
   saveModelProvider(input: SaveModelProviderInput): Promise<ModelCatalogSnapshot>;
   removeModelProvider(providerID: string): Promise<RemoveModelProviderResult>;
+  loadEmailCatalog(): Promise<EmailCatalogSnapshot>;
+  probeEmailAccount(input: ProbeEmailAccountInput, signal?: AbortSignal): Promise<EmailAccountProbe>;
+  saveEmailAccount(input: SaveEmailAccountInput, signal?: AbortSignal): Promise<EmailCatalogSnapshot>;
+  removeEmailAccount(accountID: string): Promise<RemoveEmailAccountResult>;
   refreshMcp(): Promise<void>;
   loadMcpCatalog(): Promise<McpCatalogSnapshot>;
   listMcpStatuses(): Promise<McpServerRuntimeStatus[]>;
@@ -227,6 +246,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
   let activeSessionId: string | undefined;
   let unsubscribeStore: (() => void) | undefined;
   let unsubscribeBrowserContexts: (() => void) | undefined;
+  let unsubscribeDisposableInboxes: (() => void) | undefined;
   let eventSubscription: EventSubscription | undefined;
   let eventCursor = 0;
   let sessionsCache: string | undefined;
@@ -407,6 +427,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     const toolCalls = store.listToolCalls(sessionId, 25);
     const backgroundActivities = summarizeBackgroundActivities(store, sessionId);
     const browserContexts = browserContextManager.list(sessionId);
+    const disposableInboxes = disposableInboxManager.list(sessionId);
     const subagents = summarizeSubagents(store, sessionId);
     const todos = store.listTodos(sessionId, { limit: 25 });
     const evidence = store.listEvidence(sessionId);
@@ -423,6 +444,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       toolInputPreviews: [],
       backgroundActivities,
       browserContexts,
+      disposableInboxes,
       subagents,
       todos,
       evidence,
@@ -613,7 +635,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       return probeModelProvider(runtime.workspace, input, signal);
     },
     async saveModelProvider(input) {
-      saveModelProvider(runtime.workspace, input);
+      await saveModelProvider(runtime.workspace, input);
       const catalog = await buildModelCatalog(runtime.workspace, loadModelProfiles(runtime.workspace));
       enqueue({ type: "sessions.changed" });
       return {
@@ -622,7 +644,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       };
     },
     async removeModelProvider(providerID) {
-      const removed = removeModelProvider(runtime.workspace, providerID);
+      const removed = await removeModelProvider(runtime.workspace, providerID);
       const catalog = await buildModelCatalog(runtime.workspace, loadModelProfiles(runtime.workspace));
       const choices = modelChoicesFromCatalog(catalog);
       const validModels = new Set(choices.map((choice) => choice.model));
@@ -637,6 +659,30 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       if (activeSessionId && updatedSessions > 0) enqueue({ type: "snapshot.changed", sessionId: activeSessionId });
       return { ...removed, fallbackModel, updatedSessions };
     },
+    async loadEmailCatalog() {
+      return { accounts: listEmailAccounts(runtime.workspace) };
+    },
+    async probeEmailAccount(input, signal) {
+      return await probeEmailAccount(runtime.workspace, input, signal);
+    },
+    async saveEmailAccount(input, signal) {
+      await saveEmailAccount(runtime.workspace, input, signal);
+      return { accounts: listEmailAccounts(runtime.workspace) };
+    },
+    async removeEmailAccount(emailId) {
+      const removed = await removeEmailAccount(runtime.workspace, emailId);
+      let updatedSessions = 0;
+      for (const session of store.listSessions(100_000, { includeArchived: true })) {
+        const patch: SessionPatch = {};
+        if (session.emailPrimaryId === emailId) patch.emailPrimaryId = null;
+        if (session.emailSecondaryId === emailId) patch.emailSecondaryId = null;
+        if (Object.keys(patch).length === 0) continue;
+        runtime.updateSession(session.id, patch);
+        updatedSessions += 1;
+      }
+      if (activeSessionId && updatedSessions > 0) enqueue({ type: "snapshot.changed", sessionId: activeSessionId });
+      return { ...removed, updatedSessions };
+    },
     async refreshMcp() {
       if (!activeSessionId) return;
       const session = runtime.loadSession(activeSessionId);
@@ -644,7 +690,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     },
     async loadMcpCatalog() {
       return {
-        servers: listConfiguredMcpServers(runtime.workspace),
+        servers: await listConfiguredMcpServers(runtime.workspace),
         statuses: listMcpServerStatuses(activeSessionId)
       };
     },
@@ -656,26 +702,26 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       return await runtime.probeMcpServer(runtime.loadSession(activeSessionId), input, signal);
     },
     async saveMcpServer(input) {
-      saveMcpServer(runtime.workspace, input);
-      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId));
+      await saveMcpServer(runtime.workspace, input);
+      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId), { force: true });
       return {
-        servers: listConfiguredMcpServers(runtime.workspace),
+        servers: await listConfiguredMcpServers(runtime.workspace),
         statuses: listMcpServerStatuses(activeSessionId)
       };
     },
     async removeMcpServer(serverID) {
-      removeMcpServer(runtime.workspace, serverID);
-      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId));
+      await removeMcpServer(runtime.workspace, serverID);
+      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId), { force: true });
       return {
-        servers: listConfiguredMcpServers(runtime.workspace),
+        servers: await listConfiguredMcpServers(runtime.workspace),
         statuses: listMcpServerStatuses(activeSessionId)
       };
     },
     async setMcpServerEnabled(serverID, enabled) {
-      setMcpServerEnabled(runtime.workspace, serverID, enabled);
-      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId));
+      await setMcpServerEnabled(runtime.workspace, serverID, enabled);
+      if (activeSessionId) await runtime.refreshMcp(runtime.loadSession(activeSessionId), { force: true });
       return {
-        servers: listConfiguredMcpServers(runtime.workspace),
+        servers: await listConfiguredMcpServers(runtime.workspace),
         statuses: listMcpServerStatuses(activeSessionId)
       };
     },
@@ -703,6 +749,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       return {
         backgroundActivities: summarizeBackgroundActivities(store, sessionId),
         browserContexts: browserContextManager.list(sessionId),
+        disposableInboxes: disposableInboxManager.list(sessionId),
         subagents: summarizeSubagents(store, sessionId),
         pendingSteers: runtime.listPendingSteeringInputs(sessionId),
         queuedPrompts: runtime.listQueuedFollowupInputs(sessionId)
@@ -744,9 +791,14 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       if (sessionId === activeSessionId) return;
       unsubscribeBrowserContexts?.();
       unsubscribeBrowserContexts = undefined;
+      unsubscribeDisposableInboxes?.();
+      unsubscribeDisposableInboxes = undefined;
       activeSessionId = sessionId;
       if (sessionId) {
         unsubscribeBrowserContexts = browserContextManager.subscribe(sessionId, () => {
+          enqueue({ type: "snapshot.changed", sessionId });
+        });
+        unsubscribeDisposableInboxes = disposableInboxManager.subscribe(sessionId, () => {
           enqueue({ type: "snapshot.changed", sessionId });
         });
       }
@@ -786,6 +838,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       disposed = true;
       unsubscribeStore?.(); unsubscribeStore = undefined;
       unsubscribeBrowserContexts?.(); unsubscribeBrowserContexts = undefined;
+      unsubscribeDisposableInboxes?.(); unsubscribeDisposableInboxes = undefined;
       eventSubscription?.close(); eventSubscription = undefined;
       stopFallback();
       if (flushTimer) clearTimeout(flushTimer);

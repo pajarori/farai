@@ -9,6 +9,7 @@ export type OverlayKind =
   | "agents"
   | "model"
   | "mcp"
+  | "email"
   | "detail"
   | "report"
   | "container";
@@ -23,7 +24,8 @@ const LIST_OVERLAYS: ReadonlySet<OverlayKind> = new Set([
   "memory",
   "agents",
   "model",
-  "mcp"
+  "mcp",
+  "email"
 ]);
 
 export function isListOverlay(kind: OverlayKind): boolean {
@@ -108,7 +110,21 @@ export type RouterAction =
   | { kind: "mcp.editServer" }
   | { kind: "mcp.testServer" }
   | { kind: "mcp.toggleServer" }
-  | { kind: "mcp.removeServer" };
+  | { kind: "mcp.removeServer" }
+  | { kind: "emailAccount.next"; test?: boolean }
+  | { kind: "emailAccount.back" }
+  | { kind: "emailAccount.providerMove"; delta: number }
+  | { kind: "emailAccount.storageMove"; delta: number }
+  | { kind: "emailAccount.secretBackspace" }
+  | { kind: "emailAccount.credentialRemove" }
+  | { kind: "emailAccountRemoval.confirm" }
+  | { kind: "emailAccountRemoval.cancel" }
+  | { kind: "email.add" }
+  | { kind: "email.edit" }
+  | { kind: "email.test" }
+  | { kind: "email.remove" }
+  | { kind: "email.primary" }
+  | { kind: "email.secondary" };
 
 export type RouteResult =
   | { type: "consumed"; actions: RouterAction[] }
@@ -156,6 +172,14 @@ export type RouterContext = {
   mcpServerRemoval?: {
     busy: boolean;
   };
+  emailAccountWizard?: {
+    field: "provider" | "label" | "address" | "username" | "endpoint" | "credential" | "storage" | "review";
+    busy: boolean;
+    cancellable?: boolean;
+  };
+  emailAccountRemoval?: {
+    busy: boolean;
+  };
   modelOverlay?: {
     providerID?: string;
     removable: boolean;
@@ -164,6 +188,10 @@ export type RouterContext = {
     serverID?: string;
     toggleable: boolean;
     removable: boolean;
+  };
+  emailOverlay?: {
+    emailId?: string;
+    persistent: boolean;
   };
 };
 
@@ -227,13 +255,15 @@ export function slashActive(ctx: RouterContext): boolean {
 }
 
 export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
+  if (ctx.emailAccountRemoval) return routeEmailAccountRemoval(key, ctx.emailAccountRemoval);
+  if (ctx.emailAccountWizard) return routeEmailAccountWizard(key, ctx.emailAccountWizard);
   if (ctx.mcpServerRemoval) return routeMcpServerRemoval(key, ctx.mcpServerRemoval);
   if (ctx.mcpServerWizard) return routeMcpServerWizard(key, ctx.mcpServerWizard);
   if (ctx.modelProviderRemoval) return routeModelProviderRemoval(key, ctx.modelProviderRemoval);
   if (ctx.modelProviderWizard) return routeModelProviderWizard(key, ctx.modelProviderWizard);
   if (ctx.pendingUserInput && key.ctrl && key.name === "q") return consumed({ kind: "requestUserInput.show" });
   if (ctx.requestUserInput) return routeRequestUserInput(key, ctx.requestUserInput);
-  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay, ctx.mcpOverlay);
+  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay, ctx.mcpOverlay, ctx.emailOverlay);
   if (ctx.centerSurfaceKind) return routeCenterSurface(key, ctx.centerSurfaceKind, ctx.centerProxyFlowKind, ctx.centerSurfaceBusy);
   if (ctx.historySearchActive) return routeHistorySearch(key);
   if (slashActive(ctx)) {
@@ -242,6 +272,43 @@ export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
 
   }
   return routeBase(key, ctx);
+}
+
+function routeEmailAccountRemoval(key: KeyToken, state: NonNullable<RouterContext["emailAccountRemoval"]>): RouteResult {
+  if (state.busy) return consumed();
+  if (key.name === "return") return consumed({ kind: "emailAccountRemoval.confirm" });
+  if (key.name === "escape" || (key.ctrl && key.name === "c")) return consumed({ kind: "emailAccountRemoval.cancel" });
+  return consumed();
+}
+
+function routeEmailAccountWizard(key: KeyToken, state: NonNullable<RouterContext["emailAccountWizard"]>): RouteResult {
+  if (state.busy) return key.name === "escape" && state.cancellable ? consumed({ kind: "emailAccount.back" }) : consumed();
+  if (key.name === "escape") return consumed({ kind: "emailAccount.back" });
+  if (state.field === "provider") {
+    if (key.name === "up" || key.name === "left") return consumed({ kind: "emailAccount.providerMove", delta: -1 });
+    if (key.name === "down" || key.name === "right") return consumed({ kind: "emailAccount.providerMove", delta: 1 });
+    if (key.name === "return") return consumed({ kind: "emailAccount.next" });
+    return consumed();
+  }
+  if (state.field === "storage") {
+    if (key.name === "up" || key.name === "left") return consumed({ kind: "emailAccount.storageMove", delta: -1 });
+    if (key.name === "down" || key.name === "right") return consumed({ kind: "emailAccount.storageMove", delta: 1 });
+    if (key.name === "return") return consumed({ kind: "emailAccount.next" });
+    return consumed();
+  }
+  if (state.field === "credential") {
+    if (key.ctrl && key.name === "r") return consumed({ kind: "emailAccount.credentialRemove" });
+    if (key.name === "backspace") return consumed({ kind: "emailAccount.secretBackspace" });
+    if (key.name === "return") return consumed({ kind: "emailAccount.next" });
+    return PASSTHROUGH;
+  }
+  if (state.field === "review") {
+    if (key.ctrl && key.name === "s") return consumed({ kind: "emailAccount.next", test: false });
+    if (key.name === "return") return consumed({ kind: "emailAccount.next", test: true });
+    return consumed();
+  }
+  if (key.name === "return") return consumed({ kind: "emailAccount.next" });
+  return PASSTHROUGH;
 }
 
 function routeMcpServerRemoval(key: KeyToken, state: NonNullable<RouterContext["mcpServerRemoval"]>): RouteResult {
@@ -347,7 +414,7 @@ function routeRequestUserInput(key: KeyToken, state: NonNullable<RouterContext["
   }
 }
 
-function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["modelOverlay"], mcp?: RouterContext["mcpOverlay"]): RouteResult {
+function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["modelOverlay"], mcp?: RouterContext["mcpOverlay"], email?: RouterContext["emailOverlay"]): RouteResult {
   if (key.ctrl && key.name === "c") return consumed({ kind: "overlay.pop" });
   if (key.name === "escape") return consumed({ kind: "overlay.pop" });
 
@@ -357,6 +424,14 @@ function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["m
       if (key.name === "t" && model?.providerID) return consumed({ kind: "model.testProvider" });
       if (key.name === "e" && model?.providerID && model.removable) return consumed({ kind: "model.editProvider" });
       if (key.name === "d" && model?.providerID && model.removable) return consumed({ kind: "model.removeProvider" });
+    }
+    if (kind === "email" && key.ctrl) {
+      if (key.name === "a") return consumed({ kind: "email.add" });
+      if (key.name === "p" && email?.emailId) return consumed({ kind: "email.primary" });
+      if (key.name === "s" && email?.emailId) return consumed({ kind: "email.secondary" });
+      if (key.name === "t" && email?.emailId && email.persistent) return consumed({ kind: "email.test" });
+      if (key.name === "e" && email?.emailId && email.persistent) return consumed({ kind: "email.edit" });
+      if (key.name === "d" && email?.emailId && email.persistent) return consumed({ kind: "email.remove" });
     }
     if (kind === "mcp" && key.ctrl) {
       if (key.name === "a") return consumed({ kind: "mcp.addServer" });

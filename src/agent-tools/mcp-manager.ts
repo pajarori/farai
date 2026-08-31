@@ -2,7 +2,10 @@ import type { Session, ToolContext, ToolDefinition, ToolResult, UserInputAnswer,
 import { containerNameForSession, KaliContainerBackend } from "../agent-container/kali";
 import type { ContainerLifecyclePort } from "../agent-container/lifecycle";
 import { DEFAULT_MITMPROXY_PORT, McpHttpClient, McpStdioClient, loadExternalMcpConfig, mcpOAuthStateAuthenticated, mcpServersFromConfig, type ExternalMcpServer, type McpCatalogChange, type McpClientTransport, type McpElicitationResult, type McpFormElicitationRequest, type McpOAuthState, type McpPromptDescriptor, type McpPromptResult, type McpResourceDescriptor, type McpResourceTemplateDescriptor, type McpToolDescriptor } from "./mcp-adapter";
-import { authPath, configPath, loadAuth, loadConfig, loadRawConfig, readAuth, resolveProxyConfig, writeAuthEntry } from "../agent-core/config";
+import { configPath, loadConfig, loadRawConfig, resolveProxyConfig, updateConfig, writeConfig, type ConfigLocation } from "../agent-core/config";
+import { deleteCredentialSync, readCredential, readCredentialSync, writeCredential, writeCredentialSync } from "../agent-core/credential-store";
+import { emptyMcpSecretFields, isSensitiveMcpField, readMcpSecretFields, writeMcpSecretFields, type McpSecretFields } from "../agent-core/mcp-secret-fields";
+import { deleteMcpHeader, getMcpHeader, mergeMcpHeaders } from "../agent-core/mcp-headers";
 import { defaultHumanRenderer, defaultModelRenderer } from "./shared/renderers";
 import { TOOL_NAME_MAX_LENGTH } from "../tool-names";
 import { loadMcpCachedCatalog, mcpCatalogSignature, saveMcpCachedCatalog } from "./mcp-cache";
@@ -316,7 +319,7 @@ export class McpServerManager {
     }
 
     const running = this.backgroundRefreshes.get(plan.signature);
-    if (running) {
+    if (running && !input.force) {
       return input.background ? this.listTools(plan.scope) : await running.task;
     }
 
@@ -489,14 +492,17 @@ export class McpServerManager {
 
   private async refreshOneServer(input: McpRefreshInput, scope: string, config: ExternalMcpServer, epoch: number): Promise<ServerRefreshOutcome> {
     if (!this.isRefreshCurrent(scope, epoch)) return { status: "cancelled", server: config.name };
-    if (!config.autoStart && !config.required) return await this.loadLazyServer(input, scope, config, epoch);
+    const key = scopedServerKey(input.session, config.name);
+    const existing = this.servers.get(key);
+    if (!config.autoStart && !config.required && !existing?.client.isRunning() && !existing?.activationTask) {
+      return await this.loadLazyServer(input, scope, config, epoch);
+    }
     const statuses = this.statusMap(scope);
     try {
       input.onStartupEvent?.({ type: "mcp_startup_update", server: config.name, status: { state: "starting" } });
       this.markServerStarting(scope, config, input.configWorkspace ?? input.workspace);
       const prepared = await this.prepareConfig(input, config);
       if (!this.isRefreshCurrent(scope, epoch)) return { status: "cancelled", server: config.name };
-      const key = scopedServerKey(input.session, config.name);
       let managed = this.servers.get(key);
       if (managed) this.suspendCatalogRefresh(key, managed);
       if (!managed || !managed.client.isRunning() || !sameProcessConfig(managed.config, prepared)) {
@@ -604,7 +610,7 @@ export class McpServerManager {
   private async loadLazyServer(input: McpRefreshInput, scope: string, config: ExternalMcpServer, epoch: number): Promise<ServerRefreshOutcome> {
     const key = scopedServerKey(input.session, config.name);
     let managed = this.servers.get(key);
-    if (managed && mcpCatalogSignature(managed.catalogConfig) === mcpCatalogSignature(config) && managed.client.isRunning()) {
+    if (!input.force && managed && mcpCatalogSignature(managed.catalogConfig) === mcpCatalogSignature(config) && managed.client.isRunning()) {
       this.updateManagedCallbacks(managed, input);
       const existing = this.statusMap(scope).get(config.name);
       this.statusMap(scope).set(config.name, {
@@ -615,7 +621,7 @@ export class McpServerManager {
       });
       return { status: "ready", server: config.name };
     }
-    if (!managed || mcpCatalogSignature(managed.catalogConfig) !== mcpCatalogSignature(config)) {
+    if ((input.force && managed) || !managed || mcpCatalogSignature(managed.catalogConfig) !== mcpCatalogSignature(config)) {
       if (managed) this.suspendCatalogRefresh(key, managed);
       await managed?.client.stop().catch(() => {});
       if (!this.isRefreshCurrent(scope, epoch)) return { status: "cancelled", server: config.name };
@@ -1392,10 +1398,12 @@ function refreshSignature(input: McpRefreshInput, configs: ExternalMcpServer[]):
       cwd: config.cwd,
       env: config.env,
       envVars: config.envVars,
+      secretEnvVars: config.secretEnvVars,
       bearerTokenEnvVar: config.bearerTokenEnvVar,
       bearerToken: config.bearerToken,
       httpHeaders: config.httpHeaders,
       envHttpHeaders: config.envHttpHeaders,
+      secretHttpHeaders: config.secretHttpHeaders,
       auth: config.auth,
       oauth: config.oauth,
       runInContainer: config.runInContainer,
@@ -1705,9 +1713,21 @@ function isPlaywrightMcpServer(config: ExternalMcpServer): boolean {
 }
 
 export async function prepareMcpServerProcess(input: McpRefreshInput, config: ExternalMcpServer): Promise<ExternalMcpServer> {
-  const resolved = applyMcpRuntimeTemplates(input, config);
+  const templated = applyMcpRuntimeTemplates(input, config);
+  const configWorkspace = input.configWorkspace ?? input.workspace;
+  const location = mcpConfigLocation(templated.name, configWorkspace);
+  const resolved = await resolveMcpRuntimeSecretFields(templated, location, configWorkspace);
   if (resolved.type === "http") {
-    const storedToken = loadAuth(input.configWorkspace ?? input.workspace)[mcpAuthEntryName(resolved.name)]?.token;
+    let storedToken = await readCredential("mcp-bearer", resolved.name, location, configWorkspace).catch(() => undefined);
+    if (resolved.bearerToken) {
+      try {
+        await writeCredential("mcp-bearer", resolved.name, resolved.bearerToken, location, configWorkspace);
+        removeInlineMcpBearer(resolved.name, location, configWorkspace);
+        storedToken = resolved.bearerToken;
+      } catch {
+        storedToken ??= resolved.bearerToken;
+      }
+    }
     return { ...resolved, ...(storedToken ? { bearerToken: storedToken } : {}) };
   }
   if (!resolved.runInContainer) {
@@ -1730,7 +1750,7 @@ export async function prepareMcpServerProcess(input: McpRefreshInput, config: Ex
   if (result.exitCode !== 0) throw new Error(result.stderr || `Could not start MCP container ${containerName}`);
   const containerEnv = mcpProcessEnvironment(resolved);
   return {
-    ...config,
+    ...resolved,
     command: "docker",
     args: [
       "exec",
@@ -1954,16 +1974,21 @@ function createMcpClient(config: ExternalMcpServer, workspace?: string): McpClie
 }
 
 function mcpOAuthStore(config: ExternalMcpServer, workspace?: string): { load(): McpOAuthState; save(state: McpOAuthState): void } {
-  const name = `${mcpAuthEntryName(config.name)}:oauth`;
-  const location = workspace && config.name in (loadRawConfig(configPath("project", workspace)).mcpServers ?? {}) ? "project" : "global";
+  const location = mcpConfigLocation(config.name, workspace);
   return {
     load() {
-      const serialized = readAuth(authPath(location, workspace))[name]?.token;
+      const serialized = readCredentialSync("mcp-oauth", config.name, location, workspace);
       if (!serialized) return {};
+      try { setMcpCredentialMarker(config.name, location, workspace, "oauth_configured", true); } catch {
+      }
       try { return JSON.parse(serialized) as McpOAuthState; } catch { return {}; }
     },
     save(state) {
-      writeAuthEntry(name, { token: JSON.stringify(state) }, location, workspace);
+      const configured = Object.keys(state).length > 0;
+      if (configured) writeCredentialSync("mcp-oauth", config.name, JSON.stringify(state), location, workspace);
+      else deleteCredentialSync("mcp-oauth", config.name, location, workspace);
+      try { setMcpCredentialMarker(config.name, location, workspace, "oauth_configured", configured); } catch {
+      }
     }
   };
 }
@@ -1991,13 +2016,152 @@ function idleMcpStatus(config: ExternalMcpServer, workspace?: string): McpServer
 function mcpServerAuthStatus(config: ExternalMcpServer, workspace?: string, connected = false): McpServerRuntimeStatus["authStatus"] {
   if (config.type !== "http") return "unsupported";
   if (config.auth === "oauth") {
-    if (connected || mcpOAuthStateAuthenticated(mcpOAuthStore(config, workspace).load())) return "oauth";
+    try {
+      if (connected || mcpOAuthStateAuthenticated(mcpOAuthStore(config, workspace).load())) return "oauth";
+    } catch {
+    }
     return "not_logged_in";
   }
   const staticAuthorization = Object.entries(config.httpHeaders ?? {}).some(([name, value]) => name.toLowerCase() === "authorization" && Boolean(value));
   const environmentAuthorization = Object.entries(config.envHttpHeaders ?? {}).some(([name, envName]) => name.toLowerCase() === "authorization" && Boolean(process.env[envName]));
-  if (config.bearerToken || config.bearerTokenEnvVar && process.env[config.bearerTokenEnvVar] || staticAuthorization || environmentAuthorization) return "bearer_token";
+  const storedAuthorization = (config.secretHttpHeaders ?? []).some((name) => name.toLowerCase() === "authorization");
+  let storedBearer: string | undefined;
+  try {
+    storedBearer = workspace ? readCredentialSync("mcp-bearer", config.name, mcpConfigLocation(config.name, workspace), workspace) : undefined;
+  } catch {
+  }
+  if (config.bearerToken || storedBearer || config.bearerTokenEnvVar && process.env[config.bearerTokenEnvVar] || staticAuthorization || environmentAuthorization || storedAuthorization) return "bearer_token";
   return "not_logged_in";
+}
+
+function mcpConfigLocation(serverName: string, workspace?: string): ConfigLocation {
+  return workspace && serverName in (loadRawConfig(configPath("project", workspace)).mcpServers ?? {}) ? "project" : "global";
+}
+
+function removeInlineMcpBearer(serverName: string, location: ConfigLocation, workspace?: string): void {
+  const config = loadRawConfig(configPath(location, workspace));
+  const servers = { ...(config.mcpServers ?? {}) };
+  const entry = servers[serverName];
+  if (!entry) return;
+  const next: Record<string, unknown> = { ...entry, credential_configured: true };
+  delete next.bearer_token;
+  delete next.bearerToken;
+  servers[serverName] = next;
+  writeConfig({ ...config, mcpServers: servers }, location, workspace);
+}
+
+async function resolveMcpRuntimeSecretFields(
+  config: ExternalMcpServer,
+  location: ConfigLocation,
+  workspace: string
+): Promise<ExternalMcpServer> {
+  const inline = inlineMcpRuntimeSecretFields(config);
+  const markerEnv = config.secretEnvVars ?? [];
+  const markerHeaders = config.secretHttpHeaders ?? [];
+  const needsStore = markerEnv.length > 0 || markerHeaders.length > 0 || hasMcpRuntimeSecretFields(inline);
+  if (!needsStore) return config;
+  let stored = emptyMcpSecretFields();
+  try {
+    stored = await readMcpSecretFields(config.name, location, workspace);
+  } catch (error) {
+    const inlineCoversMarkers = markerEnv.every((name) => inline.env[name] !== undefined)
+      && markerHeaders.every((name) => recordValueCaseInsensitive(inline.httpHeaders, name) !== undefined);
+    if (!inlineCoversMarkers) throw error;
+  }
+  const merged: McpSecretFields = {
+    env: { ...stored.env, ...inline.env },
+    httpHeaders: mergeMcpHeaders(stored.httpHeaders, inline.httpHeaders)
+  };
+  const missingEnv = markerEnv.filter((name) => merged.env[name] === undefined);
+  const missingHeaders = markerHeaders.filter((name) => recordValueCaseInsensitive(merged.httpHeaders, name) === undefined);
+  if (missingEnv.length || missingHeaders.length) {
+    const missing = [...missingEnv.map((name) => `env ${name}`), ...missingHeaders.map((name) => `header ${name}`)].join(", ");
+    throw new Error(`MCP server ${config.name} is missing stored secret values for ${missing}`);
+  }
+  if (hasMcpRuntimeSecretFields(inline)) {
+    try {
+      await writeMcpSecretFields(config.name, merged, location, workspace);
+      removeInlineMcpSecretFields(config.name, location, workspace, inline, merged);
+    } catch {
+    }
+  }
+  return {
+    ...config,
+    ...(config.type === "stdio" ? { env: { ...(config.env ?? {}), ...merged.env } } : {}),
+    ...(config.type === "http" ? { httpHeaders: mergeMcpHeaders(config.httpHeaders, merged.httpHeaders) } : {})
+  };
+}
+
+function inlineMcpRuntimeSecretFields(config: ExternalMcpServer): McpSecretFields {
+  const envMarkers = new Set(config.secretEnvVars ?? []);
+  const headerMarkers = new Set((config.secretHttpHeaders ?? []).map((name) => name.toLowerCase()));
+  return {
+    env: Object.fromEntries(Object.entries(config.env ?? {}).filter(([name]) => envMarkers.has(name) || isSensitiveMcpField("env", name))),
+    httpHeaders: Object.fromEntries(Object.entries(config.httpHeaders ?? {}).filter(([name]) => headerMarkers.has(name.toLowerCase()) || isSensitiveMcpField("http-header", name)))
+  };
+}
+
+function hasMcpRuntimeSecretFields(fields: McpSecretFields): boolean {
+  return Object.keys(fields.env).length > 0 || Object.keys(fields.httpHeaders).length > 0;
+}
+
+function removeInlineMcpSecretFields(
+  serverName: string,
+  location: ConfigLocation,
+  workspace: string,
+  inline: McpSecretFields,
+  stored: McpSecretFields
+): void {
+  const config = loadRawConfig(configPath(location, workspace));
+  const servers = { ...(config.mcpServers ?? {}) };
+  const entry = servers[serverName];
+  if (!entry) return;
+  const next: Record<string, unknown> = { ...entry };
+  const env = stringRecordValue(entry.env);
+  for (const name of Object.keys(inline.env)) delete env[name];
+  if (Object.keys(env).length) next.env = env;
+  else delete next.env;
+  const headers = stringRecordValue(entry.http_headers ?? entry.httpHeaders);
+  for (const name of Object.keys(inline.httpHeaders)) deleteRecordValueCaseInsensitive(headers, name);
+  delete next.httpHeaders;
+  if (Object.keys(headers).length) next.http_headers = headers;
+  else delete next.http_headers;
+  const secretEnv = Object.keys(stored.env).sort();
+  const secretHeaders = Object.keys(stored.httpHeaders).sort();
+  if (secretEnv.length) next.secret_env = secretEnv;
+  else delete next.secret_env;
+  if (secretHeaders.length) next.secret_http_headers = secretHeaders;
+  else delete next.secret_http_headers;
+  servers[serverName] = next;
+  writeConfig({ ...config, mcpServers: servers }, location, workspace);
+}
+
+function stringRecordValue(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+}
+
+function recordValueCaseInsensitive(values: Record<string, string>, name: string): string | undefined {
+  return getMcpHeader(values, name);
+}
+
+function deleteRecordValueCaseInsensitive(values: Record<string, string>, name: string): void {
+  deleteMcpHeader(values, name);
+}
+
+function setMcpCredentialMarker(serverName: string, location: ConfigLocation, workspace: string | undefined, marker: string, configured: boolean): void {
+  const current = loadRawConfig(configPath(location, workspace)).mcpServers?.[serverName];
+  if (!current || (current[marker] === true) === configured) return;
+  updateConfig((config) => {
+    const servers = { ...(config.mcpServers ?? {}) };
+    const entry = servers[serverName];
+    if (!entry) return config;
+    const next: Record<string, unknown> = { ...entry };
+    if (configured) next[marker] = true;
+    else delete next[marker];
+    servers[serverName] = next;
+    return { ...config, mcpServers: servers };
+  }, location, workspace);
 }
 
 function toStatusTools(config: ExternalMcpServer, descriptors: McpToolDescriptor[]): Array<{ name: string; description?: string }> {
@@ -2030,10 +2194,6 @@ function applyMcpRuntimeTemplates(input: McpRefreshInput, config: ExternalMcpSer
     ...(config.httpHeaders ? { httpHeaders: Object.fromEntries(Object.entries(config.httpHeaders).map(([key, value]) => [key, replace(value)])) } : {}),
     ...(config.oauth ? { oauth: { ...config.oauth, ...(config.oauth.callbackUrl ? { callbackUrl: replace(config.oauth.callbackUrl) } : {}) } } : {})
   };
-}
-
-export function mcpAuthEntryName(serverName: string): string {
-  return `mcp:${serverName}`;
 }
 
 function isToolEnabled(config: ExternalMcpServer, tool: string): boolean {

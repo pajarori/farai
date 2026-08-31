@@ -136,7 +136,7 @@ export class SqliteStore {
     return this.db;
   }
 
-  async createSession(options: Partial<Pick<Session, "title" | "parentId" | "provider" | "model" | "summary" | "summaryUpdatedAt" | "campaignId">> & { workspace?: string } = {}): Promise<Session> {
+  async createSession(options: Partial<Pick<Session, "title" | "parentId" | "provider" | "model" | "emailPrimaryId" | "emailSecondaryId" | "summary" | "summaryUpdatedAt" | "campaignId">> & { workspace?: string } = {}): Promise<Session> {
     await this.ensure();
     const session: Session = {
       id: id(),
@@ -148,6 +148,8 @@ export class SqliteStore {
       ...(options.campaignId ? { campaignId: options.campaignId } : {}),
       ...(options.provider ? { provider: options.provider } : {}),
       ...(options.model ? { model: options.model } : {}),
+      ...(options.emailPrimaryId ? { emailPrimaryId: options.emailPrimaryId } : {}),
+      ...(options.emailSecondaryId ? { emailSecondaryId: options.emailSecondaryId } : {}),
       ...(options.summary ? { summary: options.summary } : {}),
       ...(options.summaryUpdatedAt ? { summaryUpdatedAt: options.summaryUpdatedAt } : {}),
       createdAt: nowIso(),
@@ -168,8 +170,8 @@ export class SqliteStore {
   upsertSession(session: Session): void {
     this.database()
       .query(
-        `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, provider, model, summary, summary_updated_at, tool_scope_json, archived_at, created_at, updated_at)
-         values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $provider, $model, $summary, $summaryUpdated, $toolScope, $archived, $created, $updated)
+        `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, provider, model, email_primary_id, email_secondary_id, summary, summary_updated_at, tool_scope_json, archived_at, created_at, updated_at)
+         values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $provider, $model, $emailPrimaryId, $emailSecondaryId, $summary, $summaryUpdated, $toolScope, $archived, $created, $updated)
          on conflict(id) do update set
            workspace = excluded.workspace,
            mode = excluded.mode,
@@ -179,6 +181,8 @@ export class SqliteStore {
            campaign_id = excluded.campaign_id,
            provider = excluded.provider,
            model = excluded.model,
+           email_primary_id = excluded.email_primary_id,
+           email_secondary_id = excluded.email_secondary_id,
            summary = excluded.summary,
            summary_updated_at = excluded.summary_updated_at,
            tool_scope_json = excluded.tool_scope_json,
@@ -195,6 +199,8 @@ export class SqliteStore {
         $campaign: session.campaignId ?? null,
         $provider: session.provider ?? null,
         $model: session.model ?? null,
+        $emailPrimaryId: session.emailPrimaryId ?? null,
+        $emailSecondaryId: session.emailSecondaryId ?? null,
         $summary: session.summary ?? null,
         $summaryUpdated: session.summaryUpdatedAt ?? null,
         $toolScope: session.toolScope ? JSON.stringify(session.toolScope.map(canonicalToolName)) : null,
@@ -257,7 +263,7 @@ export class SqliteStore {
     return discarded;
   }
 
-  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">>): Session {
+  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">> & { emailPrimaryId?: string | null; emailSecondaryId?: string | null }): Session {
     const current = this.loadSession(sessionId);
     const next: Session = {
       ...current,
@@ -270,6 +276,10 @@ export class SqliteStore {
       ...(patch.workspace !== undefined ? { workspace: patch.workspace } : {}),
       updatedAt: nowIso()
     };
+    if (patch.emailPrimaryId === null) delete next.emailPrimaryId;
+    else if (patch.emailPrimaryId !== undefined) next.emailPrimaryId = patch.emailPrimaryId;
+    if (patch.emailSecondaryId === null) delete next.emailSecondaryId;
+    else if (patch.emailSecondaryId !== undefined) next.emailSecondaryId = patch.emailSecondaryId;
     this.upsertSession(next);
     return next;
   }
@@ -517,13 +527,15 @@ export class SqliteStore {
 
   async forkSession(sessionId: string, title?: string): Promise<Session> {
     const source = this.loadSession(sessionId);
-    const options: Partial<Pick<Session, "title" | "parentId" | "campaignId" | "provider" | "model" | "summary" | "summaryUpdatedAt">> = {
+    const options: Partial<Pick<Session, "title" | "parentId" | "campaignId" | "provider" | "model" | "emailPrimaryId" | "emailSecondaryId" | "summary" | "summaryUpdatedAt">> = {
       title: title ?? `${sessionDisplayName(source)} fork`,
       parentId: source.id,
       ...(source.campaignId ? { campaignId: source.campaignId } : {})
     };
     if (source.provider) options.provider = source.provider;
     if (source.model) options.model = source.model;
+    if (source.emailPrimaryId) options.emailPrimaryId = source.emailPrimaryId;
+    if (source.emailSecondaryId) options.emailSecondaryId = source.emailSecondaryId;
     if (source.summary) options.summary = source.summary;
     if (source.summaryUpdatedAt) options.summaryUpdatedAt = source.summaryUpdatedAt;
     const fork = await this.createSession({ ...options, workspace: source.workspace });
@@ -1946,6 +1958,8 @@ export class SqliteStore {
         campaign_id text,
         provider text,
         model text,
+        email_primary_id text,
+        email_secondary_id text,
         summary text,
         summary_updated_at text,
         tool_scope_json text,
@@ -2188,6 +2202,8 @@ export class SqliteStore {
     addColumnIfMissing(db, "sessions", "campaign_id", "text");
     addColumnIfMissing(db, "sessions", "provider", "text");
     addColumnIfMissing(db, "sessions", "model", "text");
+    addColumnIfMissing(db, "sessions", "email_primary_id", "text");
+    addColumnIfMissing(db, "sessions", "email_secondary_id", "text");
     addColumnIfMissing(db, "sessions", "summary", "text");
     addColumnIfMissing(db, "sessions", "summary_updated_at", "text");
     addColumnIfMissing(db, "sessions", "tool_scope_json", "text");
@@ -2503,6 +2519,8 @@ function sessionFromRow(row: Row): Session {
   if (typeof row.campaign_id === "string") session.campaignId = row.campaign_id;
   if (typeof row.provider === "string") session.provider = row.provider;
   if (typeof row.model === "string") session.model = row.model;
+  if (typeof row.email_primary_id === "string") session.emailPrimaryId = row.email_primary_id;
+  if (typeof row.email_secondary_id === "string") session.emailSecondaryId = row.email_secondary_id;
   if (typeof row.summary === "string") session.summary = row.summary;
   if (typeof row.summary_updated_at === "string") session.summaryUpdatedAt = row.summary_updated_at;
   if (typeof row.tool_scope_json === "string") session.toolScope = (JSON.parse(row.tool_scope_json) as string[]).map(canonicalToolName);

@@ -4,7 +4,7 @@ import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, DEFAULT_MODEL_PROVIDER_ID, DE
 import { globalDataDir, loadGlobalConfig } from "./global-config";
 import { loadConfig, updateConfig } from "./config";
 import { fetchAvailableModelIds, HEURISTIC_MODEL_ID, resolveModel, type ConcreteResolvedModel, type ResolvedModel } from "./model-registry";
-import { loadModelProfiles, resolveProfile, resolveProfileApiKey, type ModelProfile } from "./model-profiles";
+import { loadModelProfiles, resolveProfile, resolveProfileApiKeyAsync, resolveProfileAsync, type ModelProfile } from "./model-profiles";
 import type { ModelPricingSnapshot } from "../types";
 
 export type ModelProviderCatalog = {
@@ -123,7 +123,7 @@ export async function resolveModelSelection(workspace: string, selection?: strin
   if (selection) {
     const selected = (await buildModelCatalog(workspace)).models.find((model) => model.id === selection);
     if (selected) return withSavedModelLimits(modelChoiceToResolved(selected), selection, workspace);
-    const profileResolved = resolveProfile(loadModelProfiles(workspace), selection);
+    const profileResolved = await resolveProfileAsync(loadModelProfiles(workspace), selection);
     if (profileResolved?.model) return withSavedModelLimits(profileResolved as ConcreteResolvedModel, selection, workspace);
     return withSavedModelLimits(ensureConcrete(resolveModel({ model: selection })), selection, workspace);
   }
@@ -249,10 +249,8 @@ async function providerDefinitions(workspace: string, profiles: ModelProfile[]):
       source: "config"
     });
   }
-  for (const profile of profiles) {
-    const definition = profileToProvider(profile, defaultModel, modelsDev);
-    if (definition) definitions.push(definition);
-  }
+  const profileDefinitions = await Promise.all(profiles.map((profile) => profileToProvider(profile, defaultModel, modelsDev)));
+  for (const definition of profileDefinitions) if (definition) definitions.push(definition);
   const openCode = modelsDev?.[OPENCODE_PROVIDER_ID];
   const configuredOpenCode = definitions.some((provider) => provider.id === DEFAULT_PROVIDER_ID);
   if (openCode && !configuredOpenCode) {
@@ -280,13 +278,13 @@ async function providerDefinitions(workspace: string, profiles: ModelProfile[]):
   return definitions;
 }
 
-function profileToProvider(
+async function profileToProvider(
   profile: ModelProfile,
   defaultModel: ResolvedModel,
   modelsDev?: Record<string, ModelsDevProvider>
-): ProviderDefinition | undefined {
+): Promise<ProviderDefinition | undefined> {
   if (profile.model === HEURISTIC_MODEL_ID) return undefined;
-  const apiKey = resolveProfileApiKey(profile);
+  const apiKey = await resolveProfileApiKeyAsync(profile);
   const baseUrl = profile.baseUrl ?? defaultModel.baseUrl;
   const endpointProvider = modelsDevProviderForEndpoint(modelsDev, baseUrl);
   const catalogModels = profile.models?.map((model) => catalogModelMetadata(model, endpointProvider?.models[model])).filter((model) => model.id)

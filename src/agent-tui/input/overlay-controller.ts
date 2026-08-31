@@ -1,7 +1,7 @@
 import { rememberModelSelection } from "../../agent-core/model-catalog";
 import type { Command, CommandContext } from "../command-registry";
 import type { TuiStoreValue } from "../context/store";
-import type { McpChoice, ModelChoice } from "../overlay-options";
+import type { EmailChoice, McpChoice, ModelChoice } from "../overlay-options";
 import type { AgentThreadSummary, TuiRuntimePort } from "../runtime-port";
 import type { OverlayKind } from "./router";
 import type { OverlaySelection } from "./overlay-selection";
@@ -17,6 +17,7 @@ type OverlayControllerInput = {
   owns(owner: SessionOwner): boolean;
   openModelProvider(): void;
   openMcpServer(): void;
+  openEmailAccount?(): void;
   rememberModel?(model: string, options: Parameters<typeof rememberModelSelection>[1]): Promise<void>;
 };
 
@@ -119,6 +120,11 @@ export function createOverlayController(input: OverlayControllerInput) {
         }
         const server = tui.store.ui.mcpServers.find((item) => item.id === choice.serverID);
         if (server) tui.actions.overlayPush({ kind: "mcp", serverID: server.id, query: "", index: 0 });
+        return;
+      }
+      case "email": {
+        const choice = option.value as EmailChoice;
+        if (choice.kind === "email_action") input.openEmailAccount?.();
         return;
       }
       case "model": {

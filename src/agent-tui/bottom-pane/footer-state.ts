@@ -1,5 +1,6 @@
 import type { BackgroundActivitySummary, SubagentActivity } from "../runtime-port";
 import type { BrowserContextActivity } from "../../agent-tools/browser/context-manager";
+import type { DisposableInboxActivity } from "../../agent-email/types";
 import type { ContextUsage } from "../store";
 import type { UpdateNotice } from "../update-check";
 import { terminalWidth, truncateTerminal } from "../terminal-text";
@@ -26,13 +27,13 @@ export type FooterState = {
 
 export type FooterItem = {
   id: string;
-  kind: "update" | "context" | "agents" | "browsers" | "background" | "queue" | "message";
+  kind: "update" | "context" | "agents" | "browsers" | "inboxes" | "background" | "queue" | "message";
   text: string;
   count?: number;
 };
 
 export type BottomPaneSlot = "list_overlay" | "center_surface" | "proxy_tab" | "composer";
-export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "mcp_server_removal" | "mcp_server_wizard" | "request_user_input";
+export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "mcp_server_removal" | "mcp_server_wizard" | "email_account_removal" | "email_account_wizard" | "request_user_input";
 
 export function activityStatusVisible(activeMainTab: "chat" | "proxy"): boolean {
   return activeMainTab === "chat";
@@ -54,6 +55,8 @@ export function bottomPaneSurface(input: {
   hasModelProviderWizard: boolean;
   hasMcpServerRemoval?: boolean;
   hasMcpServerWizard?: boolean;
+  hasEmailAccountRemoval?: boolean;
+  hasEmailAccountWizard?: boolean;
   hasRequestUserInput: boolean;
   hasListFrame: boolean;
   hasCenterFrame: boolean;
@@ -63,6 +66,8 @@ export function bottomPaneSurface(input: {
   if (input.hasModelProviderWizard) return "model_provider_wizard";
   if (input.hasMcpServerRemoval) return "mcp_server_removal";
   if (input.hasMcpServerWizard) return "mcp_server_wizard";
+  if (input.hasEmailAccountRemoval) return "email_account_removal";
+  if (input.hasEmailAccountWizard) return "email_account_wizard";
   if (input.hasRequestUserInput) return "request_user_input";
   return bottomPaneSlot(input);
 }
@@ -105,7 +110,8 @@ export function footerRightItems(
   statusDetail: string | undefined,
   contextUsage?: ContextUsage,
   updateNotice?: UpdateNotice,
-  includeAnyStatus = false
+  includeAnyStatus = false,
+  disposableInboxes: DisposableInboxActivity[] = []
 ): FooterItem[] {
   const items: FooterItem[] = [];
   if (updateNotice) {
@@ -136,6 +142,15 @@ export function footerRightItems(
       kind: "browsers",
       text: `${activeBrowsers} browser${activeBrowsers === 1 ? "" : "s"}`,
       count: activeBrowsers
+    });
+  }
+  const activeInboxes = disposableInboxes.filter((item) => ["ready", "waiting", "closing"].includes(item.status)).length;
+  if (activeInboxes > 0) {
+    items.push({
+      id: "inboxes",
+      kind: "inboxes",
+      text: `${activeInboxes} inbox${activeInboxes === 1 ? "" : "es"}`,
+      count: activeInboxes
     });
   }
   items.push(...backgroundActivities

@@ -1,7 +1,11 @@
-import { authPath, configPath, loadRawConfig, readAuth, removeAuthEntry, resolveApiKey, writeAuthEntry, writeConfig, type ConfigLocation, type FaraiConfig } from "./config";
+import { configPath, loadRawConfig, writeConfig, type ConfigLocation, type FaraiConfig } from "./config";
+import { deleteCredential, legacyCredentialConfigured, readCredential, writeCredential } from "./credential-store";
 import { buildModelCatalog, type ModelCatalog } from "./model-catalog";
-import { loadModelProfiles, resolveProfileApiKey } from "./model-profiles";
+import { loadModelProfiles, resolveProfileApiKeyAsync } from "./model-profiles";
+import { normalizeModelProviderBaseUrl, normalizeModelProviderID } from "./model-provider-validation";
 import { resolveProtocol } from "./provider/registry";
+
+export { normalizeModelProviderID } from "./model-provider-validation";
 
 export type ModelProviderProtocol = "auto" | "openai-chat" | "anthropic-messages";
 export type ModelProviderCredentialAction = "keep" | "replace" | "remove";
@@ -50,7 +54,6 @@ export type ModelProviderProbe = {
   error?: string;
 };
 
-const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]*$/;
 const DEFAULT_PROBE_TIMEOUT_MS = 8_000;
 
 export async function listModelProviders(workspace: string, catalog?: ModelCatalog): Promise<ModelProviderInfo[]> {
@@ -58,13 +61,14 @@ export async function listModelProviders(workspace: string, catalog?: ModelCatal
   const profiles = new Map(loadModelProfiles(workspace).map((profile) => [profile.name, profile]));
   const globalProviders = loadRawConfig(configPath("global")).modelProviders ?? {};
   const projectProviders = loadRawConfig(configPath("project", workspace)).modelProviders ?? {};
-  const globalAuth = readAuth(authPath("global"));
-  const projectAuth = readAuth(authPath("project", workspace));
-
-  return resolvedCatalog.providers.map((provider) => {
+  return await Promise.all(resolvedCatalog.providers.map(async (provider) => {
     const profile = profiles.get(provider.id);
     const location = provider.id in projectProviders ? "project" : provider.id in globalProviders ? "global" : undefined;
-    const stored = Boolean(projectAuth[provider.id]?.apiKey ?? globalAuth[provider.id]?.apiKey);
+    const configuredEntry = location === "project" ? projectProviders[provider.id] : location === "global" ? globalProviders[provider.id] : undefined;
+    const stored = Boolean(configuredEntry?.credential_configured === true
+      || typeof configuredEntry?.api_key === "string"
+      || typeof configuredEntry?.apiKey === "string"
+      || location && await readCredential("model-provider", provider.id, location, workspace).catch(() => undefined));
     const environment = Boolean(profile?.apiKeyEnv && process.env[profile.apiKeyEnv]);
     const publicCredential = !location && Boolean(provider.apiKey);
     const credentialSource = stored ? "stored" : environment ? "environment" : publicCredential ? "public" : "none";
@@ -83,7 +87,7 @@ export async function listModelProviders(workspace: string, catalog?: ModelCatal
       ...(location ? { location } : {}),
       removable: Boolean(location)
     };
-  });
+  }));
 }
 
 export async function probeModelProvider(
@@ -94,14 +98,16 @@ export async function probeModelProvider(
   const profile = input.providerID
     ? loadModelProfiles(workspace).find((candidate) => candidate.name === input.providerID)
     : undefined;
-  const baseUrl = normalizeBaseUrl(input.baseUrl ?? profile?.baseUrl ?? "");
+  const baseUrl = normalizeModelProviderBaseUrl(input.baseUrl ?? profile?.baseUrl ?? "");
   const configuredProbeProtocol = input.protocol ?? profile?.protocol;
   const resolvedProtocol = resolveProtocol({
     baseUrl,
     ...(configuredProbeProtocol ? { protocol: configuredProbeProtocol } : {})
   });
   const protocol = resolvedProtocol === "anthropic-messages" ? "anthropic-messages" : "openai-chat";
-  const apiKey = input.apiKey ?? (profile ? resolveProfileApiKey(profile) : input.providerID ? resolveApiKey(input.providerID, { workspace }) : undefined);
+  const apiKey = input.apiKey ?? (profile ? await resolveProfileApiKeyAsync(profile) : input.providerID
+    ? await readProviderCredential(workspace, input.providerID)
+    : undefined);
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
   if (signal?.aborted) controller.abort(signal.reason);
@@ -161,13 +167,19 @@ export async function probeModelProvider(
   }
 }
 
-export function saveModelProvider(workspace: string, input: SaveModelProviderInput): { id: string; location: ConfigLocation; path: string } {
+export async function saveModelProvider(workspace: string, input: SaveModelProviderInput): Promise<{ id: string; location: ConfigLocation; path: string }> {
   const id = normalizeModelProviderID(input.id);
-  const baseUrl = normalizeBaseUrl(input.baseUrl);
+  const baseUrl = normalizeModelProviderBaseUrl(input.baseUrl);
   const protocol = configuredProtocol(input.protocol);
   const location = input.location ?? "global";
   const previousConfig = loadRawConfig(configPath(location, workspace));
-  const previousAuth = readAuth(authPath(location, workspace))[id];
+  const previousEntry = (previousConfig.modelProviders ?? {})[id];
+  const previousInlineCredential = inlineModelCredential(previousEntry);
+  const previousCredentialConfigured = previousEntry?.credential_configured === true
+    || previousInlineCredential !== undefined
+    || legacyCredentialConfigured("model-provider", id, location, workspace);
+  const previousCredential = previousInlineCredential
+    ?? (previousCredentialConfigured ? await readCredential("model-provider", id, location, workspace) : undefined);
   const providers = { ...(previousConfig.modelProviders ?? {}) };
   const entry = { ...(providers[id] ?? {}) };
   delete entry.api_key;
@@ -178,6 +190,9 @@ export function saveModelProvider(workspace: string, input: SaveModelProviderInp
   const model = input.model?.trim();
   if (model) entry.model = model;
   else delete entry.model;
+  if (input.credentialAction === "replace") entry.credential_configured = true;
+  if (input.credentialAction === "remove") delete entry.credential_configured;
+  if (input.credentialAction !== "replace" && input.credentialAction !== "remove" && previousCredential) entry.credential_configured = true;
   providers[id] = entry;
   const nextConfig = { ...previousConfig, modelProviders: providers };
 
@@ -186,22 +201,21 @@ export function saveModelProvider(workspace: string, input: SaveModelProviderInp
     if (input.credentialAction === "replace") {
       const apiKey = input.apiKey?.trim();
       if (!apiKey) throw new Error("api key cannot be empty when replacing a credential.");
-      writeAuthEntry(id, { apiKey }, location, workspace);
+      await writeCredential("model-provider", id, apiKey, location, workspace);
     }
-    if (input.credentialAction === "remove") removeAuthEntry(id, location, workspace);
+    if (input.credentialAction === "remove" && previousCredentialConfigured) await deleteCredential("model-provider", id, location, workspace);
   } catch (error) {
     writeConfig(previousConfig, location, workspace);
-    restoreCredential(id, previousAuth, location, workspace);
     throw error;
   }
   return { id, location, path };
 }
 
-export function removeModelProvider(
+export async function removeModelProvider(
   workspace: string,
   providerID: string,
   location?: ConfigLocation
-): { id: string; location: ConfigLocation; providerRemains: boolean } {
+): Promise<{ id: string; location: ConfigLocation; providerRemains: boolean }> {
   const id = normalizeModelProviderID(providerID);
   const resolvedLocation = location ?? providerLocation(workspace, id);
   if (!resolvedLocation) throw new Error(`provider ${id} is built in and cannot be removed.`);
@@ -209,7 +223,11 @@ export function removeModelProvider(
     global: loadRawConfig(configPath("global")),
     project: loadRawConfig(configPath("project", workspace))
   };
-  const previousCredential = readAuth(authPath(resolvedLocation, workspace))[id];
+  const previousEntry = (previousConfigs[resolvedLocation].modelProviders ?? {})[id];
+  const previousInlineCredential = inlineModelCredential(previousEntry);
+  const previousCredentialConfigured = previousEntry?.credential_configured === true
+    || previousInlineCredential !== undefined
+    || legacyCredentialConfigured("model-provider", id, resolvedLocation, workspace);
   let nextConfigs = {
     global: resolvedLocation === "global" ? removeProviderEntry(previousConfigs.global, id) : previousConfigs.global,
     project: resolvedLocation === "project" ? removeProviderEntry(previousConfigs.project, id) : previousConfigs.project
@@ -224,30 +242,12 @@ export function removeModelProvider(
   const changedLocations = (["global", "project"] as const).filter((scope) => !sameConfig(previousConfigs[scope], nextConfigs[scope]));
   try {
     for (const scope of changedLocations) writeConfig(nextConfigs[scope], scope, workspace);
-    removeAuthEntry(id, resolvedLocation, workspace);
+    if (previousCredentialConfigured) await deleteCredential("model-provider", id, resolvedLocation, workspace);
   } catch (error) {
     for (const scope of changedLocations) writeConfig(previousConfigs[scope], scope, workspace);
-    restoreCredential(id, previousCredential, resolvedLocation, workspace);
     throw error;
   }
   return { id, location: resolvedLocation, providerRemains };
-}
-
-export function normalizeModelProviderID(value: string): string {
-  const normalized = value.trim().replace(/\s+/g, "-").toLowerCase();
-  if (!PROVIDER_ID.test(normalized)) {
-    throw new Error("provider id must start with a letter or number and contain only lowercase letters, numbers, hyphens, or underscores.");
-  }
-  return normalized;
-}
-
-function normalizeBaseUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/+$/, "");
-  let parsed: URL;
-  try { parsed = new URL(trimmed); } catch { throw new Error("provider base url must be a valid http or https url."); }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("provider base url must use http or https.");
-  if (parsed.username || parsed.password) throw new Error("provider credentials must not be embedded in the base url.");
-  return trimmed;
 }
 
 function configuredProtocol(value?: string): ModelProviderProtocol {
@@ -301,9 +301,17 @@ function belongsToProvider(selection: string, providerID: string): boolean {
   return selection === providerID || selection.startsWith(`${providerID}:`);
 }
 
-function restoreCredential(id: string, previous: { apiKey?: string; token?: string } | undefined, location: ConfigLocation, workspace: string): void {
-  if (previous) writeAuthEntry(id, previous, location, workspace);
-  else removeAuthEntry(id, location, workspace);
+async function readProviderCredential(workspace: string, id: string): Promise<string | undefined> {
+  const project = loadRawConfig(configPath("project", workspace)).modelProviders ?? {};
+  if (id in project) return await readCredential("model-provider", id, "project", workspace);
+  const global = loadRawConfig(configPath("global")).modelProviders ?? {};
+  if (id in global) return await readCredential("model-provider", id, "global", workspace);
+  return undefined;
+}
+
+function inlineModelCredential(entry: Record<string, unknown> | undefined): string | undefined {
+  const value = entry?.api_key ?? entry?.apiKey;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 async function responseError(response: Response): Promise<string> {

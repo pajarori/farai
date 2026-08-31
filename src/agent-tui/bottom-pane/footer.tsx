@@ -85,7 +85,8 @@ export function Footer(props: FooterProps): JSX.Element {
       tui.store.ui.statusDetail,
       contextUsage(),
       tui.store.ui.updateNotice,
-      !isAgentBusy(tui.store)
+      !isAgentBusy(tui.store),
+      tui.store.snapshot.disposableInboxes
     );
   });
   const firstLine = () => fitFooterLine(left(), rightItems(), Math.max(0, dims().width - 4));

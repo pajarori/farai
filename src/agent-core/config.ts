@@ -1,9 +1,15 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { MCP_BACKBONE_SERVER_IDS } from "../agent-tools/mcp-builtins";
+import { readCredentialForWorkspaceSync } from "./credential-store";
+import { atomicWriteFile } from "./atomic-file";
+import { configPath, localFaraiDir, type ConfigLocation } from "./paths";
+import { isEnvironmentVariableName } from "./model-provider-validation";
 
-export type ConfigLocation = "global" | "project";
+export { authPath, configPath, debugLogPath, globalDataDir, localFaraiDir } from "./paths";
+export type { ConfigLocation } from "./paths";
+export { loadAuth, readAuth, removeAuthEntry, writeAuthEntry } from "./legacy-auth";
+export type { AuthEntry, FaraiAuth } from "./legacy-auth";
 
 export type FaraiConfig = {
   configVersion?: number;
@@ -20,6 +26,7 @@ export type FaraiConfig = {
   modelLimits?: Record<string, FaraiModelLimitConfig>;
   modelProviders?: Record<string, Record<string, unknown>>;
   mcpServers?: Record<string, Record<string, unknown>>;
+  emailAccounts?: Record<string, Record<string, unknown>>;
   proxy?: FaraiProxyConfig;
   context?: FaraiContextConfig;
   lsp?: FaraiLspConfig;
@@ -63,44 +70,8 @@ export type FaraiProxyConfig = {
 
 export const DEFAULT_TRANSPARENT_PROXY_PORTS = [80, 443, 3000, 5000, 8000, 8008, 8080, 8081, 8443, 8888, 9000];
 
-export type AuthEntry = { apiKey?: string; token?: string };
-export type FaraiAuth = Record<string, AuthEntry>;
-
-function homeDir(): string {
-  const configured = process.env.HOME?.trim();
-  if (configured) return configured;
-  const systemHome = homedir().trim();
-  if (!systemHome) throw new Error("unable to resolve the user home directory.");
-  return systemHome;
-}
-
-export function localFaraiDir(): string {
-  const explicit = process.env.FARAI_HOME?.trim();
-  if (explicit) {
-    if (!isAbsolute(explicit)) throw new Error("farai_home must be an absolute path.");
-    return explicit;
-  }
-  return join(homeDir(), ".local", "pajarori", "farai");
-}
-
-export function globalDataDir(): string {
-  return localFaraiDir();
-}
-
-export function debugLogPath(): string {
-  return join(globalDataDir(), "debug.jsonl");
-}
-
 export function isDebugLoggingEnabled(): boolean {
   return process.env.FARAI_DEBUG === "1" || process.env.FARAI_DEBUG === "true";
-}
-
-export function configPath(location: ConfigLocation, workspace?: string): string {
-  return location === "project" ? join(workspace ?? process.cwd(), ".farai", "config.toml") : join(localFaraiDir(), "config.toml");
-}
-
-export function authPath(location: ConfigLocation, workspace?: string): string {
-  return location === "project" ? join(workspace ?? process.cwd(), ".farai", "auth.json") : join(localFaraiDir(), "auth.json");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -144,8 +115,15 @@ function modelLimitMap(value: unknown): Record<string, FaraiModelLimitConfig> | 
 
 export function normalizeConfig(raw: unknown): FaraiConfig {
   if (!isRecord(raw)) return {};
+  const configuredApiKeyEnv = typeof raw.env_key === "string"
+    ? raw.env_key
+    : typeof raw.apiKeyEnv === "string"
+      ? raw.apiKeyEnv
+      : undefined;
+  const apiKeyEnv = configuredApiKeyEnv && isEnvironmentVariableName(configuredApiKeyEnv) ? configuredApiKeyEnv : undefined;
   const providers = providerMap(raw.model_providers ?? raw.modelProviders);
   const mcp = providerMap(raw.mcp_servers ?? raw.mcpServers);
+  const email = providerMap(raw.email_accounts ?? raw.emailAccounts);
   const modelLimits = modelLimitMap(raw.model_limits ?? raw.modelLimits);
   const recent = raw.recent_models ?? raw.recentModels;
   const proxy = proxyConfig(raw.proxy);
@@ -156,7 +134,7 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
     ...(positiveInteger(raw.config_version ?? raw.configVersion) !== undefined ? { configVersion: positiveInteger(raw.config_version ?? raw.configVersion)! } : {}),
     ...(typeof raw.model === "string" ? { model: raw.model } : {}),
     ...(typeof raw.base_url === "string" ? { baseUrl: raw.base_url } : typeof raw.baseUrl === "string" ? { baseUrl: raw.baseUrl } : {}),
-    ...(typeof raw.env_key === "string" ? { apiKeyEnv: raw.env_key } : typeof raw.apiKeyEnv === "string" ? { apiKeyEnv: raw.apiKeyEnv } : {}),
+    ...(apiKeyEnv ? { apiKeyEnv } : {}),
     ...(positiveNumber(raw.context_window ?? raw.contextWindow) ? { contextWindow: positiveNumber(raw.context_window ?? raw.contextWindow)! } : {}),
     ...(positiveNumber(raw.max_output_tokens ?? raw.maxOutputTokens) ? { maxOutputTokens: positiveNumber(raw.max_output_tokens ?? raw.maxOutputTokens)! } : {}),
     ...(positiveNumber(raw.max_concurrent_subagents ?? raw.maxConcurrentSubagents) ? { maxConcurrentSubagents: Math.floor(positiveNumber(raw.max_concurrent_subagents ?? raw.maxConcurrentSubagents)!) } : {}),
@@ -167,6 +145,7 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
     ...(modelLimits ? { modelLimits } : {}),
     ...(providers ? { modelProviders: providers } : {}),
     ...(mcp ? { mcpServers: mcp } : {}),
+    ...(email ? { emailAccounts: email } : {}),
     ...(proxy ? { proxy } : {}),
     ...(context ? { context } : {}),
     ...(lsp ? { lsp } : {}),
@@ -268,6 +247,7 @@ export function mergeConfig(base: FaraiConfig, over: FaraiConfig): FaraiConfig {
     ...(base.modelLimits || over.modelLimits ? { modelLimits: { ...base.modelLimits, ...over.modelLimits } } : {}),
     ...(base.modelProviders || over.modelProviders ? { modelProviders: { ...base.modelProviders, ...over.modelProviders } } : {}),
     ...(base.mcpServers || over.mcpServers ? { mcpServers: { ...base.mcpServers, ...over.mcpServers } } : {}),
+    ...(base.emailAccounts || over.emailAccounts ? { emailAccounts: { ...base.emailAccounts, ...over.emailAccounts } } : {}),
     ...(base.proxy || over.proxy ? { proxy: { ...base.proxy, ...over.proxy } } : {}),
     ...(base.context || over.context ? { context: { ...base.context, ...over.context } } : {}),
     ...(base.lsp || over.lsp ? {
@@ -286,57 +266,14 @@ export function mergeConfig(base: FaraiConfig, over: FaraiConfig): FaraiConfig {
   };
 }
 
-export function loadAuth(workspace?: string): FaraiAuth {
-  const global = shouldReadGlobal() ? readAuth(authPath("global")) : {};
-  const project = workspace ? readAuth(authPath("project", workspace)) : {};
-  return { ...global, ...project };
-}
-
-export function readAuth(path: string): FaraiAuth {
-  try {
-    if (!existsSync(path)) return {};
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (!isRecord(parsed)) return {};
-    const out: FaraiAuth = {};
-    for (const [name, entry] of Object.entries(parsed)) {
-      if (!isRecord(entry)) continue;
-      out[name] = {
-        ...(typeof entry.apiKey === "string" ? { apiKey: entry.apiKey } : {}),
-        ...(typeof entry.token === "string" ? { token: entry.token } : {})
-      };
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
 export function resolveApiKey(name: string, options: { apiKeyEnv?: string; inlineApiKey?: string; workspace?: string } = {}): string | undefined {
-  const auth = loadAuth(options.workspace)[name];
-  if (auth?.apiKey) return auth.apiKey;
+  const stored = readCredentialForWorkspaceSync("model-provider", name, options.workspace)?.value;
+  if (stored) return stored;
   if (options.apiKeyEnv) {
-    if (process.env[options.apiKeyEnv]) return process.env[options.apiKeyEnv];
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(options.apiKeyEnv)) return options.apiKeyEnv;
+    if (isEnvironmentVariableName(options.apiKeyEnv) && process.env[options.apiKeyEnv]) return process.env[options.apiKeyEnv];
   }
   if (options.inlineApiKey) return options.inlineApiKey;
   return undefined;
-}
-
-export function writeAuthEntry(name: string, entry: AuthEntry, location: ConfigLocation = "global", workspace?: string): string {
-  const path = authPath(location, workspace);
-  const current = existsSync(path) ? readAuth(path) : {};
-  current[name] = { ...current[name], ...entry };
-  writeAuth(path, current);
-  return path;
-}
-
-export function removeAuthEntry(name: string, location: ConfigLocation = "global", workspace?: string): string {
-  const path = authPath(location, workspace);
-  const current = existsSync(path) ? readAuth(path) : {};
-  if (!(name in current)) return path;
-  delete current[name];
-  writeAuth(path, current);
-  return path;
 }
 
 export function serializeConfigToml(config: FaraiConfig): string {
@@ -351,7 +288,7 @@ export function serializeConfigToml(config: FaraiConfig): string {
   if (config.maxCostUsd) lines.push(`max_cost_usd = ${config.maxCostUsd}`);
   if (config.maxConcurrentSubagents) lines.push(`max_concurrent_subagents = ${config.maxConcurrentSubagents}`);
   if (config.baseUrl) lines.push(`base_url = ${tomlString(config.baseUrl)}`);
-  if (config.apiKeyEnv) lines.push(`env_key = ${tomlString(config.apiKeyEnv)}`);
+  if (config.apiKeyEnv && isEnvironmentVariableName(config.apiKeyEnv)) lines.push(`env_key = ${tomlString(config.apiKeyEnv)}`);
   if (config.proxy && Object.keys(config.proxy).length) emitTable(lines, ["proxy"], config.proxy as Record<string, unknown>);
   if (config.context?.maxInputTokens) emitTable(lines, ["context"], { max_input_tokens: config.context.maxInputTokens });
   if (config.web && Object.keys(config.web).length) emitTable(lines, ["web"], {
@@ -383,6 +320,7 @@ export function serializeConfigToml(config: FaraiConfig): string {
   }
   for (const [name, entry] of Object.entries(config.modelProviders ?? {})) emitTable(lines, ["model_providers", name], entry);
   for (const [name, entry] of Object.entries(config.mcpServers ?? {})) emitTable(lines, ["mcp_servers", name], entry);
+  for (const [name, entry] of Object.entries(config.emailAccounts ?? {})) emitTable(lines, ["email_accounts", name], entry);
   return `${lines.join("\n").replace(/^\n+/, "")}\n`;
 }
 
@@ -454,37 +392,11 @@ export function ensureDefaultConfig(): string {
   return path;
 }
 
-function writeAuth(path: string, auth: FaraiAuth): void {
-  atomicWriteFile(path, `${JSON.stringify(auth, null, 2)}\n`, 0o600);
-}
-
-function atomicWriteFile(path: string, content: string, mode: number): void {
-  const directory = dirname(path);
-  mkdirSync(directory, { recursive: true });
-  const temporary = join(directory, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(temporary, "wx", mode);
-    writeFileSync(descriptor, content, "utf8");
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    renameSync(temporary, path);
-    chmodSync(path, mode);
-  } catch (error) {
-    if (descriptor !== undefined) {
-      try { closeSync(descriptor); } catch { }
-    }
-    try { if (existsSync(temporary)) unlinkSync(temporary); } catch { }
-    throw error;
-  }
-}
-
 export function defaultMcpServers(): Record<string, Record<string, unknown>> {
   return normalizeConfig(Bun.TOML.parse(DEFAULT_CONFIG_TEMPLATE)).mcpServers ?? {};
 }
 
-const CURRENT_CONFIG_VERSION = 2;
+const CURRENT_CONFIG_VERSION = 3;
 
 function isLegacyPwnoMcpDefault(entry: Record<string, unknown> | undefined): boolean {
   if (!entry || entry.command !== "docker" || !Array.isArray(entry.args)) return false;

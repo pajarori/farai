@@ -43,6 +43,7 @@ export type TuiStoreValue = {
   refreshAgentThreads: () => Promise<void>;
   openAgentsOverlay: () => Promise<void>;
   openMcpOverlay: () => Promise<void>;
+  openEmailOverlay: () => Promise<void>;
   toggleContainer: (options?: { reportError?: boolean }) => Promise<void>;
   setStatusDetail: (detail: string | undefined, timeoutMs?: number) => void;
 };
@@ -192,6 +193,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     refreshAgentThreads: resources.refreshAgentThreads,
     openAgentsOverlay: resources.openAgentsOverlay,
     openMcpOverlay: resources.openMcpOverlay,
+    openEmailOverlay: resources.openEmailOverlay,
     toggleContainer: resources.toggleContainer,
     setStatusDetail: status.set
   };

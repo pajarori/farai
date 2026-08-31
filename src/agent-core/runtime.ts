@@ -7,6 +7,7 @@ import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/re
 import { formatMcpInventory, getMcpPrompt, getMcpPromptDescriptor, listMcpServerStatuses, probeMcpServer as probeMcpServerConfig, renderMcpPromptResult, renderMcpServerInstructionContext, requestMcpFormElicitation, startMcpServer, stopMcpServer, stopMcpToolsForSession, type McpRefreshInput, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
 import { mcpServerFromInput, type SaveMcpServerInput } from "./mcp-server-management";
 import { stopBrowserContextsForSession } from "../agent-tools/browser/context-manager";
+import { disposableInboxManager, stopDisposableInboxesForSession } from "../agent-email/tempmail";
 import { renderCtfNotes } from "../agent-report/markdown";
 import { serviceRegistry } from "../agent-tools/services/registry";
 import { containerNameForSession, KaliContainerBackend, type ContainerStatus } from "../agent-container/kali";
@@ -165,7 +166,10 @@ class ModelCallDeadlineError extends Error {
   }
 }
 
-export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "toolScope" | "workspace">>;
+export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "toolScope" | "workspace">> & {
+  emailPrimaryId?: string | null;
+  emailSecondaryId?: string | null;
+};
 export type ShutdownOptions = { gracePeriodMs?: number };
 type RuntimeContainerBackend = Pick<KaliContainerBackend, "status" | "startPersistent" | "stopPersistent">;
 export type AgentRuntimeOptions = {
@@ -351,6 +355,7 @@ export class AgentRuntime {
         if (this.store.isOpen()) {
           for (const session of this.store.listSessions(10_000, { includeArchived: true })) {
             await stopBrowserContextsForSession(session.id);
+            await this.stopSessionEmail(session.id);
             await stopMcpToolsForSession(session.id);
             serviceRegistry.unregisterSession(session.id);
           }
@@ -996,7 +1001,13 @@ export class AgentRuntime {
   }
 
   async forkSession(sessionId: string, title?: string): Promise<Session> {
-    const session = await this.store.forkSession(sessionId, title);
+    const source = this.store.loadSession(sessionId);
+    let session = await this.store.forkSession(sessionId, title);
+    const temporaryIds = new Set(disposableInboxManager.list(source.id).map((inbox) => inbox.id));
+    const patch: SessionPatch = {};
+    if (session.emailPrimaryId && temporaryIds.has(session.emailPrimaryId)) patch.emailPrimaryId = null;
+    if (session.emailSecondaryId && temporaryIds.has(session.emailSecondaryId)) patch.emailSecondaryId = null;
+    if (Object.keys(patch).length > 0) session = this.store.updateSession(session.id, patch);
     this.recordSession(session);
     return session;
   }
@@ -1011,11 +1022,13 @@ export class AgentRuntime {
     const session = this.store.archiveSession(sessionId);
     await this.lsp.shutdownSession(sessionId).catch(() => {});
     await stopBrowserContextsForSession(sessionId).catch(() => {});
+    await this.stopSessionEmail(sessionId).catch(() => {});
     await stopMcpToolsForSession(sessionId).catch(() => {});
     if (this.rootSessionId(session) === session.id) {
       for (const member of this.sessionTree(session.id).filter((candidate) => candidate.id !== session.id)) {
         await this.lsp.shutdownSession(member.id).catch(() => {});
         await stopBrowserContextsForSession(member.id).catch(() => {});
+        await this.stopSessionEmail(member.id).catch(() => {});
         await stopMcpToolsForSession(member.id).catch(() => {});
       }
       await this.containerBackend(session.workspace, sessionId)
@@ -1043,6 +1056,7 @@ export class AgentRuntime {
       if (this.sessionTree(rootSessionId).length !== 1) return false;
       await this.lsp.shutdownSession(rootSessionId).catch(() => {});
       await stopBrowserContextsForSession(rootSessionId).catch(() => {});
+      await this.stopSessionEmail(rootSessionId).catch(() => {});
       await stopMcpToolsForSession(rootSessionId).catch(() => {});
       serviceRegistry.unregisterSession(rootSessionId);
       await this.containerBackend(session.workspace, rootSessionId).stopPersistent().catch(() => undefined);
@@ -1066,6 +1080,7 @@ export class AgentRuntime {
       await this.cancelSessionJobs(session.id);
       await this.lsp.shutdownSession(session.id).catch(() => {});
       await stopBrowserContextsForSession(session.id).catch(() => {});
+      await this.stopSessionEmail(session.id).catch(() => {});
       await stopMcpToolsForSession(session.id).catch(() => {});
       serviceRegistry.unregisterSession(session.id);
       if (options.stopContainers !== false) {
@@ -1141,7 +1156,7 @@ export class AgentRuntime {
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not start Kali container");
   }
 
-  async refreshMcp(session: Session): Promise<void> {
+  async refreshMcp(session: Session, options: { force?: boolean } = {}): Promise<void> {
     if (!this.mcpEnabled) return;
     const rootSessionId = this.rootSessionId(session);
     await refreshMcpTools({
@@ -1154,6 +1169,7 @@ export class AgentRuntime {
       ...this.mcpCallbacks(session),
       background: true,
       includeResources: false,
+      ...(options.force ? { force: true } : {}),
       onStartupEvent: (event) => this.event(session.id, event.type, event)
     });
   }
@@ -2442,6 +2458,18 @@ export class AgentRuntime {
     try { recordSessionLocation(session); } catch {  }
   }
 
+  private async stopSessionEmail(sessionId: string): Promise<void> {
+    const ids = new Set(disposableInboxManager.list(sessionId).map((inbox) => inbox.id));
+    if (ids.size > 0) {
+      const session = this.store.loadSession(sessionId);
+      const patch: SessionPatch = {};
+      if (session.emailPrimaryId && ids.has(session.emailPrimaryId)) patch.emailPrimaryId = null;
+      if (session.emailSecondaryId && ids.has(session.emailSecondaryId)) patch.emailSecondaryId = null;
+      if (Object.keys(patch).length > 0) this.updateSession(sessionId, patch);
+    }
+    await stopDisposableInboxesForSession(sessionId);
+  }
+
   private async maybeAutoCompact(session: Session, planner: PlannerProvider): Promise<
     | { status: "compacted" | "ok" }
     | { status: "ineffective"; preTokens: number; postTokens: number }
@@ -3103,8 +3131,7 @@ export class AgentRuntime {
           });
           editsSharedWorkspace = hasSharedWorkspaceEdits(scopedTools);
           const childModel = model ?? laneDef?.model;
-          child = await this.store.forkSession(session.id, title);
-          this.recordSession(child);
+          child = await this.forkSession(session.id, title);
           if (childModel && childModel !== child.model) this.updateSession(child.id, { model: childModel });
           if (scopedTools?.length) this.updateSession(child.id, { toolScope: scopedTools });
         }
