@@ -92,7 +92,7 @@ export function BottomPane(): JSX.Element {
   );
   const previewMaxRows = () => {
     const fixedRows = 5 + composer.height()
-      + (statusVisible() ? 1 : 0)
+      + (statusVisible() ? 2 : 0)
       + (questionNoticeVisible() ? 1 : 0)
       + (statusVisible() && (pendingPreviewVisible() || questionNoticeVisible()) ? 1 : 0)
       + (pendingPreviewVisible() && questionNoticeVisible() ? 1 : 0);

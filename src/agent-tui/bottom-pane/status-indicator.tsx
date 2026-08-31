@@ -31,7 +31,7 @@ export function StatusIndicator(props: StatusIndicatorProps): JSX.Element {
   };
 
   return (
-    <box style={{ flexDirection: "row", flexShrink: 0 }}>
+    <box style={{ flexDirection: "row", flexShrink: 0, paddingTop: 1 }}>
       <text fg={COLOR.text}>{text()}</text>
     </box>
   );
