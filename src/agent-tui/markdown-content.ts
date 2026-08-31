@@ -3,6 +3,8 @@ import { COLOR } from "./theme";
 
 const checkedTaskColor = parseColor(COLOR.success);
 const uncheckedTaskColor = parseColor(COLOR.dim);
+const unorderedListMarkerColors = [parseColor(COLOR.accent), parseColor(COLOR.muted), parseColor(COLOR.dim)] as const;
+const unorderedListMarkers = ["•", "›", "·"] as const;
 const mermaidKeywordAttributes = createTextAttributes({ bold: true });
 const mermaidCommentAttributes = createTextAttributes({ italic: true, dim: true });
 const mermaidDimColor = parseColor(COLOR.dim);
@@ -38,6 +40,40 @@ export function styleTaskGlyphs(chunks: TextChunk[]): TextChunk[] {
       : text === "□"
         ? { ...chunk, text, fg: uncheckedTaskColor }
         : { ...chunk, text });
+  });
+}
+
+export function styleUnorderedListGlyphs(chunks: TextChunk[]): TextChunk[] {
+  const text = chunks.map((chunk) => chunk.text).join("");
+  const replacements = new Map<number, { text: string; fg: NonNullable<TextChunk["fg"]> }>();
+  let lineStart = 0;
+  for (const line of text.split("\n")) {
+    const match = line.match(/^([ \t]*)([-+*])(?=[ \t]+)/);
+    if (match) {
+      const indent = match[1]!.replace(/\t/g, "  ").length;
+      const depth = Math.floor(indent / 2) % unorderedListMarkers.length;
+      replacements.set(lineStart + match[1]!.length, {
+        text: unorderedListMarkers[depth]!,
+        fg: unorderedListMarkerColors[depth]!
+      });
+    }
+    lineStart += line.length + 1;
+  }
+  if (replacements.size === 0) return chunks;
+  let offset = 0;
+  return chunks.flatMap((chunk) => {
+    const parts: TextChunk[] = [];
+    let start = 0;
+    for (let index = 0; index < chunk.text.length; index += 1) {
+      const replacement = replacements.get(offset + index);
+      if (!replacement) continue;
+      if (index > start) parts.push({ ...chunk, text: chunk.text.slice(start, index) });
+      parts.push({ ...chunk, text: replacement.text, fg: replacement.fg });
+      start = index + 1;
+    }
+    if (start < chunk.text.length) parts.push({ ...chunk, text: chunk.text.slice(start) });
+    offset += chunk.text.length;
+    return parts.length > 0 ? parts : chunk;
   });
 }
 

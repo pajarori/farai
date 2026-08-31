@@ -1,5 +1,5 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, untrack, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, untrack, type Accessor, type JSX } from "solid-js";
 import type {
   ProxyDnsMessage,
   ProxyFlowDetail,
@@ -21,26 +21,35 @@ import { useTuiDimensions } from "../context/terminal";
 import { MarkdownView } from "../markdown";
 
 type CenterSurfaceViewProps = {
-  frame: CenterSurfaceFrame;
+  frame: Accessor<CenterSurfaceFrame>;
 };
 
 export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
   const tui = useTuiStore();
   const dims = useTuiDimensions();
-  const loader = createSurfaceLoader(() => props.frame);
-  const title = () => surfaceTitle(props.frame);
-  const kindLabel = () => props.frame.kind;
-  const subtitle = () => surfaceSubtitle(props.frame);
+  const frame = () => props.frame();
+  const loader = createSurfaceLoader(frame);
+  const title = () => surfaceTitle(frame());
+  const kindLabel = () => frame().kind;
+  const subtitle = () => surfaceSubtitle(frame());
   const compact = () => dims().height < 16;
   const header = () => fitTerminalPair(title(), kindLabel(), Math.max(1, dims().width - 6), 4, 2);
   let scrollRef!: ScrollBoxRenderable;
   let lastScrollSequence = 0;
 
+  createEffect(on(frame, () => {
+    lastScrollSequence = 0;
+    queueMicrotask(() => {
+      if (!scrollRef || scrollRef.isDestroyed || frame().kind === "proxy_flow") return;
+      scrollRef.scrollTo(0);
+    });
+  }));
+
   createEffect(() => {
     const request = tui.store.ui.centerScroll;
     if (request.sequence === 0 || request.sequence === lastScrollSequence) return;
     lastScrollSequence = request.sequence;
-    if (!scrollRef || untrack(() => props.frame.kind) === "proxy_flow") return;
+    if (!scrollRef || untrack(() => frame().kind) === "proxy_flow") return;
     applyScroll(scrollRef, request.action);
   });
 
@@ -71,16 +80,16 @@ export function CenterSurfaceView(props: CenterSurfaceViewProps): JSX.Element {
           </box>
         )}
       </Show>
-      <Show when={props.frame.kind === "proxy_flow"} fallback={
+      <Show when={frame().kind === "proxy_flow"} fallback={
         <scrollbox ref={scrollRef} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1, minHeight: 0, paddingTop: subtitle() && compact() ? 0 : 1, paddingBottom: compact() ? 0 : 1 }}>
           <Show when={loader.filetype() === "markdown"} fallback={
-            <code content={loader.body()} filetype={loader.filetype()} syntaxStyle={syntax()} fg={COLOR.text} />
+            <code id="center-surface-code" content={loader.body()} filetype={loader.filetype()} syntaxStyle={syntax()} fg={COLOR.text} />
           }>
-            <MarkdownView content={loader.body()} variant="document" />
+            <MarkdownView id="center-surface-markdown" content={loader.body()} />
           </Show>
         </scrollbox>
       }>
-        <ProxyFlowSplitView flow={(props.frame as Extract<CenterSurfaceFrame, { kind: "proxy_flow" }>).flow} compact={compact()} />
+        <ProxyFlowSplitView flow={(frame() as Extract<CenterSurfaceFrame, { kind: "proxy_flow" }>).flow} compact={compact()} />
       </Show>
     </box>
   );

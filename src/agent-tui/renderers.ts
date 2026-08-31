@@ -12,13 +12,16 @@ import type { ToolResult } from "../types";
 import { parseReasoning } from "./reasoning";
 import { isInternalMetaReasoning, normalizeReasoningSummary } from "../agent-core/reasoning-summary";
 import {
-  explorationVerb,
-  isWorkspaceExplorationTool,
-  shortToolName,
   summarizeToolInput,
   TOOL_PAYLOAD_KEYS
 } from "./tool-presentation";
 import { terminalWidth, truncateTerminal } from "./terminal-text";
+import {
+  activityDuration,
+  activityStatus,
+  presentToolActivity,
+  type ToolActivityPresentation
+} from "./tool-activity";
 
 export const MAX_PAYLOAD_BYTES = 200_000;
 const HEAD_BUDGET = 4_096;
@@ -164,12 +167,41 @@ function safeStringify(payload: unknown): string {
   }, 2);
 }
 
+export type ToolTimelineRow = {
+  kind: "tool";
+  tool: string;
+  args: unknown;
+  argsSummary: string;
+  status: string;
+  liveOutput?: string;
+  result?: string;
+  fullResult?: string;
+  processId?: string;
+  jobId?: string;
+  toolCallId: string | undefined;
+  id: string;
+  mcp?: McpToolRowData;
+  toolResult?: ToolResult;
+  startedAt?: string;
+  durationMs?: number;
+  presentation: ToolActivityPresentation;
+};
+
+export type ActivityTimelineRow = {
+  kind: "activity";
+  status: "running" | "error" | "done";
+  label: string;
+  items: ToolTimelineRow[];
+  durationMs?: number;
+  id: string;
+};
+
 export type TimelineRow =
   | { kind: "user"; text: string; id: string }
   | { kind: "assistant"; text: string; streaming: boolean; id: string }
   | { kind: "thinking"; title: string; body: string; streaming: boolean; id: string }
-  | { kind: "tool"; tool: string; args: unknown; argsSummary: string; status: string; liveOutput?: string; result?: string; fullResult?: string; processId?: string; jobId?: string; toolCallId: string | undefined; id: string; mcp?: McpToolRowData; toolResult?: ToolResult }
-  | { kind: "exploration"; status: string; items: ExplorationItem[]; id: string }
+  | ToolTimelineRow
+  | ActivityTimelineRow
   | { kind: "todo_list"; title: string; items: TodoListRowItem[]; id: string }
   | { kind: "plan"; title: string; explanation?: string; items: PlanItem[]; markdown?: string; streaming: boolean; id: string }
   | { kind: "mcp_inventory"; text: string; id: string }
@@ -181,16 +213,6 @@ export type TimelineRow =
   | { kind: "compaction"; text: string; summary?: string; id: string }
   | { kind: "error"; title: string; text: string; body?: string; id: string }
   | { kind: "notice"; tone: "info" | "warning" | "success"; title: string; detail?: string; body?: string; id: string };
-
-export type ExplorationItem = {
-  tool: string;
-  verb: "read" | "list" | "search";
-  target: string;
-  status: string;
-  result?: string;
-  fullResult?: string;
-  toolCallId: string | undefined;
-};
 
 export type McpToolRowData = {
   server: string;
@@ -210,6 +232,10 @@ export type TodoListRowItem = {
   status: "completed" | "in_progress" | "pending" | "blocked";
   priority?: string;
 };
+
+const BACKGROUND_COMPLETION = Symbol("backgroundCompletion");
+type BackgroundCompletion = { jobId?: string; processId?: string; status: string };
+type BackgroundCompletionRow = Extract<TimelineRow, { kind: "artifact" }> & { [BACKGROUND_COMPLETION]?: BackgroundCompletion };
 
 const DEFAULT_WIDTH = 120;
 
@@ -264,17 +290,54 @@ export function projectMessagesToRows(
     if (preview.providerToolCallId && persistedProviderToolCalls.has(providerToolCallKey(preview.turnId, preview.providerToolCallId))) continue;
     const tool = preview.tool || "tool";
     const args = previewArguments(preview.rawArguments);
-    rows.push({
+    const row: ToolTimelineRow = {
       kind: "tool",
       tool,
       args,
       argsSummary: summarizeToolArgs(tool, args, 80),
       status: "pending",
       toolCallId: preview.providerToolCallId,
-      id: preview.providerToolCallId ? toolTimelineRowId(preview.turnId, preview.providerToolCallId) : preview.id
-    });
+      id: preview.providerToolCallId ? toolTimelineRowId(preview.turnId, preview.providerToolCallId) : preview.id,
+      presentation: presentToolActivity({ tool, args, status: "pending" })
+    };
+    rows.push(row);
   }
-  return groupExplorationRows(rows);
+  return groupActivityRows(rows);
+}
+
+export function reconcileTimelineRows(rows: TimelineRow[]): TimelineRow[] {
+  const jobs = new Map<string, number>();
+  const processes = new Map<string, number>();
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (row.kind !== "tool") continue;
+    if (row.jobId) jobs.set(row.jobId, index);
+    if (row.processId) processes.set(row.processId, index);
+  }
+  const suppressed = new Set<number>();
+  const replacements = new Map<number, TimelineRow>();
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (row.kind !== "artifact") continue;
+    const completion = (row as BackgroundCompletionRow)[BACKGROUND_COMPLETION];
+    if (!completion) continue;
+    const targetIndex = completion.jobId ? jobs.get(completion.jobId) : completion.processId ? processes.get(completion.processId) : undefined;
+    if (targetIndex === undefined) continue;
+    const target = (replacements.get(targetIndex) ?? rows[targetIndex]) as TimelineRow;
+    if (target.kind !== "tool") continue;
+    const status = completion.status === "succeeded" ? "done" : "error";
+    const updated: ToolTimelineRow = {
+      ...target,
+      status,
+      result: row.body ?? row.detail,
+      fullResult: row.body ?? row.detail
+    };
+    updated.presentation = presentToolActivity(updated);
+    replacements.set(targetIndex, updated);
+    suppressed.add(index);
+  }
+  if (suppressed.size === 0) return rows;
+  return rows.flatMap((row, index) => suppressed.has(index) ? [] : [replacements.get(index) ?? row]);
 }
 
 function hoistLateThinking(rows: TimelineRow[], start: number): void {
@@ -366,7 +429,7 @@ function partToRow(
       const processId = latest?.processId ?? record?.processId;
       const jobId = latest?.jobId ?? record?.jobId;
       const providerToolCallId = latest?.providerToolCallId ?? record?.providerToolCallId;
-      const row: Extract<TimelineRow, { kind: "tool" }> = {
+      const row: ToolTimelineRow = {
         kind: "tool",
         tool,
         args,
@@ -376,7 +439,9 @@ function partToRow(
         ...(processId ? { processId } : {}),
         ...(jobId ? { jobId } : {}),
         toolCallId,
-        id: providerToolCallId ? toolTimelineRowId(message.turnId, providerToolCallId) : part.id
+        id: providerToolCallId ? toolTimelineRowId(message.turnId, providerToolCallId) : part.id,
+        ...(part.createdAt ? { startedAt: part.createdAt } : {}),
+        presentation: presentToolActivity({ tool, args, status, ...(liveOutput ? { liveOutput } : {}) })
       };
       if (toolCallId) toolRows.set(toolCallId, row);
       return row;
@@ -400,11 +465,17 @@ function partToRow(
         const mcp = mcpToolRowData(toolResult);
         if (mcp) linked.mcp = mcp;
         if (toolResult?.processId) linked.processId = toolResult.processId;
-        if (linked.status === "pending" || linked.status === "running") linked.status = "done";
+        if (toolResult?.jobId) linked.jobId = toolResult.jobId;
+        if (toolResult?.status) linked.status = toolResult.status;
+        else if (toolResult?.ok === false) linked.status = "error";
+        else if (linked.status === "pending" || linked.status === "running") linked.status = "done";
+        const durationMs = elapsedMs(linked.startedAt, part.createdAt);
+        if (durationMs !== undefined) linked.durationMs = durationMs;
+        linked.presentation = presentToolActivity(linked);
         return null;
       }
       const mcp = mcpToolRowData(toolResult);
-      return {
+      const row: ToolTimelineRow = {
         kind: "tool",
         tool: extractField(part.payload, "tool") ?? "tool",
         args: undefined,
@@ -416,8 +487,17 @@ function partToRow(
         ...(toolResult?.processId ? { processId: toolResult.processId } : {}),
         ...(toolResult ? { toolResult } : {}),
         toolCallId,
-        id: part.id
+        id: part.id,
+        presentation: presentToolActivity({
+          tool: extractField(part.payload, "tool") ?? "tool",
+          args: undefined,
+          status: "done",
+          result: truncatePayload(display, width * 4),
+          ...(fullResult !== undefined ? { fullResult } : {}),
+          ...(toolResult ? { toolResult } : {})
+        })
       };
+      return row;
     }
     case "planner_attempt":
     case "provider_context":
@@ -425,7 +505,28 @@ function partToRow(
       return null;
     case "tool_started":
       return null;
-    case "tool_progress":
+    case "tool_progress": {
+      const toolCallId = extractField(part.payload, "toolCallId");
+      const linked = toolCallId ? toolRows.get(toolCallId) : undefined;
+      if (linked) {
+        const artifactId = extractField(part.payload, "artifactId");
+        const path = extractField(part.payload, "path");
+        const bytes = field(part.payload, "bytes");
+        linked.toolResult = {
+          ...(linked.toolResult ?? { ok: true, summary: linked.result ?? "tool output saved" }),
+          ...(artifactId ? { outputArtifactId: artifactId } : {}),
+          metadata: {
+            ...(linked.toolResult?.metadata ?? {}),
+            outputArtifact: {
+              ...(artifactId ? { id: artifactId } : {}),
+              ...(path ? { path } : {}),
+              ...(typeof bytes === "number" ? { bytes } : {})
+            }
+          }
+        };
+        linked.presentation = presentToolActivity(linked);
+        return null;
+      }
       return {
         kind: "progress",
         title: "tool progress",
@@ -433,6 +534,7 @@ function partToRow(
         status: progressStatus(part.payload),
         id: part.id
       };
+    }
     case "phase_change":
       return {
         kind: "phase",
@@ -443,6 +545,18 @@ function partToRow(
     case "artifact":
       if (looksLikePlanPayload(part.payload)) return planRow(part, width, streaming);
       if (extractField(part.payload, "kind") === "mcp_inventory") return mcpInventoryRow(part, width);
+      if (extractField(part.payload, "kind") === "background_job_completion") {
+        const linked = backgroundCompletionToolRow(part.payload, toolRows);
+        if (linked) {
+          const status = extractField(part.payload, "status");
+          const summary = extractField(part.payload, "summary") ?? "background job completed";
+          linked.status = status === "succeeded" ? "done" : "error";
+          linked.result = summary;
+          linked.fullResult = summary;
+          linked.presentation = presentToolActivity(linked);
+          return null;
+        }
+      }
       return artifactRow(part, width);
     case "finding":
       return findingRow(part, width);
@@ -456,6 +570,24 @@ function partToRow(
     case "compaction":
       return { kind: "compaction", text: safeText(part.payload, width * 2), id: part.id };
     case "error":
+      {
+        const toolCallId = extractField(part.payload, "toolCallId");
+        const linked = toolCallId ? toolRows.get(toolCallId) : undefined;
+        if (linked) {
+          const error = extractField(part.payload, "error")
+            ?? extractField(part.payload, "message")
+            ?? extractField(part.payload, "text")
+            ?? "tool failed";
+          linked.status = "error";
+          linked.result = error;
+          linked.fullResult = error;
+          linked.toolResult = { ok: false, summary: error, output: error };
+          const durationMs = elapsedMs(linked.startedAt, part.createdAt);
+          if (durationMs !== undefined) linked.durationMs = durationMs;
+          linked.presentation = presentToolActivity(linked);
+          return null;
+        }
+      }
       return errorRow(part, width);
     case "planner_error":
       return (part.payload as { retrying?: unknown } | undefined)?.retrying === true ? null : errorRow(part, width);
@@ -539,14 +671,32 @@ function providerToolCallKey(turnId: string, providerToolCallId: string): string
   return `${turnId}\u0000${providerToolCallId}`;
 }
 
-function groupExplorationRows(rows: TimelineRow[]): TimelineRow[] {
+function elapsedMs(startedAt: string | undefined, finishedAt: string | undefined): number | undefined {
+  if (!startedAt || !finishedAt) return undefined;
+  const started = Date.parse(startedAt);
+  const finished = Date.parse(finishedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return undefined;
+  return finished - started;
+}
+
+function backgroundCompletionToolRow(
+  payload: unknown,
+  toolRows: Map<string, ToolTimelineRow>
+): ToolTimelineRow | undefined {
+  const jobId = extractField(payload, "jobId");
+  const processId = extractField(payload, "processId");
+  const candidates = [...toolRows.values()].reverse();
+  return candidates.find((row) => (jobId && row.jobId === jobId) || (processId && row.processId === processId));
+}
+
+function groupActivityRows(rows: TimelineRow[]): TimelineRow[] {
   const grouped: TimelineRow[] = [];
-  let pending: Extract<TimelineRow, { kind: "tool" }>[] = [];
+  let pending: ToolTimelineRow[] = [];
   let activeTodoRow: Extract<TimelineRow, { kind: "todo_list" }> | undefined;
   const flush = () => {
     if (pending.length === 0) return;
     if (pending.length === 1) grouped.push(pending[0]!);
-    else grouped.push(toExplorationRow(pending));
+    else grouped.push(toActivityRow(pending));
     pending = [];
   };
   for (const row of rows) {
@@ -556,8 +706,10 @@ function groupExplorationRows(rows: TimelineRow[]): TimelineRow[] {
       activeTodoRow = appendTodoRow(grouped, row, activeTodoRow);
       continue;
     }
-    if (row.kind === "tool" && isExplorationTool(row.tool)) {
+    if (row.kind === "tool" && canGroupToolRow(row)) {
+      if (pending.length > 0 && !canJoinActivity(pending[0]!, row)) flush();
       pending.push(row);
+      if (pending.length >= 8) flush();
       continue;
     }
     flush();
@@ -565,6 +717,49 @@ function groupExplorationRows(rows: TimelineRow[]): TimelineRow[] {
   }
   flush();
   return grouped;
+}
+
+function canGroupToolRow(row: ToolTimelineRow): boolean {
+  return Boolean(row.presentation.groupKey) && !row.presentation.standalone;
+}
+
+function canJoinActivity(first: ToolTimelineRow, next: ToolTimelineRow): boolean {
+  return first.presentation.groupKey === next.presentation.groupKey;
+}
+
+function toActivityRow(rows: ToolTimelineRow[]): ActivityTimelineRow {
+  const status = activityStatus(rows);
+  const durationMs = activityDuration(rows);
+  return {
+    kind: "activity",
+    status,
+    label: activityLabel(rows[0]!, rows.length, status === "running"),
+    items: rows,
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    id: rows[0]!.id
+  };
+}
+
+function activityLabel(first: ToolTimelineRow, count: number, active: boolean): string {
+  const presentation = first.presentation;
+  const verb = active ? presentation.groupActive ?? "running" : presentation.groupPast ?? "ran";
+  const [action = verb, qualifier] = verb.split(" · ", 2);
+  const noun = presentation.family === "command"
+    ? "command"
+    : presentation.family === "workspace"
+      ? "workspace item"
+      : presentation.family === "browser"
+        ? "browser action"
+        : presentation.family === "http"
+          ? "endpoint"
+          : presentation.family === "proxy"
+            ? "proxy action"
+            : presentation.family === "knowledge"
+              ? "knowledge source"
+              : presentation.family === "mcp"
+                ? "mcp call"
+                : "operation";
+  return `${action} ${count} ${noun}${count === 1 ? "" : "s"}${qualifier ? ` · ${qualifier}` : ""}`;
 }
 
 function appendTodoRow(
@@ -595,33 +790,6 @@ function upsertTodoItem(items: TodoListRowItem[], next: TodoListRowItem): void {
   const index = next.id ? items.findIndex((item) => item.id === next.id) : -1;
   if (index >= 0) items[index] = { ...items[index], ...next };
   else items.push(next);
-}
-
-function toExplorationRow(rows: Array<Extract<TimelineRow, { kind: "tool" }>>): Extract<TimelineRow, { kind: "exploration" }> {
-  return {
-    kind: "exploration",
-    status: explorationStatus(rows),
-    id: rows.map((row) => row.id).join(":"),
-    items: rows.map((row) => ({
-      tool: row.tool,
-      verb: explorationVerb(row.tool),
-      target: summarizeToolArgs(row.tool, row.args, 120) || shortToolName(row.tool),
-      status: row.status,
-      ...(row.result ? { result: firstResultLine(row.result, 120) } : {}),
-      ...(row.fullResult || row.result ? { fullResult: row.fullResult ?? row.result } : {}),
-      toolCallId: row.toolCallId
-    }))
-  };
-}
-
-function explorationStatus(rows: Array<Extract<TimelineRow, { kind: "tool" }>>): "running" | "failed" | "done" {
-  if (rows.some((row) => row.status === "running" || row.status === "pending")) return "running";
-  if (rows.some((row) => row.status === "failed" || row.status === "error")) return "failed";
-  return "done";
-}
-
-function isExplorationTool(tool: string): boolean {
-  return isWorkspaceExplorationTool(tool);
 }
 
 function isTodoTool(tool: string): boolean {
@@ -816,7 +984,9 @@ function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "a
       };
     }
     const summary = extractField(payload, "summary") ?? "background job completed.";
-    return {
+    const jobId = extractField(payload, "jobId");
+    const processId = extractField(payload, "processId");
+    const row: BackgroundCompletionRow = {
       kind: "artifact",
       title: status === "succeeded" ? "background job completed" : `background job ${status}`,
       detail: truncateLine(singleLine(summary), width),
@@ -824,6 +994,11 @@ function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "a
       bodyFormat: "text",
       id: part.id
     };
+    Object.defineProperty(row, BACKGROUND_COMPLETION, {
+      value: { ...(jobId ? { jobId } : {}), ...(processId ? { processId } : {}), status },
+      enumerable: false
+    });
+    return row;
   }
   const note = extractObject(payload, "note");
   const artifact = extractObject(payload, "artifact") ?? extractObject(payload, "outputArtifact");

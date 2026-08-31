@@ -98,6 +98,12 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
   agent_followup: ["continued agent", "continuing agent"],
   agent_interrupt: ["interrupted agent", "interrupting agent"],
   agent_close: ["closed agent", "closing agent"],
+  skill_load: ["loaded skill", "loading skill"],
+  callback_host_info: ["inspected host network", "inspecting host network"],
+  callback_listen: ["started callback listener", "starting callback listener"],
+  callback_oast: ["started oast session", "starting oast session"],
+  callback_stop: ["stopped callback listener", "stopping callback listener"],
+  session_rename: ["renamed session", "renaming session"],
   request_user_input: ["asked user", "asking user"],
   internet_search: ["searched the web", "searching the web"],
   internet_fetch: ["fetched page", "fetching page"],
@@ -369,6 +375,8 @@ function browserToolTitle(tool: string, input: Record<string, unknown>, active: 
 }
 
 function nativeToolTitle(tool: string, input: Record<string, unknown>, active: boolean): string | undefined {
+  if (tool === "callback_host_info") return active ? "inspecting host network" : "inspected host network";
+  if (tool === "callback_oast") return active ? "starting oast session" : "started oast session";
   if (tool === "notebook_edit") {
     const operation = typeof input.operation === "string" ? input.operation : "edit";
     const path = typeof input.path === "string" ? ` in ${input.path}` : "";

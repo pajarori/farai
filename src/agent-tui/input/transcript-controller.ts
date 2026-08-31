@@ -77,14 +77,15 @@ function transcriptRowMarkdown(row: TimelineRow): string {
       const result = row.fullResult ?? row.result;
       return result ? `${header}\n\n### output\n\n${result}` : header;
     }
-    case "exploration":
+    case "activity":
       return [
-        `## ${row.status === "running" ? "exploring" : "explored"}`,
+        `## ${row.label}`,
         "",
         ...row.items.flatMap((item) => [
-          `### ${item.verb} ${item.target}`,
+          `### ${item.presentation.compact}`,
           "",
-          item.fullResult ?? item.result ?? "no output"
+          `status: ${item.status}`,
+          ...(item.fullResult ?? item.result ? ["", item.fullResult ?? item.result ?? ""] : [])
         ])
       ].join("\n");
     case "plan":

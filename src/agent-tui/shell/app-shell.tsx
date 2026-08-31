@@ -13,6 +13,7 @@ import { CenterSurfaceView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
 import { isPrimaryClick } from "../input/mouse";
 import { useTuiDimensions } from "../context/terminal";
+import { SurfaceLayer } from "../ui/surface-layer";
 
 export function AppShell(): JSX.Element {
   const tui = useTuiStore();
@@ -78,14 +79,33 @@ export function AppShell(): JSX.Element {
       >
         <MainTabs />
         <box id="main-surface-viewport" style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: "hidden", flexDirection: "column" }}>
-          <box id="chat-surface" visible={chatActive()} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
+          <SurfaceLayer
+            id="chat-surface"
+            renderChildren={chatActive()}
+            zIndex={chatActive() ? 1 : 0}
+            backgroundColor={COLOR.bg}
+            style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", minHeight: 0, overflow: "hidden", flexDirection: "column" }}
+          >
             <Transcript active={chatActive()} />
-          </box>
-          <box id="proxy-surface" visible={proxyActive()} style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, flexDirection: "column" }}>
+          </SurfaceLayer>
+          <SurfaceLayer
+            id="proxy-surface"
+            renderChildren={proxyActive()}
+            zIndex={proxyActive() ? 1 : 0}
+            backgroundColor={COLOR.bg}
+            style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", minHeight: 0, overflow: "hidden", flexDirection: "column" }}
+          >
             <ProxyLogView active={proxyActive()} />
-          </box>
-          <Show when={centerFrame()} keyed>
-            {(surface) => <CenterSurfaceView frame={surface} />}
+          </SurfaceLayer>
+          <Show when={centerFrame()}>
+            <box
+              id="center-surface-layer"
+              zIndex={2}
+              backgroundColor={COLOR.bg}
+              style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", minHeight: 0, overflow: "hidden", flexDirection: "column" }}
+            >
+              <CenterSurfaceView frame={() => centerFrame()!} />
+            </box>
           </Show>
         </box>
         <Show when={!exiting()} fallback={<ExitStatus />}>

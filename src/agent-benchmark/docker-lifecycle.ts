@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KALI_IMAGE_CONTRACT_LABEL, KaliContainerBackend, type ContainerExecResult, type ProcessRunner } from "../agent-container/kali";
+import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KaliContainerBackend, type ContainerExecResult, type ProcessRunner } from "../agent-container/kali";
 import type { ToolExecutionBackend } from "../agent-tools/shared/backend";
 import { hashPath } from "./hash";
 import type { BenchmarkManifest } from "./types";
@@ -42,13 +42,17 @@ export class BenchmarkDockerLifecycle {
   ) {}
 
   async start(): Promise<{ backend: ToolExecutionBackend; state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> {
-    const inspected = await this.runner("docker", ["image", "inspect", "--format", "{{.Id}}", DEFAULT_KALI_IMAGE]);
-    if (inspected.exitCode !== 0) throw new Error(inspected.stderr || `benchmark agent image is missing: ${DEFAULT_KALI_IMAGE}`);
-    const agentImageId = inspected.stdout.trim();
+    const processRunner: ProcessRunner = (command, args) => this.runner(command, args);
+    const image = await new KaliContainerBackend({
+      workspace: this.workspace,
+      image: DEFAULT_KALI_IMAGE,
+      processRunner
+    }).resolveImage();
+    if (!image.exists) throw new Error(`benchmark agent image is missing: ${DEFAULT_KALI_IMAGE}`);
+    const agentImageId = image.id?.trim() ?? "";
     if (!/^sha256:[a-f0-9]{64}$/i.test(agentImageId)) throw new Error(`docker returned an unpinned agent image id: ${agentImageId || "empty"}`);
-    const contractResult = await this.runner("docker", ["image", "inspect", "--format", `{{index .Config.Labels "${KALI_IMAGE_CONTRACT_LABEL}"}}`, agentImageId]);
-    const agentImageContract = contractResult.stdout.trim();
-    if (contractResult.exitCode !== 0 || agentImageContract !== KALI_IMAGE_CONTRACT) throw new Error(`benchmark agent image does not satisfy the current capability contract: ${agentImageContract || "missing"}`);
+    const agentImageContract = image.contract?.trim() ?? "";
+    if (agentImageContract !== KALI_IMAGE_CONTRACT) throw new Error(`benchmark agent image does not satisfy the current capability contract: ${agentImageContract || "missing"}`);
     const plan = buildBenchmarkDockerPlan(this.manifest, this.workspace, this.runId, agentImageId);
     this.planValue = plan;
     const state: BenchmarkDockerState = {
@@ -73,7 +77,6 @@ export class BenchmarkDockerLifecycle {
       }
       await this.requiredDocker(plan.agentStart, "start benchmark agent");
       state.started = true;
-      const processRunner: ProcessRunner = (command, args) => this.runner(command, args);
       return {
         backend: new KaliContainerBackend({
           workspace: this.workspace,

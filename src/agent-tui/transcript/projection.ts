@@ -1,6 +1,6 @@
 import { createMemo, type Accessor } from "solid-js";
 import type { FaraiTuiStore } from "../store";
-import { projectMessagesToRows, type TimelineRow } from "../renderers";
+import { projectMessagesToRows, reconcileTimelineRows, type TimelineRow } from "../renderers";
 
 export function createTranscriptProjection(
   store: FaraiTuiStore,
@@ -50,5 +50,5 @@ export function createTranscriptProjection(
     activeToolCalls(),
     store.snapshot.toolInputPreviews
   ));
-  return createMemo(() => [...historyRows(), ...activeRows()]);
+  return createMemo(() => reconcileTimelineRows([...historyRows(), ...activeRows()]));
 }

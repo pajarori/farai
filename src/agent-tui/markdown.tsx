@@ -9,11 +9,10 @@ import {
   type MarkdownTableOptions,
   type TextChunk
 } from "@opentui/core";
-import { createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { createEffect, onCleanup, onMount, type JSX } from "solid-js";
 import { highlightCodeFallback } from "./code-highlighter";
-import { normalizeTaskListMarkers, styleMermaidContent, styleTaskGlyphs } from "./markdown-content";
+import { normalizeTaskListMarkers, styleMermaidContent, styleTaskGlyphs, styleUnorderedListGlyphs } from "./markdown-content";
 import { decorateDiffBackground, styleDiffContent } from "./markdown-diff";
-import { scheduleMarkdownFinalize } from "./markdown-finalize";
 import { decorateMarkdownLayout } from "./markdown-layout";
 import { markdownStrikethroughSentinel, markdownSyntax } from "./syntax";
 import { COLOR } from "./theme";
@@ -21,7 +20,6 @@ import { COLOR } from "./theme";
 type MarkdownViewProps = {
   content: string;
   streaming?: boolean;
-  variant?: "transcript" | "document";
   fg?: string;
   id?: string;
 };
@@ -51,7 +49,7 @@ const markdownRenderNode = Object.assign(((token, context) => {
     renderable.conceal = false;
     renderable.filetype = "markdown";
   }
-  enableTextFallback(renderable);
+  if (renderable instanceof CodeRenderable) enhanceMarkdownChunks(renderable);
   return renderable;
 }) satisfies NonNullable<MarkdownOptions["renderNode"]>, { codeBlockOnly: true });
 
@@ -76,7 +74,8 @@ function enhanceMarkdownChunks(renderable: CodeRenderable): void {
     const struck = transformed.map((chunk) => chunk.fg?.equals(strikethroughColor)
       ? { ...chunk, fg: renderable.fg, attributes: (chunk.attributes ?? 0) | strikethroughAttributes }
       : chunk);
-    return styleTaskGlyphs(struck);
+    const tasks = styleTaskGlyphs(struck);
+    return context.filetype === "markdown" ? styleUnorderedListGlyphs(tasks) : tasks;
   };
 }
 
@@ -88,6 +87,7 @@ function enableTextFallback(renderable: BaseRenderable | null | undefined): void
     if (resetStreaming) {
       renderable.streaming = false;
       renderable.streaming = true;
+      renderable.requestRender();
     }
     return;
   }
@@ -97,21 +97,9 @@ function enableTextFallback(renderable: BaseRenderable | null | undefined): void
 }
 
 export function MarkdownView(props: MarkdownViewProps): JSX.Element {
-  const [renderStreaming, setRenderStreaming] = createSignal(true);
-  let cancelFinalize = () => {};
   let markdownRef: MarkdownRenderable | undefined;
   let fallbackGeneration = 0;
-
-  createEffect(() => {
-    void props.content;
-    cancelFinalize();
-    cancelFinalize = () => {};
-    setRenderStreaming(true);
-    if (props.streaming) {
-      return;
-    }
-    cancelFinalize = scheduleMarkdownFinalize(() => setRenderStreaming(false));
-  });
+  const renderStreaming = () => props.streaming === true;
 
   createEffect(() => {
     void props.content;
@@ -126,31 +114,28 @@ export function MarkdownView(props: MarkdownViewProps): JSX.Element {
   onMount(() => {
     if (!markdownRef || markdownRef.isDestroyed) return;
     markdownRef.refreshStyles();
-    enableTextFallback(markdownRef);
   });
 
   onCleanup(() => {
     fallbackGeneration += 1;
-    cancelFinalize();
   });
 
   return (
     <markdown
       ref={(renderable) => {
         markdownRef = renderable;
-        enableTextFallback(renderable);
       }}
       {...(props.id ? { id: props.id } : {})}
       width="100%"
-      internalBlockMode={props.variant === "document" ? "coalesced" : "top-level"}
+      internalBlockMode="coalesced"
       conceal={true}
       concealCode={false}
       syntaxStyle={markdownSyntax(props.fg ?? COLOR.markdownText)}
       tableOptions={markdownTableOptions}
       renderNode={markdownRenderNode}
       fg={props.fg ?? COLOR.markdownText}
-      streaming={renderStreaming()}
       content={normalizeTaskListMarkers(props.content)}
+      streaming={renderStreaming()}
     />
   );
 }

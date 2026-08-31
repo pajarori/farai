@@ -1,6 +1,4 @@
 import {
-  StyledText,
-  TextRenderable,
   TextTableRenderable,
   createTextAttributes,
   parseColor,
@@ -11,8 +9,6 @@ import { terminalWidth } from "./terminal-text";
 import { COLOR } from "./theme";
 
 const tableRuleColor = parseColor(COLOR.dim);
-const unorderedListMarkerColors = [parseColor(COLOR.accent), parseColor(COLOR.muted), parseColor(COLOR.dim)] as const;
-const unorderedListMarkers = ["•", "›", "·"] as const;
 const tableResizeHooks = new WeakSet<TextTableRenderable>();
 const enhancedTables = new WeakMap<TextTableRenderable, {
   source: TextChunk[][][];
@@ -81,25 +77,9 @@ function applyTableHeaderRule(table: TextTableRenderable): void {
   };
 }
 
-function decorateUnorderedListMarker(renderable: TextRenderable): void {
-  if (!renderable.id.endsWith("-marker")) return;
-  if (renderable.chunks.map((chunk) => chunk.text).join("").trim() !== "-") return;
-  const depth = Math.max(0, (renderable.id.match(/-item-\d+/g)?.length ?? 1) - 1);
-  const index = depth % unorderedListMarkers.length;
-  renderable.content = new StyledText([{
-    __isChunk: true,
-    text: `${unorderedListMarkers[index]!} `,
-    fg: unorderedListMarkerColors[index]!
-  }]);
-}
-
 export function decorateMarkdownLayout(renderable: BaseRenderable): boolean {
   if (renderable instanceof TextTableRenderable) {
     applyTableHeaderRule(renderable);
-    return true;
-  }
-  if (renderable instanceof TextRenderable) {
-    decorateUnorderedListMarker(renderable);
     return true;
   }
   return false;

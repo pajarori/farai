@@ -1,12 +1,13 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { For, Show, createEffect, createMemo, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
-import { formatPayload, truncateLine, type TimelineRow } from "../renderers";
+import { formatPayload, truncateLine, type TimelineRow, type ToolTimelineRow } from "../renderers";
 import { formatCompactSummary } from "../../agent-core/loop/compaction";
 import { COLOR } from "../theme";
 import { FaraiRow } from "./cells";
 import { FARAI_BANNER_LINES } from "../../branding";
 import { useTuiDimensions } from "../context/terminal";
+import { presentToolActivity } from "../tool-activity";
 
 export function Transcript(props: { active?: boolean } = {}): JSX.Element {
   const tui = useTuiStore();
@@ -186,7 +187,46 @@ function nextNavigationIndex(direction: "next" | "prev", currentIndex: number, i
 }
 
 function timelineRowsEqual(left: TimelineRow, right: TimelineRow): boolean {
-  return left.kind === right.kind && left.id === right.id && valuesEqual(left, right, new WeakMap());
+  if (left.kind !== right.kind || left.id !== right.id) return false;
+  if (left.kind === "tool" && right.kind === "tool") return toolRowsEqual(left, right);
+  if (left.kind === "activity" && right.kind === "activity") {
+    if (left.status !== right.status || left.label !== right.label || left.durationMs !== right.durationMs || left.items.length !== right.items.length) return false;
+    return left.items.every((item, index) => toolRowsEqual(item, right.items[index]!));
+  }
+  return valuesEqual(left, right, new WeakMap());
+}
+
+function toolRowsEqual(left: ToolTimelineRow, right: ToolTimelineRow): boolean {
+  return left.id === right.id
+    && left.tool === right.tool
+    && left.status === right.status
+    && left.liveOutput === right.liveOutput
+    && left.result === right.result
+    && left.fullResult === right.fullResult
+    && left.processId === right.processId
+    && left.jobId === right.jobId
+    && left.toolCallId === right.toolCallId
+    && left.durationMs === right.durationMs
+    && presentationEqual(left.presentation, right.presentation)
+    && valuesEqual(left.args, right.args, new WeakMap())
+    && valuesEqual(left.toolResult, right.toolResult, new WeakMap())
+    && valuesEqual(left.mcp, right.mcp, new WeakMap());
+}
+
+function presentationEqual(left: ToolTimelineRow["presentation"], right: ToolTimelineRow["presentation"]): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.family !== right.family
+    || left.title !== right.title
+    || left.compact !== right.compact
+    || left.outcome !== right.outcome
+    || left.groupKey !== right.groupKey
+    || left.groupPast !== right.groupPast
+    || left.groupActive !== right.groupActive
+    || left.standalone !== right.standalone
+    || left.warning !== right.warning
+    || left.preview.length !== right.preview.length) return false;
+  return left.preview.every((line, index) => line === right.preview[index]);
 }
 
 function valuesEqual(left: unknown, right: unknown, seen: WeakMap<object, WeakSet<object>>): boolean {
@@ -224,16 +264,26 @@ type TranscriptRowProps = {
 };
 
 function TranscriptRow(props: TranscriptRowProps): JSX.Element {
+  const row = () => normalizeTimelineRow(props.row);
   return (
     <box
-      id={props.row.id}
+      id={row().id}
       style={{
         flexDirection: "column",
         flexShrink: 0,
-        paddingRight: props.row.kind === "user" ? 0 : 1
+        paddingRight: row().kind === "user" ? 0 : 1
       }}
     >
-      <FaraiRow row={props.row} streamedText={props.streamedText} streamedReasoning={props.streamedReasoning} animated={props.animated} />
+      <FaraiRow row={row()} streamedText={props.streamedText} streamedReasoning={props.streamedReasoning} animated={props.animated} />
     </box>
   );
+}
+
+function normalizeTimelineRow(row: TimelineRow): TimelineRow {
+  if (row.kind === "tool" && !row.presentation) return { ...row, presentation: presentToolActivity(row) };
+  if (row.kind !== "activity" || row.items.every((item) => item.presentation)) return row;
+  return {
+    ...row,
+    items: row.items.map((item) => item.presentation ? item : { ...item, presentation: presentToolActivity(item) })
+  };
 }

@@ -1,5 +1,5 @@
 import { For, Index, Show, type JSX } from "solid-js";
-import type { ExplorationItem, TimelineRow } from "../../renderers";
+import type { TimelineRow, ToolTimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
 import { inferFiletype } from "../../filetype";
 import { syntax } from "../../syntax";
@@ -7,13 +7,13 @@ import { COLOR } from "../../theme";
 import { useTuiDimensions } from "../../context/terminal";
 import { parseDirectoryResults, parseNmap, splitHttpResponse, unifiedEditDiff } from "../../tool-renderers";
 import { useTuiStore } from "../../context/store";
-import { args, firstResultLine, tailLines } from "./text-utils";
+import { args, tailLines } from "./text-utils";
 import {
   isActiveToolStatus,
   shortToolName,
-  toolInputKind,
-  toolTitle
+  toolInputKind
 } from "../../tool-presentation";
+import { formatActivityDuration, presentToolActivity } from "../../tool-activity";
 import { titleFromPrompt } from "../../../session-title";
 import { ExpandedPanel } from "./expanded-panel";
 import { TranscriptMarker } from "./transcript-marker";
@@ -27,15 +27,9 @@ type ToolRowProps = {
   animated?: boolean | undefined;
 };
 
-type ExplorationRowProps = {
-  row: Extract<TimelineRow, { kind: "exploration" }>;
+type ActivityRowProps = {
+  row: Extract<TimelineRow, { kind: "activity" }>;
   animated?: boolean | undefined;
-};
-
-type ExplorationItemRowProps = {
-  item: ExplorationItem;
-  expanded: boolean;
-  last: boolean;
 };
 
 type ToolInputProps = {
@@ -49,12 +43,22 @@ type ToolResultProps = ToolInputProps & {
 };
 
 export function ToolRow(props: ToolRowProps): JSX.Element {
+  return (
+    <Show
+      when={["agent_task", "agent_spawn", "agent_followup"].includes(props.row.tool)}
+      fallback={<StandardToolRow row={props.row} animated={props.animated} />}
+    >
+      <AgentTaskRow row={props.row} animated={props.animated} />
+    </Show>
+  );
+}
+
+function StandardToolRow(props: ToolRowProps): JSX.Element {
   const tui = useTuiStore();
   const dims = useTuiDimensions();
   const contentWidth = () => Math.max(1, dims().width - 6);
   const input = () => args(props.row.args);
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
-  const title = () => toolTitle(props.row.tool, input(), props.row.status, Math.max(1, dims().width - 4));
   const result = () => props.row.result ?? "";
   const fullResult = () => props.row.fullResult ?? result();
   const mcpInvocation = () => props.row.mcp
@@ -63,6 +67,7 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
   const mcpResult = () => props.row.mcp ? mcpContentLines(props.row.mcp.result) : [];
   const isMcp = () => Boolean(props.row.mcp);
   const active = () => isActiveToolStatus(props.row.status);
+  const presentation = () => props.row.presentation ?? presentToolActivity(props.row);
   const visibleOutput = () => active() ? props.row.liveOutput ?? "" : result();
   const detailOutput = () => {
     if (isMcp() && mcpResult().length > 0) return mcpResult().join("\n");
@@ -70,22 +75,26 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
     return fullResult();
   };
   const hasInput = () => Object.keys(input()).length > 0;
-  const headerLabel = () => truncateLine(
-    isMcp() ? `${active() ? "calling" : "called"} ${mcpInvocation()}` : title(),
-    Math.max(1, dims().width - 4)
-  );
+  const header = () => {
+    const title = isMcp() ? `${active() ? "calling" : "called"} ${mcpInvocation()}` : presentation().title;
+    const right = [presentation().outcome, formatActivityDuration(props.row.durationMs)].filter(Boolean).join(" · ");
+    return fitTerminalPair(title, right, Math.max(1, dims().width - 4), 8, 2);
+  };
   const headerColor = () => active() ? COLOR.accent : toolColor(props.row.status);
   const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   const previewClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
-  const visibleOutputLines = () => active()
-    ? tailLines(visibleOutput(), 3)
-    : previewOutputLines(visibleOutput(), TOOL_OUTPUT_PREVIEW_LINES);
-  if (["agent_task", "agent_spawn", "agent_followup"].includes(props.row.tool)) return <AgentTaskRow row={props.row} animated={props.animated} />;
+  const semanticPreview = () => presentation().preview.filter((line) => line.trim() !== presentation().outcome?.trim());
+  const visibleOutputLines = () => presentation().preview.length > 0
+    ? semanticPreview()
+    : active()
+      ? tailLines(visibleOutput(), 3)
+      : previewOutputLines(visibleOutput(), TOOL_OUTPUT_PREVIEW_LINES);
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
       <box style={{ flexDirection: "row" }} {...toggleClick}>
         <TranscriptMarker color={headerColor()} spinning={active()} animated={props.animated} />
-        <text fg={headerColor()}>{headerLabel()}</text>
+        <text fg={headerColor()}>{header().left}</text>
+        <Show when={header().right}><text fg={presentation().warning ? COLOR.warning : COLOR.dim}>{`  ${header().right}`}</text></Show>
       </box>
 
       <Show when={!expanded() && !isMcp() && visibleOutput()}>
@@ -122,9 +131,123 @@ export function ToolRow(props: ToolRowProps): JSX.Element {
               <ToolInput tool={props.row.tool} input={input()} />
             </box>
           </Show>
+          <ToolResultContext row={props.row} />
         </ExpandedPanel>
       </Show>
     </box>
+  );
+}
+
+export function ActivityRow(props: ActivityRowProps): JSX.Element {
+  const tui = useTuiStore();
+  const dims = useTuiDimensions();
+  const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
+  const active = () => props.row.status === "running";
+  const color = () => props.row.status === "error" ? COLOR.error : active() ? COLOR.accent : COLOR.text;
+  const duration = () => formatActivityDuration(props.row.durationMs);
+  const headline = () => fitTerminalPair(props.row.label, duration() ?? "", Math.max(1, dims().width - 4), 8, 2);
+  const width = () => Math.max(1, dims().width - 8);
+  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
+  return (
+    <box style={{ flexDirection: "column", marginBottom: 1 }}>
+      <box style={{ flexDirection: "row" }} {...toggleClick}>
+        <TranscriptMarker color={color()} spinning={active()} animated={props.animated} />
+        <text fg={color()}>{headline().left}</text>
+        <Show when={headline().right}><text fg={COLOR.dim}>{`  ${headline().right}`}</text></Show>
+      </box>
+      <Show when={!expanded()}>
+        <box style={{ flexDirection: "column", paddingLeft: 2 }} {...toggleClick}>
+          <For each={props.row.items}>{(item, index) => {
+            const presentation = () => item.presentation ?? presentToolActivity(item);
+            const pair = () => fitTerminalPair(presentation().compact, presentation().outcome ?? "", width(), 8, 3);
+            return (
+              <box style={{ flexDirection: "row" }}>
+                <text fg={COLOR.dim}>{index() === 0 ? "└ " : "  "}</text>
+                <text fg={COLOR.dim}>{pair().left}</text>
+                <Show when={pair().right}><text fg={presentation().warning ? COLOR.warning : COLOR.dim}>{` → ${pair().right}`}</text></Show>
+              </box>
+            );
+          }}</For>
+        </box>
+      </Show>
+      <Show when={expanded()}>
+        <ExpandedPanel>
+          <For each={props.row.items}>{(item, index) => {
+            const itemInput = () => args(item.args);
+            const output = () => item.fullResult ?? item.result ?? item.liveOutput ?? "";
+            const presentation = () => item.presentation ?? presentToolActivity(item);
+            return (
+              <box style={{ flexDirection: "column", marginTop: index() === 0 ? 0 : 1 }}>
+                <text fg={COLOR.text}>{presentation().compact}</text>
+                <Show when={presentation().outcome}><text fg={presentation().warning ? COLOR.warning : COLOR.dim}>{presentation().outcome}</text></Show>
+                <Show when={output()} fallback={<text fg={COLOR.dim}>{toolEmptyState(item.status)}</text>}>
+                  {(value) => <ToolResult tool={item.tool} input={itemInput()} text={value()} width={dims().width} />}
+                </Show>
+                <Show when={Object.keys(itemInput()).length > 0}>
+                  <box style={{ flexDirection: "column", marginTop: 1 }}>
+                    <text fg={COLOR.dim}>input</text>
+                    <ToolInput tool={item.tool} input={itemInput()} />
+                  </box>
+                </Show>
+                <ToolResultContext row={item} />
+              </box>
+            );
+          }}</For>
+        </ExpandedPanel>
+      </Show>
+    </box>
+  );
+}
+
+function ToolResultContext(props: { row: ToolTimelineRow }): JSX.Element {
+  const dims = useTuiDimensions();
+  const result = () => props.row.toolResult;
+  const evidence = () => result()?.evidence ?? [];
+  const attachments = () => result()?.attachments ?? [];
+  const metadata = () => result()?.metadata ?? {};
+  const artifact = () => {
+    const value = metadata().outputArtifact;
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  };
+  return (
+    <Show when={result()}>
+      <box style={{ flexDirection: "column" }}>
+        <Show when={evidence().length > 0}>
+          <box style={{ flexDirection: "column", marginTop: 1 }}>
+            <text fg={COLOR.dim}>evidence</text>
+            <For each={evidence()}>{(item) => (
+              <text fg={COLOR.text}>{[item.id, item.title, item.summary, item.path].filter(Boolean).join(" · ")}</text>
+            )}</For>
+          </box>
+        </Show>
+        <Show when={result()?.outputArtifactId || artifact()}>
+          <box style={{ flexDirection: "column", marginTop: 1 }}>
+            <text fg={COLOR.dim}>artifact</text>
+            <For each={toolInputDetailLines({
+              ...(result()?.outputArtifactId ? { id: result()?.outputArtifactId } : {}),
+              ...(artifact() ?? {})
+            })}>{(line) => <text fg={COLOR.text}>{line}</text>}</For>
+          </box>
+        </Show>
+        <Show when={attachments().length > 0}>
+          <box style={{ flexDirection: "column", marginTop: 1 }}>
+            <text fg={COLOR.dim}>attachments</text>
+            <For each={attachments()}>{(item) => (
+              <box style={{ flexDirection: "column" }}>
+                <text fg={COLOR.text}>{[item.name ?? "image", item.mediaType, item.detail].filter(Boolean).join(" · ")}</text>
+                <image source={attachmentBytes(item.data)} fit="fit" protocol="auto" style={{ width: Math.max(1, dims().width - 10), height: Math.max(3, Math.min(12, Math.floor(dims().height / 3))) }} />
+              </box>
+            )}</For>
+          </box>
+        </Show>
+        <Show when={Object.keys(metadata()).length > 0}>
+          <box style={{ flexDirection: "column", marginTop: 1 }}>
+            <text fg={COLOR.dim}>metadata</text>
+            <For each={toolInputDetailLines(metadata())}>{(line) => <text fg={COLOR.text}>{line}</text>}</For>
+          </box>
+        </Show>
+      </box>
+    </Show>
   );
 }
 
@@ -235,41 +358,6 @@ function agentDuration(startedAt: string | undefined, completedAt: string | unde
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
-}
-
-export function ExplorationRow(props: ExplorationRowProps): JSX.Element {
-  const tui = useTuiStore();
-  const dims = useTuiDimensions();
-  const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
-  const active = () => isActiveToolStatus(props.row.status);
-  const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
-  return (
-    <box style={{ flexDirection: "column", marginBottom: 1 }}>
-      <box style={{ flexDirection: "row" }} {...toggleClick}>
-        <TranscriptMarker color={active() ? COLOR.accent : COLOR.text} spinning={active()} animated={props.animated} />
-        <text fg={active() ? COLOR.accent : COLOR.text}>{active() ? "exploring" : "explored"}</text>
-      </box>
-      <box style={{ flexDirection: "column", paddingLeft: 2 }}>
-        <For each={props.row.items}>{(item, index) => <ExplorationItemRow item={item} expanded={expanded()} last={index() === props.row.items.length - 1} width={dims().width} />}</For>
-      </box>
-    </box>
-  );
-}
-
-function ExplorationItemRow(props: ExplorationItemRowProps & { width: number }): JSX.Element {
-  return (
-    <box style={{ flexDirection: "column" }}>
-      <text fg={COLOR.dim}>{truncateLine(`└ ${props.item.verb} ${props.item.target}`, Math.max(1, props.width - 4))}</text>
-      <Show when={props.expanded}>
-        <ExpandedPanel marginBottom={props.last ? 0 : 1}>
-          <text fg={COLOR.dim}>{"result"}</text>
-          <Show when={props.item.fullResult ?? props.item.result} fallback={<text fg={COLOR.dim}>{isActiveToolStatus(props.item.status) ? "waiting for output" : "no output"}</text>}>
-            {(result) => <code content={result()} filetype="text" syntaxStyle={syntax()} fg={COLOR.text} />}
-          </Show>
-        </ExpandedPanel>
-      </Show>
-    </box>
-  );
 }
 
 function ToolInput(props: ToolInputProps): JSX.Element {
@@ -405,9 +493,14 @@ function resultFiletype(text: string, path: string): string {
 
 function mcpContentLines(result: unknown): string[] {
   if (!result || typeof result !== "object") return [];
-  const content = (result as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return [JSON.stringify(result)];
-  return content.map(mcpContentLine).filter((line) => line.trim().length > 0);
+  const record = result as Record<string, unknown>;
+  const content = record.content;
+  const contentLines = Array.isArray(content) ? content.map(mcpContentLine).filter((line) => line.trim().length > 0) : [];
+  const structured = record.structuredContent;
+  const structuredLines = structured === undefined ? [] : semanticValueLines("structured content", structured, 0);
+  const errorLine = record.isError === true ? ["mcp result reported an error"] : [];
+  if (contentLines.length || structuredLines.length || errorLine.length) return [...errorLine, ...contentLines, ...structuredLines];
+  return Object.entries(record).flatMap(([key, value]) => semanticValueLines(key, value, 0));
 }
 
 function mcpContentLine(part: unknown): string {
@@ -430,4 +523,8 @@ function mcpContentLine(part: unknown): string {
   }
   try { return JSON.stringify(record); }
   catch { return String(record); }
+}
+
+function attachmentBytes(data: string): Uint8Array {
+  return Uint8Array.from(Buffer.from(data, "base64"));
 }
