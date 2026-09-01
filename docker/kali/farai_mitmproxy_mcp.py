@@ -17,6 +17,7 @@ from mitmproxy_mcp.core import server
 
 
 UPSTREAM_TRAFFIC_RECORDER = server.TrafficRecorder
+UPSTREAM_MITM_CONTROLLER = server.MitmController
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -31,6 +32,84 @@ MAX_BODY_PREVIEW = env_int("FARAI_PROXY_BODY_PREVIEW_BYTES", 65536, 1024, 1024 *
 MAX_MESSAGE_PREVIEW = env_int("FARAI_PROXY_MESSAGE_PREVIEW_BYTES", 16384, 1024, 256 * 1024)
 MAX_MESSAGES = env_int("FARAI_PROXY_MAX_MESSAGES", 200, 1, 1000)
 REPLAY_CORRELATION_HEADER = "X-Farai-Replay-Correlation"
+
+
+def env_json_strings(name: str) -> list[str]:
+    try:
+        value = json.loads(os.environ.get(name, "[]"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return normalize_pass_through_hosts(value)
+
+
+def normalize_pass_through_hosts(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        raise ValueError("pass_through_hosts must be a list")
+    hosts: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("pass_through_hosts must contain strings")
+        host = value.strip().lower()
+        if not host or any(char in host for char in "\r\n\0"):
+            raise ValueError("pass_through_hosts contains an invalid host")
+        if host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def pass_through_pattern(host: str) -> str:
+    if host.startswith("*."):
+        return rf"^(?:[^:]+\.)?{re.escape(host[2:])}(?::\d+)?$"
+    return rf"^{re.escape(host)}(?::\d+)?$"
+
+
+class FaraiMitmController(UPSTREAM_MITM_CONTROLLER):
+    def __init__(self, dump_file: str | None = None):
+        super().__init__(dump_file=dump_file)
+        configured_tls = os.environ.get("FARAI_PROXY_TLS", "relaxed").strip().lower()
+        self.farai_tls_mode = configured_tls if configured_tls in {"strict", "relaxed"} else "relaxed"
+        self.farai_pass_through_hosts = env_json_strings("FARAI_PROXY_PASS_THROUGH_HOSTS")
+
+    async def start(
+        self,
+        port: int = 8080,
+        host: str = "127.0.0.1",
+        dump_file: str | None = None,
+    ):
+        result = await super().start(port=port, host=host, dump_file=dump_file)
+        self.apply_farai_policy()
+        return result
+
+    def apply_farai_policy(self) -> None:
+        if self.master is None:
+            return
+        self.master.options.update(
+            ssl_insecure=self.farai_tls_mode == "relaxed",
+            ignore_hosts=[pass_through_pattern(host) for host in self.farai_pass_through_hosts],
+        )
+
+    def farai_policy_state(self) -> dict[str, Any]:
+        return {
+            "tls": self.farai_tls_mode,
+            "passThroughHosts": list(self.farai_pass_through_hosts),
+        }
+
+    def set_farai_policy(
+        self,
+        tls_mode: str | None = None,
+        pass_through_hosts: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if tls_mode is not None:
+            normalized_tls = tls_mode.strip().lower()
+            if normalized_tls not in {"strict", "relaxed"}:
+                raise ValueError("tls_mode must be strict or relaxed")
+            self.farai_tls_mode = normalized_tls
+        if pass_through_hosts is not None:
+            self.farai_pass_through_hosts = normalize_pass_through_hosts(pass_through_hosts)
+        self.apply_farai_policy()
+        return self.farai_policy_state()
 
 
 class FlowStore:
@@ -138,6 +217,13 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
         self._capture(flow)
 
     def error(self, flow: http.HTTPFlow) -> None:
+        message = flow_error(flow)
+        if flow.response is None and message and upstream_tls_verification_failed(message):
+            flow.response = http.Response.make(
+                502,
+                b"farai proxy: upstream tls verification failed; use relaxed tls or pass-through for this host\n",
+                {"Content-Type": "text/plain; charset=utf-8", "X-Farai-Proxy-Error": "upstream-tls-verification-failed"},
+            )
         super().error(flow)
         self._capture(flow)
 
@@ -624,6 +710,11 @@ def flow_error(flow: Any) -> str | None:
     return text_value(getattr(error, "msg", error))
 
 
+def upstream_tls_verification_failed(message: str) -> bool:
+    normalized = message.lower()
+    return "certificate verify failed" in normalized or "certificate verification failed" in normalized
+
+
 def text_value(value: Any, encoding: str = "utf-8") -> str:
     if isinstance(value, bytes):
         return value.decode(encoding, errors="replace")
@@ -721,6 +812,28 @@ async def proxy_scope_get() -> str:
 
 
 @server.mcp.tool()
+async def proxy_policy_get() -> str:
+    controller = server.controller
+    if not isinstance(controller, FaraiMitmController):
+        return json.dumps({"tls": "strict", "passThroughHosts": []}, indent=2)
+    return json.dumps(controller.farai_policy_state(), indent=2)
+
+
+@server.mcp.tool()
+async def proxy_policy_set(
+    tls_mode: str | None = None,
+    pass_through_hosts: list[str] | None = None,
+) -> str:
+    controller = server.controller
+    if not isinstance(controller, FaraiMitmController):
+        raise RuntimeError("Farai proxy policy controller is unavailable.")
+    return json.dumps(
+        controller.set_farai_policy(tls_mode, pass_through_hosts),
+        indent=2,
+    )
+
+
+@server.mcp.tool()
 async def proxy_intercept_configure(
     enabled: bool,
     host_pattern: str = ".*",
@@ -787,6 +900,7 @@ async def proxy_intercept_resolve(
 
 
 server.TrafficRecorder = FaraiTrafficRecorder
+server.MitmController = FaraiMitmController
 
 
 if __name__ == "__main__":

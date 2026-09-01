@@ -130,7 +130,15 @@ if catalog is None:
             pass
 
     supplemental = {
+        "dnsx": "high-speed DNS resolution and record enrichment with JSONL output",
+        "httpx": "HTTP service probing, technology detection, and TLS enrichment with JSONL output",
+        "katana": "bounded web crawler with JavaScript, form, XHR, and headless discovery modes",
         "naabu": "fast SYN/CONNECT port scanner with JSONL output",
+        "nuclei": "template-based vulnerability scanner with structured findings",
+        "subfinder": "passive subdomain discovery from multiple public sources",
+        "tlsx": "TLS protocol, cipher, certificate, and fingerprint inspection",
+        "urlfinder": "passive historical URL discovery from public archives and datasets",
+        "vulnx": "vulnerability intelligence search and advisory lookup",
         "interactsh-client": "out-of-band interaction client for callback verification",
         "mitmproxy-mcp": "managed mitmproxy MCP bridge",
         "gopls": "Go language server",

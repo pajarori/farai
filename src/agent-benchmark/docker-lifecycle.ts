@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KaliContainerBackend, type ContainerExecResult, type ProcessRunner } from "../agent-container/kali";
+import { faraiDockerEnvironment } from "../agent-container/docker-environment";
 import { runCapturedProcess } from "../agent-tools/backends/captured-process";
 import { INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
 import type { ToolExecutionBackend } from "../agent-tools/shared/backend";
@@ -222,12 +223,8 @@ function safeName(value: string): string {
 
 async function runProcess(command: string, args: string[], options: { env?: Record<string, string> } = {}): Promise<ContainerExecResult> {
   return await runCapturedProcess(command, args, {
-    env: { ...processEnv(), ...(options.env ?? {}) },
+    env: { ...faraiDockerEnvironment(), ...(options.env ?? {}) },
     timeoutMs: BENCHMARK_DOCKER_COMMAND_TIMEOUT_MS,
     maxOutputBytes: INTERNAL_PROCESS_OUTPUT_MAX_BYTES
   });
-}
-
-function processEnv(): Record<string, string> {
-  return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }

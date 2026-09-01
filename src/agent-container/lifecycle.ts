@@ -4,6 +4,7 @@ import { Database } from "bun:sqlite";
 import { localFaraiDir } from "../agent-core/config";
 import { runCapturedProcess } from "../agent-tools/backends/captured-process";
 import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
+import { faraiDockerEnvironment } from "./docker-environment";
 
 export const FARAI_MANAGED_LABEL = "org.farai.managed";
 export const FARAI_CONTAINER_KIND_LABEL = "org.farai.kind";
@@ -394,5 +395,5 @@ function containerAlreadyStopped(result: DockerProcessResult): boolean {
 }
 
 async function runDockerProcess(command: string, args: string[], timeoutMs = 15_000): Promise<DockerProcessResult> {
-  return await runCapturedProcess(command, args, { timeoutMs });
+  return await runCapturedProcess(command, args, { timeoutMs, env: faraiDockerEnvironment() });
 }

@@ -1,5 +1,5 @@
 {
-  "contract": "curated-security-runtime",
+  "contract": "curated-security-runtime-2026-09",
   "aptPackages": [
     "amass",
     "arjun",
@@ -16,7 +16,6 @@
     "dirsearch",
     "dnsenum",
     "dnsrecon",
-    "dnsx",
     "enum4linux-ng",
     "evil-winrm",
     "exploitdb",
@@ -54,7 +53,6 @@
     "nmap",
     "nodejs",
     "npm",
-    "nuclei",
     "openssh-client",
     "openssl",
     "poppler-utils",
@@ -75,7 +73,6 @@
     "sslscan",
     "sslyze",
     "steghide",
-    "subfinder",
     "tcpdump",
     "tesseract-ocr",
     "testssl.sh",
@@ -96,6 +93,78 @@
     "yara",
     "zip"
   ],
+  "pinnedTools": {
+    "dnsx": {
+      "version": "1.3.1",
+      "sha256": {
+        "amd64": "438b964653056dd51dcfe614b1a16f8bced3cc48a1d27bc07cc6fdf2ef2a9533",
+        "arm64": "dd657dd1ccee5e137eca2dbad0e97dbd067555f744adb97efcda774f1b2fbde1"
+      }
+    },
+    "httpx": {
+      "version": "1.11.0",
+      "sha256": {
+        "amd64": "5dce96e7315cff24be7aab3b032f23f7a71b7711a17f8189ebe601f2588f2f87",
+        "arm64": "2b5d9ec3d3750df41e04e4216b1400d2ad862d1cb9ebe68ae501b2299cb5b3a5"
+      }
+    },
+    "katana": {
+      "version": "1.7.0",
+      "sha256": {
+        "amd64": "fe1142d92f418549338ea46d67a472124878482e225d279e9a42700c75d76a4d",
+        "arm64": "9a6885fe9fda850129b110e0f079d42529b0693dd81b59c316f04084935300f0"
+      }
+    },
+    "naabu": {
+      "version": "2.6.1",
+      "sha256": {
+        "amd64": "018c4c9884dea971eda860435ede3021d1150732f34cfd245498c6726d8cab90",
+        "arm64": "3adc2bb2395c3efff89623499b20eea66ef54924c485d3ae86762393a31736ea"
+      }
+    },
+    "nuclei": {
+      "version": "3.11.1",
+      "sha256": {
+        "amd64": "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6",
+        "arm64": "8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07"
+      }
+    },
+    "subfinder": {
+      "version": "2.16.0",
+      "sha256": {
+        "amd64": "1b7f9c608e9a5bd59e609a5e09710d63c5485e92d3d49dc2c16eb4fdbe10cb60",
+        "arm64": "c81d49559c0f630177be9e347e502e7a3d474aacc6ff78291ffcb4964367d63d"
+      }
+    },
+    "tlsx": {
+      "version": "1.3.0",
+      "sha256": {
+        "amd64": "d982c55da676d7f6bfe588550ed19946e3c73234b4a3a11caf105f3ab98564bf",
+        "arm64": "70a65a286eaeb336d04c06fd1783541096f7b06c5c2e7a22467406ea2c323449"
+      }
+    },
+    "urlfinder": {
+      "version": "0.0.3",
+      "sha256": {
+        "amd64": "655ea7378a0555149831dcc4c3f6aef34f3ce27eda0ce2f2721e2ca5526015d4",
+        "arm64": "6af33108d6b76bbd261fa696c69dccf44b9eb5a68dc47b4c41df5cf32f8b8281"
+      }
+    },
+    "vulnx": {
+      "version": "2.0.2",
+      "sha256": {
+        "amd64": "387abd1c42b0357e1d4257b54528fc38e1d0357b12f05ab12117a4c628a5aaf8",
+        "arm64": "13c5888dde027b84bd3b6cf69c36c87e1e7aad7e7159bdeeb576f4962dcc1d06"
+      }
+    }
+  },
+  "pinnedAssets": {
+    "nuclei-templates": {
+      "version": "10.4.8",
+      "path": "/usr/local/share/farai/nuclei-templates",
+      "sha256": "cb4f88504ebf9d462c2db4c8d2bdf6cb94ecc7b7f4ed09b7f4fd20ceb6bc8002"
+    }
+  },
   "workflows": {
     "shell-and-network-utilities": [
       "curl",
@@ -136,9 +205,11 @@
       "theHarvester"
     ],
     "service-discovery": [
+      "httpx",
       "masscan",
       "naabu",
-      "nmap"
+      "nmap",
+      "tlsx"
     ],
     "callback-verification": [
       "interactsh-client",
@@ -150,7 +221,9 @@
       "dirsearch",
       "feroxbuster",
       "ffuf",
-      "gobuster"
+      "gobuster",
+      "katana",
+      "urlfinder"
     ],
     "web-assessment": [
       "commix",
@@ -165,6 +238,9 @@
       "wfuzz",
       "whatweb",
       "wpscan"
+    ],
+    "vulnerability-intelligence": [
+      "vulnx"
     ],
     "credential-access": [
       "hashcat",

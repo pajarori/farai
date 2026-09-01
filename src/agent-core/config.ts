@@ -67,8 +67,20 @@ export type FaraiContextConfig = {
 };
 
 export type FaraiProxyConfig = {
-  transparent?: boolean;
+  mode?: FaraiProxyMode;
+  tls?: FaraiProxyTlsMode;
   ports?: number[];
+  passThroughHosts?: string[];
+};
+
+export type FaraiProxyMode = "explicit" | "transparent" | "off";
+export type FaraiProxyTlsMode = "strict" | "relaxed";
+
+export type ResolvedFaraiProxyConfig = {
+  mode: FaraiProxyMode;
+  tls: FaraiProxyTlsMode;
+  ports: number[];
+  passThroughHosts: string[];
 };
 
 export const DEFAULT_TRANSPARENT_PROXY_PORTS = [80, 443, 3000, 5000, 8000, 8008, 8080, 8081, 8443, 8888, 9000];
@@ -205,20 +217,36 @@ function contextConfig(value: unknown): FaraiContextConfig | undefined {
 
 function proxyConfig(value: unknown): FaraiProxyConfig | undefined {
   if (!isRecord(value)) return undefined;
+  const rawMode = value.mode;
+  const mode = rawMode === "explicit" || rawMode === "transparent" || rawMode === "off"
+    ? rawMode
+    : typeof value.transparent === "boolean"
+      ? value.transparent ? "transparent" : "explicit"
+      : undefined;
+  const rawTls = value.tls ?? value.tls_mode ?? value.tlsMode;
+  const tls = rawTls === "strict" || rawTls === "relaxed" ? rawTls : undefined;
   const ports = Array.isArray(value.ports)
     ? value.ports.filter((port): port is number => typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65_536)
     : undefined;
+  const rawPassThroughHosts = value.pass_through_hosts ?? value.passThroughHosts;
+  const passThroughHosts = Array.isArray(rawPassThroughHosts)
+    ? [...new Set(rawPassThroughHosts.filter((host): host is string => typeof host === "string").map((host) => host.trim().toLowerCase()).filter(Boolean))]
+    : undefined;
   const config: FaraiProxyConfig = {
-    ...(typeof value.transparent === "boolean" ? { transparent: value.transparent } : {}),
-    ...(ports?.length ? { ports } : {})
+    ...(mode ? { mode } : {}),
+    ...(tls ? { tls } : {}),
+    ...(ports?.length ? { ports } : {}),
+    ...(passThroughHosts?.length ? { passThroughHosts } : {})
   };
   return Object.keys(config).length ? config : undefined;
 }
 
-export function resolveProxyConfig(config: FaraiConfig): { transparent: boolean; ports: number[] } {
+export function resolveProxyConfig(config: FaraiConfig): ResolvedFaraiProxyConfig {
   return {
-    transparent: config.proxy?.transparent !== false,
-    ports: config.proxy?.ports?.length ? config.proxy.ports : DEFAULT_TRANSPARENT_PROXY_PORTS
+    mode: config.proxy?.mode ?? "explicit",
+    tls: config.proxy?.tls ?? "relaxed",
+    ports: config.proxy?.ports?.length ? config.proxy.ports : DEFAULT_TRANSPARENT_PROXY_PORTS,
+    passThroughHosts: config.proxy?.passThroughHosts ?? []
   };
 }
 
@@ -294,7 +322,12 @@ export function serializeConfigToml(config: FaraiConfig): string {
   if (config.maxConcurrentSubagents) lines.push(`max_concurrent_subagents = ${config.maxConcurrentSubagents}`);
   if (config.baseUrl) lines.push(`base_url = ${tomlString(config.baseUrl)}`);
   if (config.apiKeyEnv && isEnvironmentVariableName(config.apiKeyEnv)) lines.push(`env_key = ${tomlString(config.apiKeyEnv)}`);
-  if (config.proxy && Object.keys(config.proxy).length) emitTable(lines, ["proxy"], config.proxy as Record<string, unknown>);
+  if (config.proxy && Object.keys(config.proxy).length) emitTable(lines, ["proxy"], {
+    ...(config.proxy.mode ? { mode: config.proxy.mode } : {}),
+    ...(config.proxy.tls ? { tls: config.proxy.tls } : {}),
+    ...(config.proxy.ports?.length ? { ports: config.proxy.ports } : {}),
+    ...(config.proxy.passThroughHosts?.length ? { pass_through_hosts: config.proxy.passThroughHosts } : {})
+  });
   if (config.context?.maxInputTokens) emitTable(lines, ["context"], { max_input_tokens: config.context.maxInputTokens });
   if (config.web && Object.keys(config.web).length) emitTable(lines, ["web"], {
     ...(config.web.searchBackend ? { search_backend: config.web.searchBackend } : {}),
@@ -404,7 +437,7 @@ export function defaultMcpServers(): Record<string, Record<string, unknown>> {
   return normalizeConfig(Bun.TOML.parse(DEFAULT_CONFIG_TEMPLATE)).mcpServers ?? {};
 }
 
-const CURRENT_CONFIG_VERSION = 3;
+const CURRENT_CONFIG_VERSION = 4;
 
 function isLegacyPwnoMcpDefault(entry: Record<string, unknown> | undefined): boolean {
   if (!entry || entry.command !== "docker" || !Array.isArray(entry.args)) return false;
@@ -415,7 +448,8 @@ const DEFAULT_CONFIG_TEMPLATE = `config_version = ${CURRENT_CONFIG_VERSION}
 model = "big-pickle"
 
 [proxy]
-transparent = true
+mode = "explicit"
+tls = "relaxed"
 
 [mcp_servers.mitmproxy-mcp]
 command = "mitmproxy-mcp"

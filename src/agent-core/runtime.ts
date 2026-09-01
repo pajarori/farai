@@ -87,7 +87,7 @@ const TOOL_HUMAN_RESULT_MAX_BYTES = 24 * 1024;
 const LOOP_SUPERVISION_NO_PROGRESS_STEPS = 12;
 const LOOP_SUPERVISION_STEER_INTERVAL = 5;
 const LOOP_PATTERN_MAX_PERIOD = 8;
-const PROGRESS_ACTION_TOOLS = new Set(["http_request", "subdomain_enum", "dir_enum", "port_scan", "nmap_scan", "fs_edit", "fs_write", "patch_apply", "code_write_script", "campaign_verify", "campaign_test", "callback_oast", "exploit_search"]);
+const PROGRESS_ACTION_TOOLS = new Set(["http_request", "subdomain_enum", "dns_probe", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "dir_enum", "port_scan", "nmap_scan", "fs_edit", "fs_write", "patch_apply", "code_write_script", "campaign_verify", "campaign_test", "callback_oast", "exploit_search"]);
 const AUTO_COMPACTION_CONTINUATION = "[internal continuation after context compaction: Continue the active user task from the compacted prior context. Do not repeat, regenerate, or explain the summary. Resume with the exact next useful action.]";
 const WRAPUP_MODEL_TIMEOUT_MS = 15_000;
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 2_000;
@@ -1083,6 +1083,7 @@ export class AgentRuntime {
     const session = this.store.loadSession(sessionId);
     const rootSessionId = this.rootSessionId(session);
     if (rootSessionId !== session.id) return false;
+    if (this.actors.get(rootSessionId)?.isRunning()) return false;
     return this.withSessionLock(rootSessionId, async () => {
       if (this.store.isSessionResumable(rootSessionId)) return false;
       if (this.sessionTree(rootSessionId).length !== 1) return false;

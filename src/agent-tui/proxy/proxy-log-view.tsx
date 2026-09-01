@@ -98,8 +98,10 @@ export function ProxyLogView(props: { active?: boolean } = {}): JSX.Element {
   };
   const proxyHint = createMemo(() => {
     const service = mitmServices()[0];
-    const port = proxyPort(service?.metadata);
-    return `mitmproxy-mcp starts with the session; browse through 127.0.0.1:${port}.`;
+    const state = proxyState(service?.metadata);
+    if (state.mode === "off") return "managed proxy capture is off; browser, exact http, and shell traffic are direct.";
+    if (state.mode === "transparent") return `transparent capture is active through 127.0.0.1:${state.port} · tls ${state.tls}.`;
+    return `browser and exact http requests are captured through 127.0.0.1:${state.port} · shell traffic is direct · tls ${state.tls}.`;
   });
 
   createEffect(() => {
@@ -362,6 +364,19 @@ function proxyPort(metadata: Record<string, unknown> | undefined): number {
     return proxy.port;
   }
   return typeof metadata?.port === "number" ? metadata.port : DEFAULT_MITMPROXY_PORT;
+}
+
+function proxyState(metadata: Record<string, unknown> | undefined): { port: number; mode: "explicit" | "transparent" | "off"; tls: "strict" | "relaxed" } {
+  const proxy = metadata?.proxy;
+  if (proxy && typeof proxy === "object") {
+    const record = proxy as Record<string, unknown>;
+    return {
+      port: typeof record.port === "number" ? record.port : DEFAULT_MITMPROXY_PORT,
+      mode: record.mode === "transparent" || record.mode === "off" ? record.mode : "explicit",
+      tls: record.tls === "strict" ? "strict" : "relaxed"
+    };
+  }
+  return { port: proxyPort(metadata), mode: "explicit", tls: "relaxed" };
 }
 
 function shortTime(value: string): string {

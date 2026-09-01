@@ -38,7 +38,7 @@ const TOOL_NAMESPACES = [
   "callback", "campaign", "evidence", "exploit", "memory", "session",
   "report", "notes", "shell", "skill", "patch", "code", "todo",
   "tool", "port", "nmap", "http", "dir", "git", "mcp", "fs",
-  "browser", "proxy", "web", "image", "notebook", "worktree", "agent", "email"
+  "browser", "proxy", "web", "dns", "tls", "url", "vulnerability", "image", "notebook", "worktree", "agent", "email"
 ] as const;
 
 const PAST_ACTIONS: Record<string, string> = {
@@ -112,6 +112,7 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
   mcp_resource_list: ["listed MCP resources", "listing MCP resources"],
   mcp_resource_read: ["read MCP resource", "reading MCP resource"],
   proxy_scope: ["updated proxy scope", "updating proxy scope"],
+  proxy_policy: ["updated proxy policy", "updating proxy policy"],
   proxy_flows: ["listed proxy flows", "listing proxy flows"],
   proxy_flow_get: ["inspected proxy flow", "inspecting proxy flow"],
   proxy_sitemap: ["built proxy sitemap", "building proxy sitemap"],
@@ -158,6 +159,7 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   mcp_resource_list: ["server"],
   mcp_resource_read: ["uri", "server"],
   proxy_scope: ["allowedDomains"],
+  proxy_policy: ["tls", "passThroughHosts"],
   proxy_flows: ["kind", "filter", "method"],
   proxy_flow_get: ["flowId"],
   proxy_sitemap: ["host"],
@@ -179,7 +181,14 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   email_create: ["label"],
   email_inbox: ["emailId"],
   email_read: ["messageId"],
-  email_wait: ["emailId", "from", "subject"]
+  email_wait: ["emailId", "from", "subject"],
+  dns_probe: ["names", "recordTypes"],
+  http_probe: ["targets", "ports"],
+  tls_probe: ["targets", "ports"],
+  url_discover: ["domains", "sources"],
+  web_crawl: ["targets", "depth"],
+  vulnerability_scan: ["targets", "severities", "tags", "templateIds"],
+  vulnerability_lookup: ["ids", "query", "products", "vendors"]
 };
 
 export type ToolInputKind = "shell" | "edit" | "write" | "patch" | "json";
@@ -386,6 +395,13 @@ function browserToolTitle(tool: string, input: Record<string, unknown>, active: 
 }
 
 function nativeToolTitle(tool: string, input: Record<string, unknown>, active: boolean, failed = false): string | undefined {
+  if (tool === "dns_probe") return reconTitle(failed, active, "resolve dns", "resolving dns", "resolved dns", input.names);
+  if (tool === "http_probe") return reconTitle(failed, active, "probe http services", "probing http services", "probed http services", input.targets);
+  if (tool === "tls_probe") return reconTitle(failed, active, "inspect tls", "inspecting tls", "inspected tls", input.targets);
+  if (tool === "url_discover") return reconTitle(failed, active, "discover urls", "discovering urls", "discovered urls", input.domains);
+  if (tool === "web_crawl") return reconTitle(failed, active, "crawl", "crawling", "crawled", input.targets);
+  if (tool === "vulnerability_scan") return reconTitle(failed, active, "scan vulnerabilities", "scanning vulnerabilities", "scanned vulnerabilities", input.targets);
+  if (tool === "vulnerability_lookup") return reconTitle(failed, active, "look up vulnerabilities", "looking up vulnerabilities", "looked up vulnerabilities", input.ids ?? input.query);
   if (tool === "email_list") return failed ? "failed to list emails" : active ? "listing emails" : "listed emails";
   if (tool === "email_create") {
     const label = typeof input.label === "string" && input.label.trim() ? ` ${input.label.trim()}` : "";
@@ -422,6 +438,11 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
       ? active ? "updating proxy scope" : "updated proxy scope"
       : active ? "checking proxy scope" : "checked proxy scope";
   }
+  if (tool === "proxy_policy") {
+    return input.tls !== undefined || input.passThroughHosts !== undefined
+      ? active ? "updating proxy policy" : "updated proxy policy"
+      : active ? "checking proxy policy" : "checked proxy policy";
+  }
   if (tool === "proxy_intercept") {
     const action = typeof input.action === "string" ? input.action : "status";
     const flow = typeof input.flowId === "string" && input.flowId.trim() ? ` ${input.flowId.trim()}` : "";
@@ -443,6 +464,18 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
   if (tool === "worktree_exit") return active ? "leaving worktree" : "left worktree";
   if (tool === "agent_list") return active ? "listing agents" : "listed agents";
   return undefined;
+}
+
+function reconTitle(failed: boolean, active: boolean, infinitive: string, present: string, past: string, value: unknown): string {
+  const target = inputCollectionLabel(value);
+  return `${failed ? `failed to ${infinitive}` : active ? present : past}${target ? ` · ${target}` : ""}`;
+}
+
+function inputCollectionLabel(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (!Array.isArray(value) || !value.length) return "";
+  const first = String(value[0] ?? "").trim();
+  return `${first}${value.length > 1 ? ` · +${value.length - 1}` : ""}`;
 }
 
 function formatSeconds(value: number): string {

@@ -1,6 +1,6 @@
 import type { ToolDefinition, ToolResult } from "../../types";
 import { assertObject, asString } from "../../utils";
-import { callMcpServerTool, isMcpErrorResult, renderMcpToolResult } from "../mcp-manager";
+import { callMcpServerTool, isMcpErrorResult, renderMcpToolResult, updateManagedProxyPolicy } from "../mcp-manager";
 import { takeBytes } from "../shared/output-bound";
 import { proxyFlowDetailFromMcpInspect, proxyFlowsFromMcpTrafficSummary, type ProxyFlowDetail, type ProxyFlowKind, type ProxyFlowSummary } from "../services/mitmproxy/flows";
 
@@ -23,7 +23,7 @@ async function call(context: Parameters<ToolDefinition["run"]>[1], tool: string,
 
 export const proxyScopeTool: ToolDefinition = {
   name: "proxy_scope",
-  description: "Read the current domain scope of Farai's managed mitmproxy, or replace it by supplying allowedDomains. An empty list captures every domain; use this before focused traffic collection to reduce noise without clearing existing flows.",
+  description: "Read or replace the recording scope of Farai's managed proxy. allowedDomains only controls which flows are saved and displayed; it does not route, bypass, or pass traffic through. An empty list records every domain.",
   inputSchema: { type: "object", properties: { allowedDomains: { type: "array", items: { type: "string" } } }, additionalProperties: false },
   mutates: true,
   timeoutMs: 90_000,
@@ -40,6 +40,44 @@ export const proxyScopeTool: ToolDefinition = {
     const state = parseTextJson(raw) as { allowedDomains?: unknown } | undefined;
     const domains = Array.isArray(state?.allowedDomains) ? state.allowedDomains.map(String) : [];
     return { ok: true, summary: domains.length ? `proxy scope: ${domains.join(", ")}` : "proxy scope: all traffic", output: domains.length ? domains.join("\n") : "all domains", metadata: { allowedDomains: domains } };
+  }
+};
+
+export const proxyPolicyTool: ToolDefinition = {
+  name: "proxy_policy",
+  description: "Read or update the live managed proxy TLS and pass-through policy. tls=strict verifies upstream certificates; tls=relaxed accepts invalid lab certificates. passThroughHosts tunnels matching hosts without HTTP decryption or full flow contents. Routing mode is configured in Farai config and is not changed by this tool.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tls: { type: "string", enum: ["strict", "relaxed"] },
+      passThroughHosts: { type: "array", items: { type: "string" } }
+    },
+    additionalProperties: false
+  },
+  mutates: true,
+  timeoutMs: 90_000,
+  parallel: false,
+  renderHuman: render,
+  renderModel: render,
+  run: async (args, context) => {
+    assertObject(args, "args");
+    const tls = args.tls === "strict" || args.tls === "relaxed" ? args.tls : undefined;
+    const passThroughHosts = Array.isArray(args.passThroughHosts)
+      ? [...new Set(args.passThroughHosts.map((item) => asString(item, "passThroughHosts[]").trim().toLowerCase()).filter(Boolean))]
+      : undefined;
+    if (tls || passThroughHosts) {
+      await call(context, "proxy_policy_set", {
+        ...(tls ? { tls_mode: tls } : {}),
+        ...(passThroughHosts ? { pass_through_hosts: passThroughHosts } : {})
+      });
+    }
+    const raw = await call(context, "proxy_policy_get");
+    const policy = parseTextJson(raw) as { tls?: unknown; passThroughHosts?: unknown } | undefined;
+    const resolvedTls = policy?.tls === "strict" ? "strict" : "relaxed";
+    const resolvedHosts = Array.isArray(policy?.passThroughHosts) ? policy.passThroughHosts.map(String) : [];
+    updateManagedProxyPolicy(context.session, { tls: resolvedTls, passThroughHosts: resolvedHosts });
+    const output = [`tls: ${resolvedTls}`, `pass-through: ${resolvedHosts.length ? resolvedHosts.join(", ") : "none"}`].join("\n");
+    return { ok: true, summary: `proxy policy: tls ${resolvedTls} · ${resolvedHosts.length} pass-through hosts`, output, metadata: { tls: resolvedTls, passThroughHosts: resolvedHosts } };
   }
 };
 
@@ -318,4 +356,4 @@ function parseTextJson(raw: unknown): unknown {
   try { return JSON.parse(text); } catch { return undefined; }
 }
 
-export const proxyTools: ToolDefinition[] = [proxyScopeTool, proxyFlowsTool, proxyFlowGetTool, proxySitemapTool, proxyReplayTool, proxyInterceptTool, proxyClearTool];
+export const proxyTools: ToolDefinition[] = [proxyScopeTool, proxyPolicyTool, proxyFlowsTool, proxyFlowGetTool, proxySitemapTool, proxyReplayTool, proxyInterceptTool, proxyClearTool];

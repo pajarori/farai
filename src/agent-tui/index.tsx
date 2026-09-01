@@ -72,20 +72,7 @@ export async function runOpenTui(input: TuiInput): Promise<void> {
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
       let resumeHint: string | undefined;
-      try {
-        const session = await resolveResumeSession(input.runtime, activeSessionId);
-        const discarded = await input.runtime.discardSessionIfEmpty(session.id);
-        if (!discarded) {
-          let usage: UsageSummary | undefined;
-          try { usage = await input.runtime.loadUsageSummary(session.id); } catch {  }
-          const resumable = (await input.runtime.listSessions()).some((candidate) => candidate.id === session.id);
-          if (resumable) resumeHint = formatResumeHint(session.id, session.title, {
-            styled: terminalStylingEnabled(),
-            width: process.stdout.columns,
-            usage
-          });
-        }
-      } catch {  }
+      try { resumeHint = await prepareExitHandoff(input.runtime, activeSessionId); } catch {  }
       try { await input.runtime.dispose(); } catch {  }
       managedRenderer.disposeResize();
       try { await destroyRenderer(renderer); } catch {  }
@@ -132,6 +119,25 @@ export async function resolveResumeSession(runtime: TuiRuntimePort, sessionId: s
     if (root) return await runtime.loadSession(root.sessionId);
   } catch {  }
   return await runtime.loadSession(sessionId);
+}
+
+export async function prepareExitHandoff(runtime: TuiRuntimePort, sessionId: string): Promise<string | undefined> {
+  const session = await resolveResumeSession(runtime, sessionId);
+  const runningTurnId = runtime.getRunningTurnId(session.id);
+  if (runningTurnId) {
+    try { await runtime.cancelTurn(runningTurnId, "farai exiting"); } catch {  }
+  }
+  const discarded = runningTurnId ? false : await runtime.discardSessionIfEmpty(session.id);
+  if (discarded) return undefined;
+  let usage: UsageSummary | undefined;
+  try { usage = await runtime.loadUsageSummary(session.id); } catch {  }
+  const resumable = (await runtime.listSessions()).some((candidate) => candidate.id === session.id);
+  if (!resumable) return undefined;
+  return formatResumeHint(session.id, session.title, {
+    styled: terminalStylingEnabled(),
+    width: process.stdout.columns,
+    usage
+  });
 }
 
 async function destroyRenderer(renderer: CliRenderer): Promise<void> {

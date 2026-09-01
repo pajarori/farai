@@ -186,7 +186,16 @@ function ProxyTabFooter(): JSX.Element {
   const tui = useTuiStore();
   const dims = useTuiDimensions();
   const error = () => tui.store.ui.lastError;
-  const layout = () => proxyTabFooterLayout(dims().width, tui.store.ui.proxyFilter, error() ?? tui.store.ui.statusDetail);
+  const proxyState = () => {
+    const service = tui.store.ui.services.find((candidate) => candidate.kind === "mitmproxy" || candidate.kind === "mitmproxy-mcp");
+    const proxy = service?.metadata?.proxy;
+    if (!proxy || typeof proxy !== "object") return undefined;
+    const record = proxy as Record<string, unknown>;
+    const mode = record.mode === "transparent" || record.mode === "off" ? record.mode : "explicit";
+    const tls = record.tls === "strict" ? "strict" : "relaxed";
+    return `${mode} · tls ${tls}`;
+  };
+  const layout = () => proxyTabFooterLayout(dims().width, tui.store.ui.proxyFilter, error() ?? tui.store.ui.statusDetail, proxyState());
   return (
     <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
       <text fg={COLOR.dim}>{layout().left}</text>
@@ -208,7 +217,7 @@ function CenterSurfaceFooter(props: { frame: CenterSurfaceFrame }): JSX.Element 
   );
 }
 
-export function proxyTabFooterLayout(width: number, filter: string, status?: string): { left: string; right: string } {
+export function proxyTabFooterLayout(width: number, filter: string, status?: string, state?: string): { left: string; right: string } {
   const hint = width >= 88
     ? "↑↓ flow · tab detail · p/n ws msg · ←→ filter · a/h/w tabs · alt+1 chat"
     : width >= 56
@@ -218,7 +227,7 @@ export function proxyTabFooterLayout(width: number, filter: string, status?: str
         : "alt+1 chat";
   return fitFooterLine(hint, [
     ...(status ? [{ id: "status", kind: "message" as const, text: status }] : []),
-    { id: "proxy", kind: "message", text: `proxy · ${filter}` }
+    { id: "proxy", kind: "message", text: `proxy · ${state ? `${state} · ` : ""}${filter}` }
   ], Math.max(0, width));
 }
 

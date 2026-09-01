@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { AgentRuntime } from "../agent-core/runtime";
 import { KALI_IMAGE_CONTRACT, KaliContainerBackend } from "../agent-container/kali";
+import { faraiDockerEnvironment } from "../agent-container/docker-environment";
 import { resolveDefaultModel } from "../agent-core/model-registry";
 import { buildModelCatalog, resolveDefaultCatalogModel } from "../agent-core/model-catalog";
 import { addModelProfile, loadModelProfiles, modelProfilePaths, type ModelProfileLocation } from "../agent-core/model-profiles";
@@ -306,7 +307,7 @@ async function benchmark(args: string[]): Promise<void> {
 async function buildContainer(): Promise<number> {
   const backend = new KaliContainerBackend({ workspace: process.cwd() });
   console.log(backend.buildImageCommand().join(" "));
-  const proc = Bun.spawn(backend.buildImageCommand(), { stdout: "inherit", stderr: "inherit" });
+  const proc = Bun.spawn(backend.buildImageCommand(), { stdout: "inherit", stderr: "inherit", env: faraiDockerEnvironment() });
   const code = await proc.exited;
   process.exitCode = code;
   return code;

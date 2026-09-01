@@ -73,8 +73,12 @@ export class KnowledgeStore implements KnowledgeQuery {
   }
 
   close(): void {
-    this.db?.close(true);
+    const db = this.db;
     this.db = undefined;
+    if (!db) return;
+    const clearQueryCache = (db as Database & { clearQueryCache?: () => void }).clearQueryCache;
+    clearQueryCache?.call(db);
+    db.close(false);
   }
 
   search(query: string, options: KnowledgeSearchOptions = {}): KnowledgeHit[] {

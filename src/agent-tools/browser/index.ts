@@ -86,6 +86,20 @@ async function performBrowserOperation(
 
   const protocolWarning = browserProtocolWarning(operation, args, output);
   if (protocolWarning) output = `${output}\n\n### Protocol Verification Required\n${protocolWarning}`;
+  if (upstreamTlsVerificationFailed(output)) {
+    return {
+      ok: false,
+      summary: "upstream tls verification failed in managed proxy",
+      output: "farai's managed proxy rejected the upstream certificate in strict tls mode. switch the proxy to relaxed tls or add this host to pass-through.\n\n" + output,
+      metadata: {
+        browserBackend: "mcp",
+        browserOperation: operation,
+        ...(context ? { browserContextId: context.id, browserContextName: context.name } : {}),
+        proxyError: "upstream_tls_verification_failed",
+        observationSignature: browserObservationSignature(operation, output, context?.id)
+      }
+    };
+  }
 
   return {
     ok: true,
@@ -101,6 +115,10 @@ async function performBrowserOperation(
       ...(snapshotError ? { snapshotError } : {})
     }
   };
+}
+
+function upstreamTlsVerificationFailed(output: string): boolean {
+  return output.toLowerCase().includes("farai proxy: upstream tls verification failed");
 }
 
 function browserTool(input: {

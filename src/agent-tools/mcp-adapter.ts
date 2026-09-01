@@ -16,6 +16,7 @@ import { BoundedOutputBuffer } from "./backends/output-buffer";
 import { isolatedProcessGroup, terminateProcessTree } from "./backends/process-tree";
 import { readBoundedFileText } from "../file-read";
 import { ResponseSizeLimitError } from "../http-response";
+import { faraiDockerEnvironment } from "../agent-container/docker-environment";
 
 type ExternalMcpServerCommon = {
   name: string;
@@ -663,12 +664,15 @@ export class McpStdioClient implements McpClientTransport {
   }
 
   private async spawnProcess(): Promise<void> {
+    const baseEnvironment = { ...defaultMcpEnvironment(), ...forwardedMcpEnvironment(this.server.envVars), ...(this.server.env ?? {}) };
     const proc = spawn(this.server.command, this.server.args, {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       windowsHide: process.platform === "win32",
       ...(this.server.cwd ? { cwd: this.server.cwd } : {}),
-      env: { ...defaultMcpEnvironment(), ...forwardedMcpEnvironment(this.server.envVars), ...(this.server.env ?? {}) },
+      env: this.server.runInContainer && this.server.command === "docker"
+        ? faraiDockerEnvironment(baseEnvironment)
+        : baseEnvironment,
       detached: isolatedProcessGroup()
     });
     let resolveExit = () => {};

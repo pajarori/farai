@@ -2,7 +2,7 @@ import type { Session, ToolContext, ToolDefinition, ToolResult, UserInputAnswer,
 import { containerNameForSession, KaliContainerBackend } from "../agent-container/kali";
 import type { ContainerLifecyclePort } from "../agent-container/lifecycle";
 import { DEFAULT_MITMPROXY_PORT, McpHttpClient, McpStdioClient, loadExternalMcpConfig, mcpOAuthStateAuthenticated, mcpServersFromConfig, type ExternalMcpServer, type McpCatalogChange, type McpClientTransport, type McpElicitationResult, type McpFormElicitationRequest, type McpOAuthState, type McpPromptDescriptor, type McpPromptResult, type McpResourceDescriptor, type McpResourceTemplateDescriptor, type McpToolDescriptor } from "./mcp-adapter";
-import { configPath, loadConfig, loadRawConfig, resolveProxyConfig, updateConfig, writeConfig, type ConfigLocation } from "../agent-core/config";
+import { configPath, loadConfig, loadRawConfig, resolveProxyConfig, updateConfig, writeConfig, type ConfigLocation, type ResolvedFaraiProxyConfig } from "../agent-core/config";
 import { deleteCredentialSync, readCredential, readCredentialSync, writeCredential, writeCredentialSync } from "../agent-core/credential-store";
 import { emptyMcpSecretFields, isSensitiveMcpField, readMcpSecretFields, writeMcpSecretFields, type McpSecretFields } from "../agent-core/mcp-secret-fields";
 import { deleteMcpHeader, getMcpHeader, mergeMcpHeaders } from "../agent-core/mcp-headers";
@@ -65,6 +65,9 @@ export type McpServerRuntimeStatus = {
   proxy?: {
     running: boolean;
     port: number;
+    mode: "explicit" | "transparent" | "off";
+    tls: "strict" | "relaxed";
+    passThroughHosts: string[];
   };
   error?: string;
 };
@@ -100,6 +103,11 @@ type ManagedMcpServer = {
   resourcesLoaded: boolean;
   proxyStarted: boolean;
   proxyStartTask?: Promise<void>;
+  proxyTeardown?: () => Promise<void>;
+  proxyPolicy?: {
+    tls: "strict" | "relaxed";
+    passThroughHosts: string[];
+  };
   activationTask?: Promise<void>;
   onCatalogChange?: McpRefreshInput["onCatalogChange"];
   handleElicitation?: McpRefreshInput["handleElicitation"];
@@ -159,6 +167,18 @@ export class McpServerManager {
     return this.toolsByScope.get(mcpScope(session))?.get(name);
   }
 
+  updateProxyPolicy(session: Session | string, policy: { tls: "strict" | "relaxed"; passThroughHosts: string[] }): void {
+    const scope = mcpScope(session);
+    for (const [name, status] of this.statusMap(scope)) {
+      if (!status.proxy) continue;
+      const nextPolicy = { tls: policy.tls, passThroughHosts: [...policy.passThroughHosts] };
+      const managed = this.servers.get(scopedServerKey(scope, name));
+      if (managed) managed.proxyPolicy = nextPolicy;
+      status.proxy.tls = nextPolicy.tls;
+      status.proxy.passThroughHosts = [...nextPolicy.passThroughHosts];
+    }
+  }
+
   listStatuses(session?: Session | string): McpServerRuntimeStatus[] {
     const scope = mcpScope(session);
     return [...(this.statusesByScope.get(scope)?.values() ?? [])].map((status) => {
@@ -197,7 +217,7 @@ export class McpServerManager {
     this.completedRefreshes.clear();
     this.failedRefreshes.clear();
     this.containerBindings.clear();
-    await Promise.allSettled(servers.map((server) => server.client.stop()));
+    await Promise.allSettled(servers.map((server) => this.stopManagedServer(server)));
   }
 
   async stopSession(sessionId: string): Promise<void> {
@@ -226,7 +246,7 @@ export class McpServerManager {
     this.statusesByScope.delete(sessionId);
     this.lastConfigPathByScope.delete(sessionId);
     this.containerBindings.delete(sessionId);
-    await Promise.allSettled(servers.map((server) => server.client.stop()));
+    await Promise.allSettled(servers.map((server) => this.stopManagedServer(server)));
   }
 
   async startServer(input: McpRefreshInput, serverName: string): Promise<McpServerRuntimeStatus> {
@@ -266,12 +286,7 @@ export class McpServerManager {
     const managed = this.servers.get(scopedServerKey(input.session, serverName));
     if (!managed) throw new Error(`MCP server is not enabled: ${serverName}`);
     this.suspendCatalogRefresh(scopedServerKey(scope, serverName), managed);
-    try {
-      await managed.client.stop();
-    } finally {
-      managed.proxyStarted = false;
-      delete managed.proxyStartTask;
-    }
+    await this.stopManagedServer(managed);
     const existing = this.statusMap(scope).get(serverName);
     const { error: _error, ...rest } = existing ?? idleMcpStatus(managed.catalogConfig);
     const next: McpServerRuntimeStatus = {
@@ -377,9 +392,11 @@ export class McpServerManager {
     const scope = mcpScope(input.session);
     const configWorkspace = input.configWorkspace ?? input.workspace;
     this.lastConfigPathByScope.set(scope, [configPath("global"), configPath("project", configWorkspace)].join(", "));
-    const allConfigs = mcpServersFromConfig(loadConfig(configWorkspace).mcpServers ?? {});
+    const faraiConfig = loadConfig(configWorkspace);
+    const proxy = resolveProxyConfig(faraiConfig);
+    const allConfigs = mcpServersFromConfig(faraiConfig.mcpServers ?? {});
     const effectivePort = resolveMcpPort(allConfigs, input.portOffset ?? 0);
-    const resolvedConfigs = allConfigs.map((config) => applyMcpPortTemplate(config, effectivePort));
+    const resolvedConfigs = allConfigs.map((config) => applyFaraiProxyConfig(applyMcpPortTemplate(config, effectivePort), proxy, effectivePort));
     const configs = resolvedConfigs
       .filter((config) => !this.isReserved(config))
       .filter((server) => server.enabled);
@@ -453,7 +470,7 @@ export class McpServerManager {
     for (const [key, server] of this.servers) {
       if (key.startsWith(scopePrefix) && !plan.active.has(key)) {
         this.suspendCatalogRefresh(key, server);
-        await server.client.stop().catch(() => {});
+        await this.stopManagedServer(server).catch(() => {});
         if (!this.isRefreshCurrent(plan.scope, epoch)) return [];
         if (this.servers.get(key) === server) this.servers.delete(key);
         this.removeToolsForServer(plan.scope, server.config.name);
@@ -511,7 +528,7 @@ export class McpServerManager {
       let managed = this.servers.get(key);
       if (managed) this.suspendCatalogRefresh(key, managed);
       if (!managed || !managed.client.isRunning() || !sameProcessConfig(managed.config, prepared)) {
-        await managed?.client.stop().catch(() => {});
+        if (managed) await this.stopManagedServer(managed).catch(() => {});
         if (!this.isRefreshCurrent(scope, epoch)) return { status: "cancelled", server: config.name };
         managed = {
           config: prepared,
@@ -628,7 +645,7 @@ export class McpServerManager {
     }
     if ((input.force && managed) || !managed || mcpCatalogSignature(managed.catalogConfig) !== mcpCatalogSignature(config)) {
       if (managed) this.suspendCatalogRefresh(key, managed);
-      await managed?.client.stop().catch(() => {});
+      if (managed) await this.stopManagedServer(managed).catch(() => {});
       if (!this.isRefreshCurrent(scope, epoch)) return { status: "cancelled", server: config.name };
       managed = {
         config,
@@ -1055,9 +1072,7 @@ export class McpServerManager {
       const prepared = await this.prepareConfig(input, managed.catalogConfig);
       if (this.servers.get(key) !== managed) throw new Error(`MCP server changed while starting: ${serverName}`);
       if (!sameProcessConfig(managed.config, prepared)) {
-        await managed.client.stop().catch(() => {});
-        managed.proxyStarted = false;
-        delete managed.proxyStartTask;
+        await this.stopManagedServer(managed).catch(() => {});
         managed.config = prepared;
         managed.client = createMcpClient(prepared, input.configWorkspace ?? input.workspace);
       }
@@ -1190,10 +1205,14 @@ export class McpServerManager {
   }
 
   private proxyStatus(input: McpRefreshInput, server: ManagedMcpServer): NonNullable<McpServerRuntimeStatus["proxy"]> {
-    void input;
+    const proxy = resolveProxyConfig(loadConfig(input.configWorkspace ?? input.workspace));
+    const policy = server.proxyPolicy ?? proxy;
     return {
       running: server.proxyStarted,
-      port: server.config.mitmproxy?.port ?? 0
+      port: server.config.mitmproxy?.port ?? 0,
+      mode: proxy.mode,
+      tls: policy.tls,
+      passThroughHosts: [...policy.passThroughHosts]
     };
   }
 
@@ -1223,7 +1242,7 @@ export class McpServerManager {
   private async enableTransparentProxy(input: McpRefreshInput, server: ManagedMcpServer, proxyPort: number): Promise<void> {
     if (!server.config.runInContainer || !input.session) return;
     const proxy = resolveProxyConfig(loadConfig(input.configWorkspace ?? input.workspace));
-    if (!proxy.transparent) return;
+    if (proxy.mode !== "transparent") return;
     const rootSessionId = input.rootSessionId ?? input.session.id;
     const backend = new KaliContainerBackend({
       workspace: input.workspace,
@@ -1236,6 +1255,20 @@ export class McpServerManager {
     if (result.exitCode !== 0) {
       throw new Error(result.stderr.trim() || "could not enable transparent proxy capture in the container");
     }
+    server.proxyTeardown = async () => {
+      const teardown = await backend.disableTransparentProxy();
+      if (teardown.exitCode !== 0) throw new Error(teardown.stderr.trim() || "could not disable transparent proxy capture in the container");
+    };
+  }
+
+  private async stopManagedServer(server: ManagedMcpServer): Promise<void> {
+    const teardown = server.proxyTeardown;
+    delete server.proxyTeardown;
+    server.proxyStarted = false;
+    delete server.proxyStartTask;
+    delete server.proxyPolicy;
+    if (teardown) await teardown().catch(() => {});
+    await server.client.stop();
   }
 
   private toToolDefinition(name: string, descriptor: McpToolDescriptor): ToolDefinition {
@@ -1461,6 +1494,37 @@ export function applyMcpPortTemplate(config: ExternalMcpServer, port: number): E
   };
 }
 
+export function applyFaraiProxyConfig(config: ExternalMcpServer, proxy: ResolvedFaraiProxyConfig, port: number): ExternalMcpServer {
+  let next = config;
+  if (config.mitmproxy) {
+    next = {
+      ...next,
+      env: {
+        ...next.env,
+        FARAI_PROXY_MODE: proxy.mode,
+        FARAI_PROXY_TLS: proxy.tls,
+        FARAI_PROXY_PASS_THROUGH_HOSTS: JSON.stringify(proxy.passThroughHosts)
+      },
+      mitmproxy: {
+        ...config.mitmproxy,
+        autoStartProxy: proxy.mode !== "off" && config.mitmproxy.autoStartProxy
+      }
+    };
+  }
+  if (proxy.mode === "explicit" && next.runInContainer && isPlaywrightMcpServer(next) && !configuredProxyServer(next)) {
+    next = {
+      ...next,
+      args: [...next.args, "--proxy-server", `http://127.0.0.1:${port}`]
+    };
+  }
+  return next;
+}
+
+function configuredProxyServer(config: ExternalMcpServer): boolean {
+  return config.args.some((arg) => arg === "--proxy-server" || arg.startsWith("--proxy-server="))
+    || Boolean(config.env?.PLAYWRIGHT_MCP_PROXY_SERVER);
+}
+
 export const mcpServerManager = new McpServerManager({ reserveServer: isPlaywrightMcpServer });
 
 export async function refreshMcpTools(input: McpRefreshInput): Promise<ToolDefinition[]> {
@@ -1485,6 +1549,15 @@ export function getMcpTool(name: string, session?: Session | string): ToolDefini
 
 export function listMcpServerStatuses(session?: Session | string): McpServerRuntimeStatus[] {
   return mcpServerManager.listStatuses(session);
+}
+
+export function managedProxyForSession(session?: Session | string): McpServerRuntimeStatus["proxy"] | undefined {
+  const statuses = listMcpServerStatuses(session);
+  return statuses.find((status) => status.proxy?.running)?.proxy ?? statuses.find((status) => status.proxy)?.proxy;
+}
+
+export function updateManagedProxyPolicy(session: Session | string, policy: { tls: "strict" | "relaxed"; passThroughHosts: string[] }): void {
+  mcpServerManager.updateProxyPolicy(session, policy);
 }
 
 export async function startMcpServer(input: McpRefreshInput, serverName: string): Promise<McpServerRuntimeStatus> {
@@ -1705,9 +1778,13 @@ export async function ensureMcpProxyReady(input: McpRefreshInput, expectedPort?:
 }
 
 export function configuredMcpServer(workspace: string, preferredName: string): ExternalMcpServer | undefined {
-  const rawConfigs = mcpServersFromConfig(loadConfig(workspace).mcpServers ?? {});
+  const faraiConfig = loadConfig(workspace);
+  const proxy = resolveProxyConfig(faraiConfig);
+  const rawConfigs = mcpServersFromConfig(faraiConfig.mcpServers ?? {});
   const effectivePort = resolveMcpPort(rawConfigs);
-  const configs = rawConfigs.map((config) => applyMcpPortTemplate(config, effectivePort)).filter((config) => config.enabled);
+  const configs = rawConfigs
+    .map((config) => applyFaraiProxyConfig(applyMcpPortTemplate(config, effectivePort), proxy, effectivePort))
+    .filter((config) => config.enabled);
   return configs.find((config) => config.name === preferredName)
     ?? (preferredName === "playwright" ? configs.find(isPlaywrightMcpServer) : configs.find((config) => config.command.includes(preferredName) || config.url?.includes(preferredName)));
 }
@@ -1849,7 +1926,7 @@ export function formatMcpInventory(statuses: McpServerRuntimeStatus[]): string {
     lines.push(`    - ${status.transport === "http" ? "URL" : "Command"}: ${status.command || "-"}`);
     lines.push(`    - Startup: ${status.autoStart ? "automatic" : "on demand"}`);
     if (status.proxy) {
-      lines.push(`    - Proxy: ${status.proxy.running ? `127.0.0.1:${status.proxy.port}` : "stopped"}`);
+      lines.push(`    - Proxy: ${status.proxy.running ? `127.0.0.1:${status.proxy.port}` : "stopped"} · ${status.proxy.mode} · tls ${status.proxy.tls}`);
     }
     lines.push(`    - Tools: ${status.tools.length ? status.tools.join(", ") : "(none)"}`);
     lines.push(`    - Prompts: ${status.prompts.length ? status.prompts.map((prompt) => prompt.title ?? prompt.name).join(", ") : "(none)"}`);

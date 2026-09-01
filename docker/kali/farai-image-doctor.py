@@ -24,6 +24,8 @@ MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 CONTRACT = MANIFEST["contract"]
 APT_PACKAGES = tuple(MANIFEST["aptPackages"])
 WORKFLOWS = MANIFEST["workflows"]
+PINNED_TOOLS = MANIFEST["pinnedTools"]
+PINNED_ASSETS = MANIFEST["pinnedAssets"]
 REQUIRED = tuple(dict.fromkeys(command for commands in WORKFLOWS.values() for command in commands))
 
 
@@ -61,6 +63,7 @@ def missing_packages():
 commands = installed_commands()
 missing = [name for name in REQUIRED if name not in commands]
 missing_apt_packages = missing_packages()
+missing_assets = [name for name, asset in PINNED_ASSETS.items() if not Path(asset["path"]).exists()]
 payload = {
     "contract": CONTRACT,
     "manifest": str(MANIFEST_PATH),
@@ -69,6 +72,9 @@ payload = {
     "requiredCount": len(REQUIRED),
     "missing": missing,
     "missingPackages": missing_apt_packages,
+    "missingAssets": missing_assets,
+    "pinnedTools": PINNED_TOOLS,
+    "pinnedAssets": PINNED_ASSETS,
     "workflows": WORKFLOWS,
 }
 
@@ -80,4 +86,4 @@ if len(sys.argv) == 3 and sys.argv[1] == "--write":
 else:
     print(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
 
-raise SystemExit(0 if not missing and not missing_apt_packages else 1)
+raise SystemExit(0 if not missing and not missing_apt_packages and not missing_assets else 1)

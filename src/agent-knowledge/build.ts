@@ -91,10 +91,11 @@ export function buildKnowledgeDb(options: { only?: string[]; path?: string } = {
     syncDirectory(dirname(path));
     return { path, packs: packs.length, records: actualRecords, entities: actualEntities, nodes: actualNodes, edges: actualEdges, prunedEdges, duplicateGroups };
   } catch (error) {
-    store.close();
+    try { store.close(); } catch {}
     rmSync(temporary, { force: true });
     rmSync(`${temporary}-wal`, { force: true });
     rmSync(`${temporary}-shm`, { force: true });
+    rmSync(`${temporary}-journal`, { force: true });
     throw error;
   }
 }

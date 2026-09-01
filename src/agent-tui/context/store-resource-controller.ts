@@ -48,6 +48,8 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
       if (!sessions.owns(owner)) return;
       input.setStatusDetail("starting mcp");
       try {
+        await port.startContainer();
+        if (!sessions.owns(owner)) return;
         await port.refreshMcp();
         if (!sessions.owns(owner)) return;
         const [catalog, services] = await Promise.all([loadMcpCatalog(), port.listServices()]);

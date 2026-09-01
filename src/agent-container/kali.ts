@@ -27,6 +27,7 @@ import {
   type ContainerLifecyclePort,
   type ManagedContainerIdentity
 } from "./lifecycle";
+import { faraiDockerEnvironment } from "./docker-environment";
 
 export const CONTAINER_WORKSPACE_MOUNT = "/workspace";
 export const CONTAINER_WORKTREES_MOUNT = "/worktrees";
@@ -430,7 +431,8 @@ export class KaliContainerBackend implements ExecutionBackend {
     await this.ensurePersistentRunning();
     const child = spawn("docker", this.stdioArgs(command, options), {
       stdio: ["pipe", "pipe", "pipe"],
-      detached: isolatedProcessGroup()
+      detached: isolatedProcessGroup(),
+      env: faraiDockerEnvironment()
     });
     await new Promise<void>((resolve, reject) => {
       const onSpawn = (): void => { cleanup(); resolve(); };
@@ -457,7 +459,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     const args = this.managedExecArgs(["bash", "-lc", command], marker);
 
     return await new Promise((resolve) => {
-      const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"], detached: isolatedProcessGroup() });
+      const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"], detached: isolatedProcessGroup(), env: faraiDockerEnvironment() });
       const stdout = new BoundedOutputBuffer(maxOutputChars);
       const stderr = new BoundedOutputBuffer(maxOutputChars);
       const stdoutDecoder = new StringDecoder("utf8");
@@ -555,7 +557,7 @@ export class KaliContainerBackend implements ExecutionBackend {
         name: "xterm-256color",
         cols: 120,
         rows: 30,
-        env: process.env as Record<string, string>
+        env: faraiDockerEnvironment()
       });
       const { sessionId, entry } = kaliPtySessions.register(proc, { beforeKill: () => this.stopContainerExec(marker) });
       const abort = () => { void killPtyEntry(entry); };
@@ -571,7 +573,8 @@ export class KaliContainerBackend implements ExecutionBackend {
     const marker = this.execMarker();
     const child = spawn("docker", this.managedExecArgs(["bash", "-lc", command], marker), {
       stdio: ["pipe", "pipe", "pipe"],
-      detached: isolatedProcessGroup()
+      detached: isolatedProcessGroup(),
+      env: faraiDockerEnvironment()
     });
     const { sessionId, entry } = kaliSessions.register(child, { beforeKill: () => this.stopContainerExec(marker) });
     const abort = () => { void killEntry(entry); };
@@ -717,7 +720,11 @@ function imageIdsMatch(left: string, right: string): boolean {
 }
 
 async function runProcess(command: string, args: string[], timeoutMs = 15_000): Promise<ContainerExecResult> {
-  return await runCapturedProcess(command, args, { timeoutMs, maxOutputBytes: INTERNAL_PROCESS_OUTPUT_MAX_BYTES });
+  return await runCapturedProcess(command, args, {
+    ...(command === "docker" ? { env: faraiDockerEnvironment() } : {}),
+    timeoutMs,
+    maxOutputBytes: INTERNAL_PROCESS_OUTPUT_MAX_BYTES
+  });
 }
 
 function containerDoesNotExist(result: ContainerExecResult): boolean {

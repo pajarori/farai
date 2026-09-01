@@ -510,7 +510,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
           sessionId: activeSessionId ?? "host",
           startedAt: Date.now(),
           detail: status.running
-            ? `mcp ${status.proxy?.running ? `proxy 127.0.0.1:${status.proxy.port}` : "running"}`
+            ? `mcp ${status.proxy?.running ? `proxy 127.0.0.1:${status.proxy.port} · ${status.proxy.mode} · tls ${status.proxy.tls}` : "running"}`
             : `mcp ${status.error ?? "stopped"}`,
           metadata: {
             mcp: true,

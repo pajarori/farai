@@ -56,7 +56,7 @@ const BROWSER_TOOLS = new Set([
 ]);
 
 const WORKSPACE_TOOLS = new Set(["fs_read", "fs_list", "fs_grep", "fs_write", "fs_edit", "patch_apply", "notebook_edit", "git_status", "git_diff", "lsp_inspect", "tool_output_read", "code_write_script"]);
-const RECON_TOOLS = new Set(["port_scan", "nmap_scan", "subdomain_enum", "dir_enum", "exploit_search", "kali_tool_search"]);
+const RECON_TOOLS = new Set(["port_scan", "nmap_scan", "subdomain_enum", "dns_probe", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "dir_enum", "exploit_search", "kali_tool_search"]);
 const HTTP_TOOLS = new Set(["http_request", "internet_search", "internet_fetch"]);
 
 export function presentToolActivity(input: ToolActivityInput): ToolActivityPresentation {
@@ -189,8 +189,8 @@ function toolOutcome(
   if (tool === "port_scan" || tool === "nmap_scan" || (tool === "shell_exec" && /^\s*(?:sudo\s+)?nmap\b/i.test(stringValue(args.command) ?? ""))) {
     const ports = parseNmap(text);
     if (ports.length > 0) return ports.slice(0, 6).map((row) => `${row.port}/${row.service}`).join(", ") + (ports.length > 6 ? ` · +${ports.length - 6}` : "");
-    const discovered = arrayValue(metadata.discoveredPorts);
-    if (discovered.length > 0) return `${discovered.length} open port${discovered.length === 1 ? "" : "s"}`;
+    const discovered = numberValue(metadata.recordCount) ?? arrayValue(metadata.discoveredPorts).length;
+    if (discovered > 0) return `${discovered} open port${discovered === 1 ? "" : "s"}`;
   }
   if (tool === "subdomain_enum") {
     const names = arrayValue(metadata.discoveredSubdomains);
@@ -198,6 +198,8 @@ function toolOutcome(
     const warnings = sources.filter((value) => objectValue(value)?.status !== "ok").length;
     return `${names.length} subdomain${names.length === 1 ? "" : "s"}${warnings ? ` · ${warnings} source warning${warnings === 1 ? "" : "s"}` : ""}`;
   }
+  const structuredRecon = structuredReconOutcome(tool, metadata);
+  if (structuredRecon) return structuredRecon;
   if (tool === "dir_enum") {
     const dirs = parseDirectoryResults(text);
     if (dirs.length > 0) return `${dirs.length} path${dirs.length === 1 ? "" : "s"}`;
@@ -284,6 +286,8 @@ function toolPreview(
     });
     return [...withMore(names.slice(0, 4), names.length, 4), ...errors.slice(0, 2)];
   }
+  const structuredRecon = structuredReconPreview(tool, metadata);
+  if (structuredRecon.length) return structuredRecon;
   if (tool === "dir_enum") {
     const rows = parseDirectoryResults(text);
     if (rows.length > 0) return withMore(rows.slice(0, 5).map((row) => `${row.status}  ${row.url}`), rows.length, 5);
@@ -307,6 +311,67 @@ function toolPreview(
   }
   if (active) return boundedTailLines(text, 4);
   return boundedPreviewLines(text, 5);
+}
+
+function structuredReconOutcome(tool: string, metadata: Record<string, unknown>): string | undefined {
+  const records = numberValue(metadata.recordCount) ?? arrayValue(metadata.records).length;
+  if (tool === "dns_probe") {
+    const resolved = numberValue(metadata.resolvedNames) ?? records;
+    return `${resolved} resolved name${resolved === 1 ? "" : "s"}`;
+  }
+  if (tool === "http_probe") {
+    const live = numberValue(metadata.liveServices) ?? records;
+    const failed = numberValue(metadata.failedTargets) ?? 0;
+    return `${live} live service${live === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`;
+  }
+  if (tool === "web_crawl") {
+    const urls = numberValue(metadata.uniqueUrls) ?? records;
+    const forms = numberValue(metadata.forms) ?? 0;
+    const xhr = numberValue(metadata.xhrRequests) ?? 0;
+    return `${urls} endpoint${urls === 1 ? "" : "s"}${forms ? ` · ${forms} form${forms === 1 ? "" : "s"}` : ""}${xhr ? ` · ${xhr} xhr` : ""}`;
+  }
+  if (tool === "vulnerability_scan") {
+    const severity = objectValue(metadata.severities);
+    const counts = severity ? ["critical", "high", "medium", "low", "info"].flatMap((name) => numberValue(severity[name]) ? [`${name} ${numberValue(severity[name])}`] : []) : [];
+    return `${records} finding${records === 1 ? "" : "s"}${counts.length ? ` · ${counts.join(", ")}` : ""}`;
+  }
+  if (tool === "tls_probe") {
+    const successful = numberValue(metadata.successfulProbes) ?? records;
+    const expiring = numberValue(metadata.expiringCertificates) ?? 0;
+    return `${successful} tls endpoint${successful === 1 ? "" : "s"}${expiring ? ` · ${expiring} expiring soon` : ""}`;
+  }
+  if (tool === "url_discover") {
+    const urls = numberValue(metadata.uniqueUrls) ?? records;
+    return `${urls} url${urls === 1 ? "" : "s"}`;
+  }
+  if (tool === "vulnerability_lookup") return `${records} vulnerabilit${records === 1 ? "y" : "ies"}`;
+  return undefined;
+}
+
+function structuredReconPreview(tool: string, metadata: Record<string, unknown>): string[] {
+  const records = arrayValue(metadata.records).flatMap((value) => {
+    const item = objectValue(value);
+    return item ? [item] : [];
+  });
+  if (!records.length) return [];
+  const lines = records.slice(0, 5).map((item) => formatStructuredReconRecord(tool, item));
+  return withMore(lines, records.length, 5);
+}
+
+function formatStructuredReconRecord(tool: string, item: Record<string, unknown>): string {
+  if (tool === "port_scan" || tool === "nmap_scan") return `${String(item.host ?? "host")}:${String(item.port ?? "?")}/${String(item.protocol ?? "tcp")}${item.service ? ` · ${String(item.service)}` : ""}`;
+  if (tool === "dns_probe") {
+    const recordMap = objectValue(item.records);
+    const answers = recordMap ? Object.entries(recordMap).flatMap(([type, values]) => arrayValue(values).map((value) => `${type.toUpperCase()} ${String(value)}`)).slice(0, 4) : [];
+    return `${String(item.name ?? "name")}${answers.length ? ` · ${answers.join(" · ")}` : " · no answers"}`;
+  }
+  if (tool === "http_probe") return [item.statusCode ?? "?", item.finalUrl ?? item.url ?? item.input, item.title, item.webServer].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "web_crawl") return [item.method ?? "GET", item.url, item.statusCode, item.tag].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "vulnerability_scan") return [String(item.severity ?? "unknown").toUpperCase(), item.templateId, item.name, item.matchedAt].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "tls_probe") return [`${String(item.host ?? "host")}${item.port ? `:${String(item.port)}` : ""}`, item.version, item.cipher, item.commonName].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "url_discover") return [item.url, arrayValue(item.sources).join(", ")].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "vulnerability_lookup") return [item.id, String(item.severity ?? "").toUpperCase(), item.title, item.cvssScore !== undefined ? `cvss ${String(item.cvssScore)}` : undefined].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  return Object.values(item).filter((value) => typeof value === "string" || typeof value === "number").slice(0, 4).map(String).join(" · ");
 }
 
 function emailResourcePreview(values: unknown[]): string[] {
