@@ -1,6 +1,6 @@
 {
   "name": "farai",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": false,
   "type": "module",
   "description": "Cyber-first freestyle local AI agent",
@@ -46,7 +46,7 @@
     "tui:test": "bun test ./test/tui-*.test.ts ./test/tui-*.test.tsx",
     "doctor": "bun run src/cli/index.ts doctor",
     "typecheck": "tsc --noEmit",
-    "test": "bun test ./test",
+    "test": "bun test ./test/*.test.ts ./test/*.test.tsx",
     "verify": "bun run typecheck && bun run test && bun run test:package",
     "release:check": "bun run verify && bun audit",
     "eval:smoke": "bun run test/evals/smoke.ts",

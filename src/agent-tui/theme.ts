@@ -21,7 +21,7 @@ export const COLOR = {
   warning: "#d7af5f",
   error: "#ff5f5f",
   success: "#87d75f",
-  bg: "#000000",
+  bg: "transparent",
   backdrop: "rgba(0,0,0,0.5)",
   panel: "#101010",
   userMessageBg: "#1f1f1f",

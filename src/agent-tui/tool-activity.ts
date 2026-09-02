@@ -1,6 +1,7 @@
 import type { ToolResult } from "../types";
 import { canonicalToolName } from "../tool-names";
 import { parseDirectoryResults, parseNmap, splitHttpResponse } from "./tool-renderers";
+import { truncateTerminal } from "./terminal-text";
 import { isActiveToolStatus, toolDefinition, toolTitle } from "./tool-presentation";
 
 export type ToolActivityFamily =
@@ -66,7 +67,9 @@ export function presentToolActivity(input: ToolActivityInput): ToolActivityPrese
   const text = active ? input.liveOutput ?? input.result ?? "" : input.result ?? input.fullResult ?? "";
   const metadata = input.toolResult?.metadata ?? {};
   const family = toolFamily(tool);
-  const title = toolTitle(tool, args, input.status, 240);
+  const title = tool === "email_wait" && !active && metadata.timedOut === true
+    ? emailWaitTimeoutTitle(args)
+    : toolTitle(tool, args, input.status, 240);
   const warning = hasWarning(input.toolResult, text);
   const preview = toolPreview(tool, args, text, metadata, active);
   const outcome = toolOutcome(tool, args, text, metadata, input.toolResult, active);
@@ -174,6 +177,11 @@ function compactActivityLabel(tool: string, args: Record<string, unknown>, title
   if (tool === "browser_navigate") return `opened ${stringValue(args.url) ?? "page"}`;
   if (tool === "proxy_flow_get") return `flow ${stringValue(args.flowId) ?? "request"}`;
   return title;
+}
+
+function emailWaitTimeoutTitle(args: Record<string, unknown>): string {
+  const filter = stringValue(args.subject) ?? stringValue(args.from);
+  return truncateTerminal(`no matching email${filter ? ` · ${filter}` : ""}`, 240);
 }
 
 function toolOutcome(
@@ -424,6 +432,7 @@ function proxyOutcome(metadata: Record<string, unknown>, summary: string | undef
 
 function hasWarning(result: ToolResult | undefined, text: string): boolean {
   if (!result) return false;
+  if (result.metadata?.emailAction === "wait" && result.metadata.timedOut === true) return true;
   if (result.metadata?.exactProtocolVerificationRequired === true || result.metadata?.snapshotError) return true;
   if (arrayValue(result.metadata?.failures).length > 0) return true;
   if (arrayValue(result.metadata?.sources).some((value) => objectValue(value)?.status !== "ok")) return true;

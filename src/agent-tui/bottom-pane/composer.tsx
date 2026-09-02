@@ -22,7 +22,7 @@ export const COMPOSER_PLACEHOLDER = "what should we investigate?";
 const focusTintStart = [22, 33, 38] as const;
 const focusTintEnd = [16, 16, 16] as const;
 const inactiveComposerBackground = RGBA.fromInts(...focusTintEnd);
-const composerPageBackground = RGBA.fromInts(0, 0, 0);
+const composerPageBackground = RGBA.fromInts(0, 0, 0, 0);
 const focusTintPalettes = new Map<number, readonly RGBA[]>();
 const composerEdgeRuns = new Map<number, { top: string; bottom: string }>();
 

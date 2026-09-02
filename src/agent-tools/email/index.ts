@@ -142,15 +142,15 @@ const emailReadTool: ToolDefinition = {
 
 const emailWaitTool: ToolDefinition = {
   name: "email_wait",
-  description: "Wait for a matching message in one email resource using its exact Farai UUID. Use this for verification links, OTP codes, password resets, and asynchronous registrations. Match by sender, subject, or body text. The returned message UUID can be passed directly to email_read.",
+  description: "Wait for a matching message in one email resource using its exact Farai UUID. Use this for verification links, OTP codes, password resets, and asynchronous registrations. Every supplied from, subject, and body filter is a strict case-insensitive substring condition and all supplied filters must match. Do not guess a subject or sender; omit filters when any message in an isolated temporary inbox is acceptable. The returned message UUID can be passed directly to email_read.",
   inputSchema: {
     type: "object",
     required: ["emailId"],
     properties: {
       emailId: { type: "string", description: "Farai email UUID from email_list or email_create" },
-      from: { type: "string", description: "Case-insensitive sender substring" },
-      subject: { type: "string", description: "Case-insensitive subject substring" },
-      body: { type: "string", description: "Case-insensitive body substring" },
+      from: { type: "string", description: "Strict case-insensitive sender substring; omit when the sender is not known" },
+      subject: { type: "string", description: "Strict case-insensitive subject substring; omit rather than guessing the subject" },
+      body: { type: "string", description: "Strict case-insensitive message-body substring; use only when the expected body text is known" },
       unreadOnly: { type: "boolean", description: "Match only unseen IMAP messages" },
       timeoutSeconds: { type: "integer", minimum: 1, maximum: 600 }
     },
@@ -181,11 +181,12 @@ const emailWaitTool: ToolDefinition = {
           ...(args.unreadOnly === true ? { unreadOnly: true } : {})
         }, context.signal);
     if (!providerMessage) {
+      const criteria = formatWaitCriteria(match);
       return {
         ok: true,
         summary: `no matching email arrived in ${source.address} within ${Math.round(timeoutMs / 1_000)} seconds`,
-        output: "no matching message arrived before the timeout",
-        metadata: { emailAction: "wait", emailId, address: source.address, source: source.kind, timedOut: true }
+        output: criteria ? `no message matched ${criteria} before the timeout` : "no email arrived before the timeout",
+        metadata: { emailAction: "wait", emailId, address: source.address, source: source.kind, timedOut: true, ...(criteria ? { criteria } : {}) }
       };
     }
     const message = emailMessageRegistry.register(context.session.id, emailId, providerMessage);
@@ -250,6 +251,14 @@ function emailMessageResult(action: "read" | "wait", emailId: string, address: s
     output: formatMessageDetail(message),
     metadata: { emailAction: action, emailId, address, message }
   };
+}
+
+function formatWaitCriteria(match: { from?: string; subject?: string; body?: string }): string {
+  return [
+    match.from ? `sender containing ${JSON.stringify(match.from)}` : undefined,
+    match.subject ? `subject containing ${JSON.stringify(match.subject)}` : undefined,
+    match.body ? `body containing ${JSON.stringify(match.body)}` : undefined
+  ].filter((value): value is string => value !== undefined).join(" and ");
 }
 
 function formatResource(resource: EmailResourceInfo): string {
