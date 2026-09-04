@@ -9,17 +9,17 @@ export async function runContentUpdateCommand(parsed: UpdateArguments, workspace
     const status = contentStatus();
     if (!status.active) {
       const knowledge = legacyKnowledgeDbPath();
-      console.log("content: bundled defaults");
+      console.log("content: not installed");
       console.log("active release: none");
       console.log(`knowledge: ${existsSync(knowledge) ? knowledge : "not installed"}`);
-      console.log("skills: bundled");
+      console.log("skills: not installed");
       return 0;
     }
     console.log(`content: ${status.active.version}`);
     if (status.active.sourceCommit) console.log(`source commit: ${status.active.sourceCommit}`);
     console.log(`activated: ${status.active.activatedAt}`);
     console.log(`knowledge: ${status.knowledgePath ?? "local fallback"}`);
-    console.log(`skills: ${status.skillsPath ?? "bundled fallback"}`);
+    console.log(`skills: ${status.skillsPath ?? "not installed"}`);
     console.log(`available versions: ${status.versions.join(", ") || "none"}`);
     return 0;
   }

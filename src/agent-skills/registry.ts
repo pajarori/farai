@@ -5,7 +5,7 @@ import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readBoundedFileTextSync } from "../file-read";
 import { activeContentSkillsDir } from "../agent-content/paths";
 
-export type SkillSource = "builtin" | "content" | "user" | "environment" | "project";
+export type SkillSource = "content" | "user" | "environment" | "project";
 
 export type SkillMeta = {
   name: string;
@@ -45,7 +45,6 @@ export type LoadedSkill = SkillMeta & {
 type InternalSkill = LoadedSkill & { priority: number };
 type SkillRoot = { path: string; source: SkillSource; priority: number };
 
-const BUILTIN_DIR = resolveBuiltinSkillDir();
 const MAX_SKILL_BYTES = 64 * 1024;
 const RECOMMENDED_SKILL_BYTES = 20 * 1024;
 const MAX_RESOURCE_BYTES = 128 * 1024;
@@ -128,7 +127,7 @@ export function renderSkillCatalog(workspace: string, maxChars = 8_000): string 
 }
 
 function skillRoots(options: SkillDiscoveryOptions): SkillRoot[] {
-  const roots: SkillRoot[] = [{ path: BUILTIN_DIR, source: "builtin", priority: 0 }];
+  const roots: SkillRoot[] = [];
   const content = activeContentSkillsDir();
   if (content) roots.push({ path: content, source: "content", priority: 5 });
   if (options.includeUser !== false) roots.push({ path: join(homedir(), ".agents", "skills"), source: "user", priority: 10 });
@@ -166,14 +165,6 @@ function scanRoot(root: SkillRoot, diagnostics: SkillDiagnostic[]): InternalSkil
     if (parsed) skills.push(parsed);
   }
   return skills;
-}
-
-function resolveBuiltinSkillDir(): string {
-  const candidates = [
-    join(import.meta.dir, "library"),
-    join(import.meta.dir, "..", "..", "src", "agent-skills", "library")
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }
 
 function parseSkill(file: string, directory: string, directoryName: string, root: SkillRoot, diagnostics: SkillDiagnostic[]): InternalSkill | undefined {

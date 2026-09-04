@@ -404,7 +404,15 @@ export class AgentRuntime {
       if (failures.length) throw new AggregateError(failures, "runtime shutdown completed with cleanup failures");
     })();
     void this.shutdownFinalizationPromise.catch(() => undefined);
-    this.shutdownPromise = this.shutdownFinalizationPromise;
+    this.shutdownPromise = (async () => {
+      const completed = await waitForShutdownFinalization(
+        this.shutdownFinalizationPromise!,
+        shutdownGracePeriod(options.gracePeriodMs)
+      );
+      if (!completed) {
+        for (const lease of this.activeToolLeases) lease.revoke("runtime shutdown grace period expired");
+      }
+    })();
     return this.shutdownPromise;
   }
 

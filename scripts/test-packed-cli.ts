@@ -37,10 +37,7 @@ try {
   if (!readFileTextPrefixSync(join(packageRoot, "dist", "cli", "index.js"), 64, "packed CLI").text.startsWith("#!/usr/bin/env bun\n")) throw new Error("packed CLI is missing its Bun shebang");
   const help = await run([bin, "--help"], scratch);
   if (!help.includes("farai setup") || !help.includes("farai resume")) throw new Error("packed CLI help is incomplete");
-  for (const skill of ["ctf-solving", "web-assessment", "binary-reversing", "packet-analysis", "source-security-review"]) {
-    const path = join(packageRoot, "src", "agent-skills", "library", skill, "SKILL.md");
-    if (!existsSync(path)) throw new Error(`packed CLI is missing built-in skill: ${skill}`);
-  }
+  if (existsSync(join(packageRoot, "src", "agent-skills", "library"))) throw new Error("packed CLI must not bundle skill library");
   console.log(`packed CLI smoke passed (${version})`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });

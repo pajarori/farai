@@ -30,7 +30,6 @@
   "files": [
     "dist/",
     "docker/kali/",
-    "src/agent-skills/library/",
     "LICENSE",
     "README.md",
     "package.json"
