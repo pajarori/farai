@@ -55,6 +55,12 @@ export type RunArguments = {
   json: boolean;
 };
 
+export type UpdateArguments =
+  | { kind: "check" }
+  | { kind: "apply" }
+  | { kind: "status" }
+  | { kind: "rollback" };
+
 export type BenchmarkArguments =
   | { kind: "csi-generate"; configPath: string; materialRoot: string; output: string }
   | { kind: "run"; manifestPath: string; output?: string; workspace?: string; artifactsDir?: string }
@@ -62,6 +68,15 @@ export type BenchmarkArguments =
 
 export function parseNoArguments(command: string, args: string[]): void {
   if (args.length > 0) throw new Error(`${command} does not accept arguments`);
+}
+
+export function parseUpdateArguments(args: string[]): UpdateArguments {
+  const subcommand = args[0] ?? "status";
+  if (subcommand !== "check" && subcommand !== "apply" && subcommand !== "status" && subcommand !== "rollback") {
+    throw new Error(`unknown update command: ${subcommand}`);
+  }
+  parseNoArguments(`update ${subcommand}`, args.slice(1));
+  return { kind: subcommand };
 }
 
 export function parseSetupArguments(args: string[]): SetupArguments {

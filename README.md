@@ -55,6 +55,17 @@ Config and auth files live under:
 ~/.local/pajarori/farai/
 ```
 
+Farai checks the separate [farai-data](https://github.com/pajarori/farai-data) release channel before opening the TUI. When a validated release manifest publishes new knowledge or skills, Farai asks before downloading it. The current content can be inspected or managed without starting a session:
+
+```bash
+farai update status
+farai update check
+farai update apply
+farai update rollback
+```
+
+Set `FARAI_CONTENT_MANIFEST_URL` for a private channel or local `file://` manifest, and `FARAI_CONTENT_DIR` to isolate the local content store. Set `FARAI_DISABLE_CONTENT_UPDATE=1` to disable the channel.
+
 ## Status
 
 Farai is under active development.

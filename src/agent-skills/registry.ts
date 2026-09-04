@@ -3,8 +3,9 @@ import { existsSync, readdirSync, realpathSync, statSync, type Dirent } from "no
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readBoundedFileTextSync } from "../file-read";
+import { activeContentSkillsDir } from "../agent-content/paths";
 
-export type SkillSource = "builtin" | "user" | "environment" | "project";
+export type SkillSource = "builtin" | "content" | "user" | "environment" | "project";
 
 export type SkillMeta = {
   name: string;
@@ -128,6 +129,8 @@ export function renderSkillCatalog(workspace: string, maxChars = 8_000): string 
 
 function skillRoots(options: SkillDiscoveryOptions): SkillRoot[] {
   const roots: SkillRoot[] = [{ path: BUILTIN_DIR, source: "builtin", priority: 0 }];
+  const content = activeContentSkillsDir();
+  if (content) roots.push({ path: content, source: "content", priority: 5 });
   if (options.includeUser !== false) roots.push({ path: join(homedir(), ".agents", "skills"), source: "user", priority: 10 });
   const environmentRoots = [
     ...(process.env.FARAI_SKILLS_DIR?.split(delimiter) ?? []),

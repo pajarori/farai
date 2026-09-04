@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { syncDirectory } from "../agent-core/atomic-file";
 import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
 import { KnowledgeStore } from "./store";
-import { knowledgeDbPath } from "./paths";
+import { legacyKnowledgeDbPath } from "./paths";
 import { latestPacks, readEntities, readRecords, type NormalizedRecord } from "./pack";
 import { latestTaxonomies, readEdges, readNodes } from "./ingest/taxonomy-pack";
 import { readEnrichment } from "./ingest/enrichment";
@@ -22,7 +22,7 @@ export type BuildResult = {
 };
 
 export function buildKnowledgeDb(options: { only?: string[]; path?: string } = {}): BuildResult {
-  const path = options.path ?? knowledgeDbPath();
+  const path = options.path ?? legacyKnowledgeDbPath();
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   if (options.path === undefined) ensurePrivateDirectory(dirname(path), "farai home directory");

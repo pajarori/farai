@@ -4,6 +4,9 @@ import { discardResponseBody, readBoundedResponseJson } from "../http-response";
 import { readBoundedFileTextSync, readBoundedFileTextSyncNoFollow } from "../file-read";
 import { atomicWriteFile } from "../agent-core/atomic-file";
 import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists } from "../agent-core/private-path";
+import { compareSemver, isSemver } from "../agent-core/semver";
+
+export { compareSemver } from "../agent-core/semver";
 
 export const UPDATE_CACHE_TTL_MS = 20 * 60 * 60 * 1_000;
 export const UPDATE_CHECK_TIMEOUT_MS = 4_000;
@@ -69,33 +72,6 @@ export function createUpdateNotice(currentVersion: string, latestVersion: string
   };
 }
 
-export function compareSemver(left: string, right: string): number {
-  const a = parseSemver(left);
-  const b = parseSemver(right);
-  if (!a || !b) return 0;
-  for (let index = 0; index < 3; index += 1) {
-    const delta = a.core[index]! - b.core[index]!;
-    if (delta !== 0) return delta < 0 ? -1 : 1;
-  }
-  if (a.prerelease.length === 0 || b.prerelease.length === 0) {
-    if (a.prerelease.length === b.prerelease.length) return 0;
-    return a.prerelease.length === 0 ? 1 : -1;
-  }
-  const length = Math.max(a.prerelease.length, b.prerelease.length);
-  for (let index = 0; index < length; index += 1) {
-    const aPart = a.prerelease[index];
-    const bPart = b.prerelease[index];
-    if (aPart === undefined || bPart === undefined) return aPart === undefined ? -1 : 1;
-    if (aPart === bPart) continue;
-    const aNumber = numericIdentifier(aPart);
-    const bNumber = numericIdentifier(bPart);
-    if (aNumber !== undefined && bNumber !== undefined) return aNumber < bNumber ? -1 : 1;
-    if (aNumber !== undefined || bNumber !== undefined) return aNumber !== undefined ? -1 : 1;
-    return aPart < bPart ? -1 : 1;
-  }
-  return 0;
-}
-
 export function readUpdateCache(path = updateCachePath()): UpdateCache | undefined {
   try {
     ensurePrivateDirectory(dirname(path), "update cache directory");
@@ -104,7 +80,7 @@ export function readUpdateCache(path = updateCachePath()): UpdateCache | undefin
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
     const value = parsed as Record<string, unknown>;
     if (typeof value.checkedAt !== "number" || !Number.isFinite(value.checkedAt)) return undefined;
-    if (typeof value.latestVersion !== "string" || !parseSemver(value.latestVersion)) return undefined;
+    if (typeof value.latestVersion !== "string" || !isSemver(value.latestVersion)) return undefined;
     return { checkedAt: value.checkedAt, latestVersion: value.latestVersion };
   } catch {
     return undefined;
@@ -119,7 +95,7 @@ function readCurrentVersion(): string | undefined {
   try {
     const packagePath = join(import.meta.dir, "..", "..", "package.json");
     const parsed = JSON.parse(readBoundedFileTextSync(packagePath, 1024 * 1024, "package metadata")) as { version?: unknown };
-    return typeof parsed.version === "string" && parseSemver(parsed.version) ? parsed.version : undefined;
+    return typeof parsed.version === "string" && isSemver(parsed.version) ? parsed.version : undefined;
   } catch {
     return undefined;
   }
@@ -158,7 +134,7 @@ async function fetchLatestVersion(fetcher: UpdateFetcher, timeoutMs: number): Pr
     const parsed: unknown = await readBoundedResponseJson(response, UPDATE_RESPONSE_MAX_BYTES, "npm registry response");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid npm registry response");
     const version = (parsed as Record<string, unknown>).version;
-    if (typeof version !== "string" || !parseSemver(version)) throw new Error("invalid npm package version");
+    if (typeof version !== "string" || !isSemver(version)) throw new Error("invalid npm package version");
     return version;
   } finally {
     clearTimeout(timer);
@@ -185,18 +161,4 @@ function updateCheckDisabled(): boolean {
 
 function envEnabled(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "yes";
-}
-
-function parseSemver(value: string): { core: [number, number, number]; prerelease: string[] } | undefined {
-  const match = value.trim().match(/^(?:v)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/);
-  if (!match) return undefined;
-  return {
-    core: [Number(match[1]), Number(match[2]), Number(match[3])],
-    prerelease: match[4]?.split(".") ?? []
-  };
-}
-
-function numericIdentifier(value: string): number | undefined {
-  if (!/^(0|[1-9]\d*)$/.test(value)) return undefined;
-  return Number(value);
 }

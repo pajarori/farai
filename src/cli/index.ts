@@ -9,6 +9,7 @@ import { ensureDefaultUserConfig, globalConfigPath, loadGlobalConfig } from "../
 import { loadConfig, updateConfig } from "../agent-core/config";
 import { FARAI_BANNER } from "../branding";
 import { FARAI_VERSION } from "../version";
+import { resolveSessionLocation } from "../session-catalog";
 import {
   parseBenchmarkArguments,
   parseInitArguments,
@@ -17,6 +18,7 @@ import {
   parseResumeArguments,
   parseRunArguments,
   parseSetupArguments,
+  parseUpdateArguments,
   type ModelAddArguments
 } from "./command-arguments";
 import { readSecretFromStdin } from "./secret-input";
@@ -83,6 +85,10 @@ async function main(): Promise<void> {
       ensureDefaultUserConfig();
       console.log(globalConfigPath());
       break;
+    case "update":
+      if (wantsHelp(args)) { help("update"); break; }
+      await updateContent(args);
+      break;
     default:
       console.error(`unknown command: ${command}`);
       help();
@@ -111,6 +117,9 @@ async function doctor(): Promise<void> {
   console.log(`kali image: ${backend.image} (${image.exists ? "exists" : "missing"})`);
   console.log(`kali contract: ${image.contract ?? "missing"}`);
   console.log(`kali capabilities: ${image.contract === KALI_IMAGE_CONTRACT ? "ready" : "rebuild required"}`);
+  const { contentStatus } = await import("../agent-content/updater");
+  const content = contentStatus();
+  console.log(`content: ${content.active?.version ?? "local fallback"}`);
   console.log(`setup command: farai setup`);
 }
 
@@ -241,6 +250,12 @@ async function initLab(args: string[]): Promise<void> {
 
 async function launchTui(workspace: string, sessionId: string | undefined): Promise<void> {
   ensureDefaultUserConfig();
+  const { runStartupContentPreflight } = await import("../agent-content/preflight");
+  const effectiveWorkspace = sessionId ? resolveSessionLocation(sessionId)?.workspace ?? workspace : workspace;
+  if (await runStartupContentPreflight(effectiveWorkspace) === "cancelled") {
+    process.exitCode = 130;
+    return;
+  }
   if (import.meta.path.endsWith(".ts")) {
     const sourceTuiPreload = "@opentui/solid/preload";
     await import(sourceTuiPreload);
@@ -253,6 +268,12 @@ async function launchTui(workspace: string, sessionId: string | undefined): Prom
     console.error(error.message);
     process.exitCode = 1;
   }
+}
+
+async function updateContent(args: string[]): Promise<void> {
+  const parsed = parseUpdateArguments(args);
+  const { runContentUpdateCommand } = await import("../agent-content/command");
+  process.exitCode = await runContentUpdateCommand(parsed, process.cwd());
 }
 
 async function run(args: string[]): Promise<void> {
@@ -384,7 +405,14 @@ Usage:
     config: `Farai config
 
 Usage:
-  farai config`
+  farai config`,
+    update: `Farai update
+
+Usage:
+  farai update status
+  farai update check
+  farai update apply
+  farai update rollback`
   };
   if (topic && !pages[topic]) throw new Error(`unknown help topic: ${topic}`);
   console.log((topic ? pages[topic] : undefined) ?? `Farai
@@ -401,6 +429,7 @@ Usage:
   farai bench run <manifest.json> [--output result.json] [--workspace scratch-dir] [--artifacts dir]
   farai bench suite <suite.json> [--artifacts dir]
   farai config
+  farai update [status|check|apply|rollback]
 
 settings live in ~/.local/pajarori/farai/config.toml; credentials use the system keyring.
 

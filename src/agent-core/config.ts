@@ -34,11 +34,18 @@ export type FaraiConfig = {
   context?: FaraiContextConfig;
   lsp?: FaraiLspConfig;
   web?: FaraiWebConfig;
+  updates?: FaraiUpdatesConfig;
 };
 
 export type FaraiWebConfig = {
   searchBackend?: "auto" | "duckduckgo" | "yahoo" | "bing" | "searxng";
   searxngUrl?: string;
+};
+
+export type FaraiUpdatesConfig = {
+  contentEnabled?: boolean;
+  contentManifestUrl?: string;
+  prompt?: boolean;
 };
 
 export type FaraiModelLimitConfig = {
@@ -146,6 +153,7 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
   const context = contextConfig(raw.context);
   const lsp = lspConfig(raw.lsp);
   const web = webConfig(raw.web);
+  const updates = updatesConfig(raw.updates);
   return {
     ...(positiveInteger(raw.config_version ?? raw.configVersion) !== undefined ? { configVersion: positiveInteger(raw.config_version ?? raw.configVersion)! } : {}),
     ...(typeof raw.model === "string" ? { model: raw.model } : {}),
@@ -165,8 +173,23 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
     ...(proxy ? { proxy } : {}),
     ...(context ? { context } : {}),
     ...(lsp ? { lsp } : {}),
-    ...(web ? { web } : {})
+    ...(web ? { web } : {}),
+    ...(updates ? { updates } : {})
   };
+}
+
+function updatesConfig(value: unknown): FaraiUpdatesConfig | undefined {
+  if (!isRecord(value)) return undefined;
+  const rawContentEnabled = value.content_enabled ?? value.contentEnabled;
+  const contentManifestUrl = typeof (value.content_manifest_url ?? value.contentManifestUrl) === "string"
+    ? String(value.content_manifest_url ?? value.contentManifestUrl).trim()
+    : undefined;
+  const config: FaraiUpdatesConfig = {
+    ...(typeof rawContentEnabled === "boolean" ? { contentEnabled: rawContentEnabled } : {}),
+    ...(contentManifestUrl ? { contentManifestUrl } : {}),
+    ...(typeof value.prompt === "boolean" ? { prompt: value.prompt } : {})
+  };
+  return Object.keys(config).length ? config : undefined;
 }
 
 function webConfig(value: unknown): FaraiWebConfig | undefined {
@@ -295,7 +318,8 @@ export function mergeConfig(base: FaraiConfig, over: FaraiConfig): FaraiConfig {
         } : {})
       }
     } : {}),
-    ...(base.web || over.web ? { web: { ...base.web, ...over.web } } : {})
+    ...(base.web || over.web ? { web: { ...base.web, ...over.web } } : {}),
+    ...(base.updates || over.updates ? { updates: { ...base.updates, ...over.updates } } : {})
   };
 }
 
@@ -332,6 +356,11 @@ export function serializeConfigToml(config: FaraiConfig): string {
   if (config.web && Object.keys(config.web).length) emitTable(lines, ["web"], {
     ...(config.web.searchBackend ? { search_backend: config.web.searchBackend } : {}),
     ...(config.web.searxngUrl ? { searxng_url: config.web.searxngUrl } : {})
+  });
+  if (config.updates && Object.keys(config.updates).length) emitTable(lines, ["updates"], {
+    ...(config.updates.contentEnabled === undefined ? {} : { content_enabled: config.updates.contentEnabled }),
+    ...(config.updates.contentManifestUrl ? { content_manifest_url: config.updates.contentManifestUrl } : {}),
+    ...(config.updates.prompt === undefined ? {} : { prompt: config.updates.prompt })
   });
   for (const [selection, limit] of Object.entries(config.modelLimits ?? {})) {
     emitTable(lines, ["model_limits", selection], {
@@ -450,6 +479,10 @@ model = "big-pickle"
 [proxy]
 mode = "explicit"
 tls = "relaxed"
+
+[updates]
+content_enabled = true
+prompt = true
 
 [mcp_servers.mitmproxy-mcp]
 command = "mitmproxy-mcp"
