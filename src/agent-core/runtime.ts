@@ -350,6 +350,7 @@ export class AgentRuntime {
       this.subagentWorkspaceMutationGate.idle(),
       ...(this.recoveryPromise ? [this.recoveryPromise] : [])
     ]);
+    const drainGracePeriod = shutdownGracePeriod(options.gracePeriodMs);
     this.shutdownFinalizationPromise = (async () => {
       const failures: Error[] = [];
       const attempt = async (label: string, operation: () => Promise<unknown> | unknown): Promise<void> => {
@@ -360,7 +361,10 @@ export class AgentRuntime {
         }
       };
       try {
-        await drain;
+        const drained = await waitForShutdownFinalization(drain, drainGracePeriod);
+        if (!drained) {
+          for (const lease of this.activeToolLeases) lease.revoke("runtime shutdown grace period expired");
+        }
         this.activeToolControllers.clear();
         this.activeToolLeases.clear();
         this.subagentControllers.clear();
@@ -400,15 +404,7 @@ export class AgentRuntime {
       if (failures.length) throw new AggregateError(failures, "runtime shutdown completed with cleanup failures");
     })();
     void this.shutdownFinalizationPromise.catch(() => undefined);
-    this.shutdownPromise = (async () => {
-      const completed = await waitForShutdownFinalization(
-        this.shutdownFinalizationPromise!,
-        shutdownGracePeriod(options.gracePeriodMs)
-      );
-      if (!completed) {
-        for (const lease of this.activeToolLeases) lease.revoke("runtime shutdown grace period expired");
-      }
-    })();
+    this.shutdownPromise = this.shutdownFinalizationPromise;
     return this.shutdownPromise;
   }
 
@@ -544,6 +540,7 @@ export class AgentRuntime {
       await this.recoveryPromise;
     } catch (error) {
       this.stopRuntimeLease();
+      if (this.shuttingDown) throw new Error("Farai runtime is shutting down", { cause: error });
       throw error;
     } finally {
       this.recoveryPromise = undefined;
@@ -3885,7 +3882,7 @@ function shutdownGracePeriod(value: number | undefined): number {
   return Math.max(0, value);
 }
 
-function waitForShutdownFinalization(finalization: Promise<void>, gracePeriodMs: number): Promise<boolean> {
+function waitForShutdownFinalization(finalization: Promise<unknown>, gracePeriodMs: number): Promise<boolean> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {

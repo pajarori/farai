@@ -135,6 +135,7 @@ export async function applyContentUpdate(manifest: ContentManifest, manifestUrl:
       generatedAt: manifest.generatedAt,
       activatedAt: new Date().toISOString(),
       manifestUrl,
+      ...(manifest.sourceCommit ? { sourceCommit: manifest.sourceCommit } : {}),
       ...(previous && previous.version !== manifest.contentVersion ? { previousVersion: previous.version } : {}),
       knowledge,
       skills
@@ -144,6 +145,7 @@ export async function applyContentUpdate(manifest: ContentManifest, manifestUrl:
     pruneVersions(pointer);
     return {
       version: pointer.version,
+      ...(pointer.sourceCommit ? { sourceCommit: pointer.sourceCommit } : {}),
       ...(pointer.previousVersion ? { previousVersion: pointer.previousVersion } : {}),
       knowledge,
       skills,
@@ -170,12 +172,13 @@ export function rollbackContentUpdate(): AppliedContentUpdate {
       generatedAt: manifest.generatedAt,
       activatedAt: new Date().toISOString(),
       manifestUrl: active.manifestUrl,
+      ...(manifest.sourceCommit ? { sourceCommit: manifest.sourceCommit } : {}),
       previousVersion: active.version,
       knowledge: Boolean(manifest.knowledge && existsSync(join(previousPath, "knowledge.db"))),
       skills: Boolean(manifest.skills && existsSync(join(previousPath, "skills")))
     };
     atomicWriteFile(contentActivePath(), `${JSON.stringify(next, null, 2)}\n`, 0o600);
-    return { version: next.version, previousVersion: next.previousVersion!, knowledge: next.knowledge, skills: next.skills, path: previousPath };
+    return { version: next.version, ...(next.sourceCommit ? { sourceCommit: next.sourceCommit } : {}), previousVersion: next.previousVersion!, knowledge: next.knowledge, skills: next.skills, path: previousPath };
   } finally {
     release();
   }
@@ -211,6 +214,8 @@ function contentUpdateDisabled(configured: boolean | undefined): boolean {
 
 function isNewerManifest(manifest: ContentManifest, active: ActiveContent | undefined): boolean {
   if (!active) return true;
+  if (manifest.sourceCommit && active.sourceCommit) return manifest.sourceCommit !== active.sourceCommit;
+  if (manifest.sourceCommit && !active.sourceCommit) return true;
   if (manifest.contentVersion === active.version) return false;
   const generated = Date.parse(manifest.generatedAt);
   const activeGenerated = Date.parse(active.generatedAt);

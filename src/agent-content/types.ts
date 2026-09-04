@@ -9,6 +9,7 @@ export type ContentManifest = {
   schemaVersion: 1;
   contentVersion: string;
   generatedAt: string;
+  sourceCommit?: string;
   minFaraiVersion?: string;
   releaseNotes?: string;
   knowledge?: ContentArtifact;
@@ -19,6 +20,7 @@ export type ActiveContent = {
   schemaVersion: 1;
   version: string;
   generatedAt: string;
+  sourceCommit?: string;
   activatedAt: string;
   manifestUrl: string;
   previousVersion?: string;
@@ -37,6 +39,7 @@ export type ContentUpdateStatus = {
 
 export type AppliedContentUpdate = {
   version: string;
+  sourceCommit?: string;
   previousVersion?: string;
   knowledge: boolean;
   skills: boolean;

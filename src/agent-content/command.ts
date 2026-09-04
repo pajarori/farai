@@ -16,6 +16,7 @@ export async function runContentUpdateCommand(parsed: UpdateArguments, workspace
       return 0;
     }
     console.log(`content: ${status.active.version}`);
+    if (status.active.sourceCommit) console.log(`source commit: ${status.active.sourceCommit}`);
     console.log(`activated: ${status.active.activatedAt}`);
     console.log(`knowledge: ${status.knowledgePath ?? "local fallback"}`);
     console.log(`skills: ${status.skillsPath ?? "bundled fallback"}`);
@@ -42,6 +43,7 @@ export async function runContentUpdateCommand(parsed: UpdateArguments, workspace
 function printContentUpdateStatus(status: ContentUpdateStatus): number {
   if (status.state === "update_available") {
     console.log(`content update available: ${status.active?.version ?? "none"} -> ${status.manifest?.contentVersion}`);
+    if (status.manifest?.sourceCommit) console.log(`source commit: ${status.manifest.sourceCommit}`);
     return 0;
   }
   if (status.state === "up_to_date") {

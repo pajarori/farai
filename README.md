@@ -55,7 +55,7 @@ Config and auth files live under:
 ~/.local/pajarori/farai/
 ```
 
-Farai checks the separate [farai-data](https://github.com/pajarori/farai-data) release channel before opening the TUI. When a validated release manifest publishes new knowledge or skills, Farai asks before downloading it. The current content can be inspected or managed without starting a session:
+Farai checks the separate [farai-data](https://github.com/pajarori/farai-data) content channel before opening the TUI. Each commit to that repository is built into an immutable, commit-pinned bundle; when a validated bundle publishes new knowledge or skills, Farai asks before downloading it. The current content can be inspected or managed without starting a session:
 
 ```bash
 farai update status

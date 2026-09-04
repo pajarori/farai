@@ -157,12 +157,15 @@ async function setup(args: string[]): Promise<void> {
   }
 
   if (!parsed.skipKnowledge) {
-    console.log("[*] building Farai knowledge base");
-    const code = await (await import("../agent-knowledge/command")).runKbCommand(["build", "all"]);
-    if (code !== 0) {
-      process.exitCode = code;
-      console.error("[!] knowledge base build failed");
-      return;
+    const contentInstalled = await syncContentForSetup(process.cwd());
+    if (!contentInstalled) {
+      console.log("[*] building Farai knowledge base");
+      const code = await (await import("../agent-knowledge/command")).runKbCommand(["build", "all"]);
+      if (code !== 0) {
+        process.exitCode = code;
+        console.error("[!] knowledge base build failed");
+        return;
+      }
     }
   } else {
     console.log("[*] skipping knowledge base build");
@@ -170,6 +173,24 @@ async function setup(args: string[]): Promise<void> {
 
   console.log("[+] setup complete");
   console.log("[+] run `farai doctor` to verify the environment");
+}
+
+async function syncContentForSetup(workspace: string): Promise<boolean> {
+  const { applyContentUpdate, checkContentUpdate, contentStatus } = await import("../agent-content/updater");
+  try {
+    const status = await checkContentUpdate({ workspace, force: true });
+    if (status.state === "update_available" && status.manifest) {
+      console.log(`[*] syncing Farai content ${status.manifest.contentVersion}`);
+      const applied = await applyContentUpdate(status.manifest, status.manifestUrl);
+      const parts = [applied.knowledge ? "knowledge" : undefined, applied.skills ? "skills" : undefined].filter(Boolean).join(" + ");
+      console.log(`[+] content: ${applied.version}${parts ? ` (${parts})` : ""}`);
+    } else if (status.state === "error") {
+      console.error(`[!] content sync unavailable: ${status.error ?? "unknown error"}`);
+    }
+  } catch (error) {
+    console.error(`[!] content sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return Boolean(contentStatus().active?.knowledge);
 }
 
 async function models(args: string[] = []): Promise<void> {

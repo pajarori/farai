@@ -7,6 +7,7 @@ import type { ActiveContent } from "./types";
 
 const POINTER_MAX_BYTES = 64 * 1024;
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SOURCE_COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 
 export function contentRoot(): string {
   const configured = process.env.FARAI_CONTENT_DIR?.trim();
@@ -84,6 +85,8 @@ function parseActiveContent(value: unknown): ActiveContent | undefined {
   if (record.schemaVersion !== 1) return undefined;
   if (typeof record.version !== "string" || !VERSION_PATTERN.test(record.version)) return undefined;
   if (!validDate(record.generatedAt) || !validDate(record.activatedAt)) return undefined;
+  if (record.sourceCommit !== undefined && (typeof record.sourceCommit !== "string" || !SOURCE_COMMIT_PATTERN.test(record.sourceCommit))) return undefined;
+  const sourceCommit = typeof record.sourceCommit === "string" ? record.sourceCommit : undefined;
   if (typeof record.manifestUrl !== "string" || !record.manifestUrl) return undefined;
   if (typeof record.knowledge !== "boolean" || typeof record.skills !== "boolean") return undefined;
   const previousVersion = typeof record.previousVersion === "string" && VERSION_PATTERN.test(record.previousVersion)
@@ -93,6 +96,7 @@ function parseActiveContent(value: unknown): ActiveContent | undefined {
     schemaVersion: 1,
     version: record.version,
     generatedAt: record.generatedAt,
+    ...(sourceCommit ? { sourceCommit } : {}),
     activatedAt: record.activatedAt,
     manifestUrl: record.manifestUrl,
     ...(previousVersion ? { previousVersion } : {}),

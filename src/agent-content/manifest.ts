@@ -5,9 +5,10 @@ import type { ContentArtifact, ContentManifest } from "./types";
 
 export const CONTENT_MANIFEST_SCHEMA_VERSION = 1;
 export const CONTENT_MANIFEST_MAX_BYTES = 256 * 1024;
-export const DEFAULT_CONTENT_MANIFEST_URL = "https://github.com/pajarori/farai-data/releases/latest/download/manifest.json";
+export const DEFAULT_CONTENT_MANIFEST_URL = "https://github.com/pajarori/farai-data/releases/download/latest/manifest.json";
 const CONTENT_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const SOURCE_COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 
 export async function fetchContentManifest(
   manifestUrl: string,
@@ -45,6 +46,7 @@ export function parseContentManifest(value: unknown, baseUrl: URL): ContentManif
   if (record.schemaVersion !== CONTENT_MANIFEST_SCHEMA_VERSION) throw new Error(`unsupported content manifest schema: ${String(record.schemaVersion)}`);
   if (typeof record.contentVersion !== "string" || !CONTENT_VERSION_PATTERN.test(record.contentVersion)) throw new Error("invalid content version");
   if (typeof record.generatedAt !== "string" || !Number.isFinite(Date.parse(record.generatedAt))) throw new Error("invalid content generatedAt");
+  const sourceCommit = optionalSourceCommit(record.sourceCommit);
   const minFaraiVersion = optionalString(record.minFaraiVersion, 128, "minFaraiVersion");
   if (minFaraiVersion && !isSemver(minFaraiVersion)) throw new Error("invalid content minFaraiVersion");
   const releaseNotes = optionalString(record.releaseNotes, 4_096, "releaseNotes");
@@ -54,11 +56,18 @@ export function parseContentManifest(value: unknown, baseUrl: URL): ContentManif
     schemaVersion: 1,
     contentVersion: record.contentVersion,
     generatedAt: new Date(record.generatedAt).toISOString(),
+    ...(sourceCommit ? { sourceCommit } : {}),
     ...(minFaraiVersion ? { minFaraiVersion } : {}),
     ...(releaseNotes ? { releaseNotes } : {}),
     ...(knowledge ? { knowledge } : {}),
     ...(skills ? { skills } : {})
   };
+}
+
+function optionalSourceCommit(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !SOURCE_COMMIT_PATTERN.test(value)) throw new Error("invalid content sourceCommit");
+  return value;
 }
 
 function artifact(value: unknown, baseUrl: URL, label: string): ContentArtifact | undefined {

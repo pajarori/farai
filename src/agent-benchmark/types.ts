@@ -138,6 +138,7 @@ export type BenchmarkResult = {
       agentContainer: string;
       agentImageId: string;
       agentImageContract: string;
+      targetImage: string;
       started: boolean;
       antiCheatApplied: boolean;
       cleaned: boolean;
