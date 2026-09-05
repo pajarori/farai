@@ -159,16 +159,10 @@ async function setup(args: string[]): Promise<void> {
   if (!parsed.skipKnowledge) {
     const contentInstalled = await syncContentForSetup(process.cwd());
     if (!contentInstalled) {
-      console.log("[*] building Farai knowledge base");
-      const code = await (await import("../agent-knowledge/command")).runKbCommand(["build", "all"]);
-      if (code !== 0) {
-        process.exitCode = code;
-        console.error("[!] knowledge base build failed");
-        return;
-      }
+      console.log("[!] knowledge base unavailable; retry once the content channel is reachable");
     }
   } else {
-    console.log("[*] skipping knowledge base build");
+    console.log("[*] skipping knowledge base sync");
   }
 
   console.log("[+] setup complete");
@@ -372,7 +366,7 @@ Options:
   --api-key-env <ENV>           Environment variable containing the API key
   --api-key-stdin               Read the API key from stdin
   --no-docker                   Skip Farai Kali image build
-  --no-kb, --no-knowledge       Skip local knowledge base build
+  --no-kb, --no-knowledge       Skip knowledge base content sync
 
 Examples:
   farai setup

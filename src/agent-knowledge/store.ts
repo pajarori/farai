@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
-import { KNOWLEDGE_SCHEMA_VERSION, migrateKnowledge, rebuildFtsIndexes } from "./schema";
+import { KNOWLEDGE_SCHEMA_VERSION } from "./schema";
 import type {
   KnowledgeEdge,
   KnowledgeEntity,
@@ -35,7 +35,7 @@ type RankedList = { rows: number[]; reason: string; weight: number };
 export class KnowledgeStore implements KnowledgeQuery {
   private db: Database | undefined;
 
-  constructor(private readonly path: string, private readonly create = false) {}
+  constructor(private readonly path: string) {}
 
   static openIfExists(path: string): KnowledgeStore | undefined {
     if (!existsSync(path)) return undefined;
@@ -52,16 +52,12 @@ export class KnowledgeStore implements KnowledgeQuery {
   private database(): Database {
     if (this.db) return this.db;
     ensurePrivateSqlitePath(this.path, "knowledge database");
-    const db = this.create ? new Database(this.path, { create: true, readwrite: true }) : new Database(this.path, { readonly: true });
+    const db = new Database(this.path, { readonly: true });
     try {
       ensurePrivateRegularFileIfExists(this.path, "knowledge database");
       db.exec("pragma busy_timeout = 5000;");
-      if (this.create) {
-        db.exec("pragma journal_mode = WAL;");
-        db.exec("pragma foreign_keys = ON;");
-        migrateKnowledge(db);
-      } else if (!compatibleDatabase(db)) {
-        throw new Error("knowledge database schema is stale; rebuild with `farai setup --no-docker`");
+      if (!compatibleDatabase(db)) {
+        throw new Error("knowledge database schema is stale; reinstall content with `farai content update`");
       }
       ensurePrivateSqlitePath(this.path, "knowledge database");
       this.db = db;
@@ -252,109 +248,6 @@ export class KnowledgeStore implements KnowledgeQuery {
     ];
     const issues = checks.map((check) => ({ kind: check.kind, count: count(db, check.sql) })).filter((item) => item.count > 0);
     return { ok: issues.length === 0, issues };
-  }
-
-  writable(): Database {
-    if (!this.create) throw new Error("knowledge store is read-only");
-    return this.database();
-  }
-
-  upsertPack(meta: KnowledgePackMeta, builtAt: string): void {
-    this.writable().query(
-      `insert into kb_packs (id, pin, license, attribution, signed, signer, source_url, category, kind, builder_version, retrieved_at, built_at)
-       values ($id, $pin, $license, $attribution, $signed, $signer, $source_url, $category, $kind, $builder_version, $retrieved_at, $built_at)
-       on conflict(id) do update set pin=excluded.pin, license=excluded.license, attribution=excluded.attribution,
-         signed=excluded.signed, signer=excluded.signer, source_url=excluded.source_url, category=excluded.category,
-         kind=excluded.kind, builder_version=excluded.builder_version, retrieved_at=excluded.retrieved_at, built_at=excluded.built_at`
-    ).run({
-      $id: meta.id,
-      $pin: meta.pin,
-      $license: meta.license,
-      $attribution: meta.attribution,
-      $signed: meta.signed ? 1 : 0,
-      $signer: meta.signer ?? null,
-      $source_url: meta.sourceUrl,
-      $category: meta.category,
-      $kind: meta.kind,
-      $builder_version: meta.builderVersion,
-      $retrieved_at: meta.retrievedAt,
-      $built_at: builtAt
-    });
-  }
-
-  deletePackRows(packId: string): void {
-    const db = this.writable();
-    db.query("delete from kb_dupe_groups where record_id in (select id from kb_records where pack = $pack)").run({ $pack: packId });
-    db.query("delete from kb_entities where record_id in (select id from kb_records where pack = $pack)").run({ $pack: packId });
-    db.query("delete from kb_records where pack = $pack").run({ $pack: packId });
-  }
-
-  insertRecord(pack: string, record: { id: string; query: string; answer: string; context?: string; category?: string; source?: string; docPath?: string; headingPath?: string[]; charStart?: number; charEnd?: number; sourceHash?: string }): void {
-    this.writable().query(
-      `insert into kb_records (id, pack, query, answer, context, category, source, doc_path, heading_path_json, char_start, char_end, source_hash)
-       values ($id, $pack, $query, $answer, $context, $category, $source, $doc_path, $heading_path_json, $char_start, $char_end, $source_hash)
-       on conflict(id) do update set pack=excluded.pack, query=excluded.query, answer=excluded.answer, context=excluded.context,
-         category=excluded.category, source=excluded.source, doc_path=excluded.doc_path, heading_path_json=excluded.heading_path_json,
-         char_start=excluded.char_start, char_end=excluded.char_end, source_hash=excluded.source_hash`
-    ).run({
-      $id: record.id,
-      $pack: pack,
-      $query: record.query,
-      $answer: record.answer,
-      $context: record.context ?? null,
-      $category: record.category ?? null,
-      $source: record.source ?? null,
-      $doc_path: record.docPath ?? null,
-      $heading_path_json: record.headingPath ? JSON.stringify(record.headingPath) : null,
-      $char_start: record.charStart ?? null,
-      $char_end: record.charEnd ?? null,
-      $source_hash: record.sourceHash ?? null
-    });
-  }
-
-  insertEntities(entities: KnowledgeEntity[]): void {
-    const insert = this.writable().query("insert into kb_entities (record_id, type, value) values ($record_id, $type, $value) on conflict do nothing");
-    for (const entity of entities) insert.run({ $record_id: entity.recordId, $type: entity.type, $value: entity.value });
-  }
-
-  upsertNode(node: KnowledgeNode): void {
-    this.writable().query(
-      `insert into kb_nodes (id, kind, name, summary, pin) values ($id, $kind, $name, $summary, $pin)
-       on conflict(id) do update set kind=excluded.kind, name=excluded.name, summary=excluded.summary, pin=excluded.pin`
-    ).run({ $id: node.id, $kind: node.kind, $name: node.name, $summary: node.summary, $pin: node.pin });
-  }
-
-  insertEdge(edge: KnowledgeEdge): void {
-    this.writable().query("insert into kb_edges (src, rel, dst, authoritative) values ($src, $rel, $dst, $authoritative) on conflict do nothing")
-      .run({ $src: edge.src, $rel: edge.rel, $dst: edge.dst, $authoritative: edge.authoritative ? 1 : 0 });
-  }
-
-  upsertEnrichment(row: { cve: string; kevListed: boolean; kevDate?: string; ransomware?: string; epss?: number; epssPct?: number; asOf?: string }): void {
-    this.writable().query(
-      `insert into kb_enrichment (cve, kev_listed, kev_date, ransomware, epss, epss_pct, as_of)
-       values ($cve, $kev_listed, $kev_date, $ransomware, $epss, $epss_pct, $as_of)
-       on conflict(cve) do update set kev_listed=excluded.kev_listed, kev_date=excluded.kev_date,
-         ransomware=excluded.ransomware, epss=excluded.epss, epss_pct=excluded.epss_pct, as_of=excluded.as_of`
-    ).run({
-      $cve: row.cve.toUpperCase(),
-      $kev_listed: row.kevListed ? 1 : 0,
-      $kev_date: row.kevDate ?? null,
-      $ransomware: row.ransomware ?? null,
-      $epss: row.epss ?? null,
-      $epss_pct: row.epssPct ?? null,
-      $as_of: row.asOf ?? null
-    });
-  }
-
-  finalizeIndexes(): void {
-    const db = this.writable();
-    rebuildFtsIndexes(db);
-    db.exec("pragma optimize;");
-    const checkpoint = db.query("pragma wal_checkpoint(TRUNCATE)").get() as Record<string, unknown> | null;
-    if (Number(Object.values(checkpoint ?? {})[0] ?? 1) !== 0) throw new Error("knowledge database checkpoint remained busy");
-    const journal = db.query("pragma journal_mode = DELETE").get() as Record<string, unknown> | null;
-    if (String(Object.values(journal ?? {})[0] ?? "").toLowerCase() !== "delete") throw new Error("knowledge database could not leave WAL mode");
-    ensurePrivateSqlitePath(this.path, "knowledge database");
   }
 
   private entityRows(identifiers: string[], options: KnowledgeSearchOptions, limit: number): number[] {
