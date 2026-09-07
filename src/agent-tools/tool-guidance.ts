@@ -438,14 +438,21 @@ const EXACT_GUIDANCE: Record<string, string> = {
 
 export function modelToolDescription(tool: Pick<ToolDefinition, "name" | "description">, _detailed = false): string {
   const exact = EXACT_GUIDANCE[tool.name];
-  if (!exact) return tool.description;
+  const highValue = new Set(["report_add_finding", "cvss_calculate", "internet_search", "agent_spawn"]);
+  if (!exact || (!_detailed && !highValue.has(tool.name))) return tool.description;
   return `${tool.description}\n\nmodel contract: ${exact}`;
 }
 
 export function toolGuidanceMatchesQuery(toolName: string, query: string): boolean {
   const normalized = query.toLowerCase();
   const terms = toolName.split("_").filter((term) => term.length >= 3);
+  const fileIntent = /\b(file|path|write|edit|patch|markdown|\.md|report)\b/.test(normalized);
+  const fileTools = ["fs_read", "fs_list", "fs_grep", "fs_write", "fs_edit", "patch_apply", "code_write_script", "report_add_finding", "report_update_finding"];
+  const lifecycleIntent = /\b(agent|subagent|child|background|job|process|queue|session)\b/.test(normalized);
+  const lifecycleTools = ["agent_spawn", "agent_list", "agent_wait", "agent_message", "agent_followup", "agent_interrupt", "agent_close", "session_poll", "session_stop"];
   return terms.some((term) => normalized.includes(term))
+    || (fileIntent && fileTools.includes(toolName))
+    || (lifecycleIntent && lifecycleTools.includes(toolName))
     || (normalized.includes("finding") && ["report_add_finding", "report_update_finding", "campaign_verify", "campaign_test", "cvss_calculate"].includes(toolName))
     || (normalized.includes("email") && toolName.startsWith("email_"))
     || (normalized.includes("browser") && toolName.startsWith("browser_"))
@@ -454,7 +461,7 @@ export function toolGuidanceMatchesQuery(toolName: string, query: string): boole
 }
 
 export function modelToolSchema(schema: Record<string, unknown>, detailed = false, toolName?: string): Record<string, unknown> {
-  if (!detailed && !toolName) return schema;
+  if (!detailed) return schema;
   return enrichSchemaNode(schema, [], toolName) as Record<string, unknown>;
 }
 

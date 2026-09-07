@@ -1,6 +1,6 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
-import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
+import { defaultModelRenderer } from "../shared/renderers";
 import { loadSkill } from "../../agent-skills/registry";
 
 export const skillLoadTool: ToolDefinition = {
@@ -17,7 +17,7 @@ export const skillLoadTool: ToolDefinition = {
   mutates: false,
   timeoutMs: 5_000,
   parallel: true,
-  renderHuman: defaultHumanRenderer,
+  renderHuman: (result) => result.summary,
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
