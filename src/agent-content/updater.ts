@@ -87,7 +87,9 @@ export async function checkContentUpdate(options: ContentUpdateOptions = {}): Pr
   return { state: "update_available", manifestUrl, fromCache, manifest, ...(active ? { active } : {}) };
 }
 
-export async function applyContentUpdate(manifest: ContentManifest, manifestUrl: string, options: { fetcher?: typeof fetch; timeoutMs?: number } = {}): Promise<AppliedContentUpdate> {
+export type ContentDownloadProgress = (received: number, total: number, label: string) => void;
+
+export async function applyContentUpdate(manifest: ContentManifest, manifestUrl: string, options: { fetcher?: typeof fetch; timeoutMs?: number; onProgress?: ContentDownloadProgress } = {}): Promise<AppliedContentUpdate> {
   if (!manifest.knowledge && !manifest.skills) throw new Error("content manifest has no artifacts");
   ensureContentDirectories();
   const release = acquireLock();
@@ -100,14 +102,14 @@ export async function applyContentUpdate(manifest: ContentManifest, manifestUrl:
     let skills = false;
     if (manifest.knowledge) {
       const path = join(stage, "knowledge.db");
-      await downloadArtifact(manifest.knowledge, path, options);
+      await downloadArtifact(manifest.knowledge, path, options, "knowledge");
       validateKnowledge(path, manifest.knowledge.schemaVersion);
       knowledge = true;
     }
     if (manifest.skills) {
       if (manifest.skills.size > CONTENT_SKILLS_MAX_BYTES) throw new Error("skills artifact is too large");
       const archive = join(stage, "skills.tar.gz");
-      await downloadArtifact(manifest.skills, archive, options);
+      await downloadArtifact(manifest.skills, archive, options, "skills");
       await extractSkills(archive, join(stage, "skills"));
       rmSync(archive, { force: true });
       skills = true;
@@ -284,7 +286,7 @@ function cleanupStagingDirectories(): void {
   }
 }
 
-async function downloadArtifact(artifact: ContentArtifact, destination: string, options: { fetcher?: typeof fetch; timeoutMs?: number }): Promise<void> {
+async function downloadArtifact(artifact: ContentArtifact, destination: string, options: { fetcher?: typeof fetch; timeoutMs?: number; onProgress?: ContentDownloadProgress }, label: string): Promise<void> {
   if (artifact.size > CONTENT_ARTIFACT_MAX_BYTES) throw new Error("content artifact is too large");
   const url = new URL(artifact.url);
   mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
@@ -300,8 +302,14 @@ async function downloadArtifact(artifact: ContentArtifact, destination: string, 
   } else {
     if (url.protocol !== "https:") throw new Error("content artifact must use https or file");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(1, options.timeoutMs ?? CONTENT_UPDATE_TIMEOUT_MS));
-    timer.unref?.();
+    const idleTimeoutMs = Math.max(1, options.timeoutMs ?? CONTENT_UPDATE_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const armIdleTimeout = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(), idleTimeoutMs);
+      timer.unref?.();
+    };
+    armIdleTimeout();
     let descriptor: number | undefined;
     try {
       const response = await (options.fetcher ?? fetch)(url, { signal: controller.signal });
@@ -319,9 +327,11 @@ async function downloadArtifact(artifact: ContentArtifact, destination: string, 
         for (;;) {
           const next = await reader.read();
           if (next.done) { completed = true; break; }
+          armIdleTimeout();
           bytes += next.value.byteLength;
           if (bytes > artifact.size) throw new Error("content artifact exceeded declared size");
           writeSync(descriptor, next.value);
+          options.onProgress?.(bytes, artifact.size, label);
         }
       } finally {
         if (!completed) void reader.cancel().catch(() => undefined);
@@ -330,7 +340,7 @@ async function downloadArtifact(artifact: ContentArtifact, destination: string, 
       closeSync(descriptor);
       descriptor = undefined;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (descriptor !== undefined) try { closeSync(descriptor); } catch {}
     }
   }

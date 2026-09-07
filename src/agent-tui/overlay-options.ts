@@ -73,7 +73,7 @@ export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreVal
       return tui.store.snapshot.findings.map((item) => ({
         id: item.id,
         title: item.title,
-        description: `${item.severity} · ${item.target}`,
+        description: `${item.severity}${item.cvssScore === undefined ? "" : ` · cvss ${item.cvssScore.toFixed(1)}`} · ${item.target}`,
         category: item.severity,
         footer: `${item.evidenceIds.length} evidence`,
         value: item.id

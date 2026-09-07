@@ -18,6 +18,7 @@ import type { McpServerInfo } from "../agent-core/mcp-server-management";
 import { createMcpServerWizard, type McpServerWizardState } from "./mcp-server-state";
 import type { EmailAccountInfo } from "../agent-email/types";
 import { createEmailAccountWizard, type EmailAccountWizardState } from "./email-account-state";
+import { sameFinding } from "./findings/model";
 
 export type OverlayFrame =
   | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory"; query: string; index: number }
@@ -36,7 +37,8 @@ export type CenterSurfaceFrame =
 
 export type UiFrame = OverlayFrame | CenterSurfaceFrame;
 
-export type MainTab = "chat" | "proxy";
+export type MainTab = "chat" | "proxy" | "findings";
+export type FindingsFocus = "list" | "detail";
 export type ProxyViewFilter = "all" | "http" | "websocket";
 export type CenterSurfaceBusy = "report_save" | "container_toggle" | "container_refresh";
 
@@ -131,6 +133,14 @@ export type FaraiTuiStore = {
     proxyDetailPane: 0 | 1;
     proxyWebSocketSection: 0 | 1;
     proxyWebSocketMessageIndex: number;
+    findingsSelectedId: string | undefined;
+    findingsCatalog: Finding[];
+    findingsScopeLabel: string;
+    findingsLoading: boolean;
+    findingsQuery: string;
+    findingsFiltering: boolean;
+    findingsFocus: FindingsFocus;
+    findingsDetailScroll: { action: "up" | "down" | "pageUp" | "pageDown" | "home" | "end"; sequence: number };
     expandedCells: Record<string, boolean>;
     containerStatus: "running" | "stopped" | "missing" | "unknown";
     services: ServiceStatus[];
@@ -211,6 +221,15 @@ export type StoreActions = {
   proxyWebSocketSectionSet: (section: 0 | 1) => void;
   proxyWebSocketMessageSet: (index: number) => void;
   proxyWebSocketMessageMove: (delta: number) => void;
+  findingsSelectedSet: (id: string | undefined) => void;
+  findingsCatalogSet: (findings: Finding[], scopeLabel: string) => void;
+  findingsLoadingSet: (loading: boolean) => void;
+  findingsSelectionMove: (ids: string[], delta: number) => void;
+  findingsFocusSet: (focus: FindingsFocus) => void;
+  findingsQueryAppend: (char: string) => void;
+  findingsQueryBackspace: () => void;
+  findingsFilteringSet: (filtering: boolean) => void;
+  findingsDetailScrollRequested: (action: FaraiTuiStore["ui"]["findingsDetailScroll"]["action"]) => void;
   cellExpandedToggle: (id: string) => void;
   agentDetailToggle: (id: string) => void;
   promptHistoryAdd: (text: string, source?: PromptHistoryEntry["source"]) => void;
@@ -344,6 +363,14 @@ export function initialStore(workspace: string): FaraiTuiStore {
       proxyDetailPane: 0,
       proxyWebSocketSection: 0,
       proxyWebSocketMessageIndex: 0,
+      findingsSelectedId: undefined,
+      findingsCatalog: [],
+      findingsScopeLabel: "current session",
+      findingsLoading: false,
+      findingsQuery: "",
+      findingsFiltering: false,
+      findingsFocus: "list",
+      findingsDetailScroll: { action: "down", sequence: 0 },
       expandedCells: {},
       containerStatus: "unknown",
       services: [],
@@ -419,6 +446,14 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
         s.ui.proxyDetailPane = 0;
         s.ui.proxyWebSocketSection = 0;
         s.ui.proxyWebSocketMessageIndex = 0;
+        s.ui.findingsSelectedId = undefined;
+        s.ui.findingsCatalog = [];
+        s.ui.findingsScopeLabel = "current session";
+        s.ui.findingsLoading = false;
+        s.ui.findingsQuery = "";
+        s.ui.findingsFiltering = false;
+        s.ui.findingsFocus = "list";
+        s.ui.findingsDetailScroll = { action: "down", sequence: 0 };
         s.ui.expandedCells = {};
         s.ui.containerStatus = "unknown";
         s.ui.services = [];
@@ -715,6 +750,73 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
       setStore(produce((s) => {
         s.ui.lastError = undefined;
         s.ui.proxyWebSocketMessageIndex = Math.min(proxyWebSocketMessageLimit(s.ui), Math.max(0, s.ui.proxyWebSocketMessageIndex + delta));
+      }));
+    },
+    findingsSelectedSet(id: string | undefined): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.findingsSelectedId = id;
+        if (!id) s.ui.findingsFocus = "list";
+        s.ui.findingsDetailScroll = { action: "home", sequence: s.ui.findingsDetailScroll.sequence + 1 };
+      }));
+    },
+    findingsCatalogSet(findings: Finding[], scopeLabel: string): void {
+      setStore(produce((s) => {
+        const selectedId = s.ui.findingsSelectedId;
+        const unchanged = s.ui.findingsCatalog.length === findings.length
+          && s.ui.findingsCatalog.every((finding, index) => sameFinding(finding, findings[index]!));
+        if (!unchanged) s.ui.findingsCatalog = findings;
+        s.ui.findingsScopeLabel = scopeLabel;
+        s.ui.findingsLoading = false;
+        if (selectedId && !findings.some((finding) => finding.id === selectedId)) {
+          s.ui.findingsSelectedId = undefined;
+        }
+      }));
+    },
+    findingsLoadingSet(loading: boolean): void {
+      setStore("ui", "findingsLoading", loading);
+    },
+    findingsSelectionMove(ids: string[], delta: number): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        if (ids.length === 0) {
+          s.ui.findingsSelectedId = undefined;
+          s.ui.findingsFocus = "list";
+          return;
+        }
+        const current = s.ui.findingsSelectedId ? ids.indexOf(s.ui.findingsSelectedId) : -1;
+        const next = current < 0 ? (delta >= 0 ? 0 : ids.length - 1) : Math.max(0, Math.min(ids.length - 1, current + delta));
+        s.ui.findingsSelectedId = ids[next];
+        s.ui.findingsDetailScroll = { action: "home", sequence: s.ui.findingsDetailScroll.sequence + 1 };
+      }));
+    },
+    findingsFocusSet(focus: FindingsFocus): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.findingsFocus = focus;
+      }));
+    },
+    findingsQueryAppend(char: string): void {
+      setStore(produce((s) => {
+        s.ui.findingsQuery += char;
+        s.ui.findingsSelectedId = undefined;
+      }));
+    },
+    findingsQueryBackspace(): void {
+      setStore(produce((s) => {
+        s.ui.findingsQuery = s.ui.findingsQuery.slice(0, -1);
+        s.ui.findingsSelectedId = undefined;
+      }));
+    },
+    findingsFilteringSet(filtering: boolean): void {
+      setStore(produce((s) => {
+        s.ui.findingsFiltering = filtering;
+        if (!filtering) s.ui.findingsFocus = "list";
+      }));
+    },
+    findingsDetailScrollRequested(action: FaraiTuiStore["ui"]["findingsDetailScroll"]["action"]): void {
+      setStore(produce((s) => {
+        s.ui.findingsDetailScroll = { action, sequence: s.ui.findingsDetailScroll.sequence + 1 };
       }));
     },
     cellExpandedToggle(id: string): void {

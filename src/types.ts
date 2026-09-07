@@ -14,6 +14,11 @@ export type InternalPhase =
 
 export type CampaignKind = "pentest" | "bug_bounty" | "ctf" | "lab";
 export type CampaignStatus = "active" | "paused" | "completed" | "archived";
+export type CampaignRunStatus = "draft" | "ready" | "running" | "waiting" | "paused" | "blocked" | "rate_limited" | "budget_limited" | "time_limited" | "completed" | "cancelled" | "failed";
+export type CampaignWaveStatus = "planned" | "leased" | "running" | "settling" | "completed" | "failed" | "cancelled" | "expired";
+export type CampaignClaimStatus = "available" | "leased" | "completed" | "failed" | "released";
+export type CampaignProgressKind = "progress" | "verified_wait" | "no_progress";
+export type CampaignRequirementStatus = "pending" | "satisfied" | "waived";
 export type AssetKind = "domain" | "subdomain" | "ip" | "url" | "endpoint" | "api" | "repository" | "mobile_app" | "service" | "other";
 export type ObservationStatus = "active" | "stale" | "disproven" | "archived";
 export type HypothesisStatus = "open" | "testing" | "verified" | "disproven" | "blocked" | "archived";
@@ -93,6 +98,83 @@ export type Campaign = {
   updatedAt: string;
 };
 
+export type CampaignRun = {
+  id: string;
+  campaignId: string;
+  rootSessionId: string;
+  workspace: string;
+  objective: string;
+  status: CampaignRunStatus;
+  currentWaveId?: string;
+  blocker?: string;
+  lastError?: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  pausedAt?: string;
+  completedAt?: string;
+};
+
+export type CampaignRequirement = {
+  id: string;
+  runId: string;
+  key: string;
+  description: string;
+  status: CampaignRequirementStatus;
+  evidenceIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CampaignWave = {
+  id: string;
+  runId: string;
+  sequence: number;
+  status: CampaignWaveStatus;
+  objective: string;
+  progressSummary?: string;
+  blocker?: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+
+export type CampaignClaim = {
+  id: string;
+  runId: string;
+  waveId: string;
+  claimKey: string;
+  title: string;
+  sessionId?: string;
+  status: CampaignClaimStatus;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CampaignProgress = {
+  id: string;
+  runId: string;
+  waveId?: string;
+  kind: CampaignProgressKind;
+  fingerprint: string;
+  summary: string;
+  evidenceCount: number;
+  findingCount: number;
+  createdAt: string;
+};
+
+export type CampaignLease = {
+  runId: string;
+  owner: string;
+  heartbeatAt: string;
+  leaseExpiresAt: string;
+  createdAt: string;
+};
+
 export type CampaignAsset = {
   id: string;
   campaignId: string;
@@ -158,6 +240,7 @@ export type CampaignDossier = {
 export type TestAttempt = {
   id: string;
   campaignId: string;
+  runId?: string;
   sessionId: string;
   hypothesisId?: string;
   title: string;
@@ -175,7 +258,7 @@ export type TestAttempt = {
 };
 
 export type CampaignNextAction = {
-  lane: "discovery" | "mapping" | "web_api" | "authz" | "injection" | "business_logic" | "client_side" | "cloud_config" | "verification" | "reporting";
+  lane: string;
   title: string;
   rationale: string;
   priority: number;
@@ -192,6 +275,7 @@ export type Session = {
   title?: string;
   parentId?: string;
   campaignId?: string;
+  campaignRunId?: string;
   provider?: string;
   model?: string;
   emailPrimaryId?: string;
@@ -340,6 +424,8 @@ export type Finding = {
   sessionId: string;
   title: string;
   severity: "info" | "low" | "medium" | "high" | "critical";
+  cvssVector?: string;
+  cvssScore?: number;
   target: string;
   evidenceIds: string[];
   impact: string;
@@ -398,6 +484,8 @@ export type BackgroundJob = {
   turnId?: string;
   toolCallId?: string;
   childSessionId?: string;
+  campaignRunId?: string;
+  campaignClaimId?: string;
   title?: string;
   lane?: string;
   agentMode?: "attached" | "detached";
@@ -565,10 +653,16 @@ export type ToolContext = {
   onOutputChunk?: (chunk: string, stream: "stdout" | "stderr") => void;
   cancelJob?: (jobId: string) => Promise<BackgroundJob>;
   availableTools?: () => ToolDefinition[];
-  delegateSession?: (input: { title: string; prompt: string; lane?: string; tools?: string[]; model?: string; mode?: "attached" | "detached"; sessionId?: string; linkToolCall?: boolean }) => Promise<{ sessionId: string; response?: string; jobId?: string }>;
+  delegateSession?: (input: { title: string; prompt: string; lane?: string; tools?: string[]; model?: string; mode?: "attached" | "detached"; sessionId?: string; linkToolCall?: boolean; campaignRunId?: string; campaignClaimId?: string; campaignClaimOwner?: string }) => Promise<{ sessionId: string; response?: string; jobId?: string }>;
   agentControl?: AgentControl;
   worktreeControl?: WorktreeControl;
   requestUserInput?: (input: UserInputRequest, signal?: AbortSignal) => Promise<UserInputAnswer>;
+  campaignControl?: {
+    owner: string;
+    start: (campaignId: string, objective: string) => CampaignRun;
+    active: () => CampaignRun | undefined;
+    checkpoint: (input: { status: "continue" | "waiting" | "blocked" | "complete"; summary: string; blocker?: string; evidenceIds?: string[] }) => CampaignRun;
+  };
   store: {
     saveEvidence: (evidence: Evidence, content?: string) => Evidence;
     listEvidence?: (sessionId: string) => Evidence[];
@@ -588,6 +682,7 @@ export type ToolContext = {
     updateTodo: (todoId: string, patch: Partial<Pick<TodoItem, "text" | "status" | "priority">>) => TodoItem;
     listTodos: (sessionId: string, options?: { turnId?: string; status?: TodoStatus; limit?: number }) => TodoItem[];
     createCampaign?: (input: Omit<Campaign, "id" | "createdAt" | "updatedAt">) => Campaign;
+    updateCampaign?: (campaignId: string, patch: Partial<Pick<Campaign, "name" | "status">>) => Campaign;
     loadCampaign?: (campaignId: string) => Campaign;
     listCampaigns?: (workspace: string, limit?: number) => Campaign[];
     upsertAsset?: (asset: Omit<CampaignAsset, "id" | "firstSeen" | "lastSeen">) => CampaignAsset;
@@ -602,6 +697,14 @@ export type ToolContext = {
     loadTestAttempt?: (attemptId: string) => TestAttempt;
     listTestAttempts?: (campaignId: string, hypothesisId?: string) => TestAttempt[];
     updateTestAttempt?: (attemptId: string, patch: Partial<Pick<TestAttempt, "status" | "observed" | "evidenceLevel" | "evidenceIds">>) => TestAttempt;
+    listCampaignRuns?: (workspace?: string, limit?: number) => CampaignRun[];
+    listCampaignWaves?: (runId: string) => CampaignWave[];
+    listCampaignRequirements?: (runId: string) => CampaignRequirement[];
+    upsertCampaignRequirement?: (requirement: Omit<CampaignRequirement, "id" | "createdAt" | "updatedAt">) => CampaignRequirement;
+    createCampaignClaim?: (claim: Omit<CampaignClaim, "id" | "createdAt" | "updatedAt">) => CampaignClaim;
+    leaseCampaignClaim?: (claimId: string, owner: string, ttlMs: number) => CampaignClaim | undefined;
+    updateCampaignClaim?: (claimId: string, patch: Partial<Pick<CampaignClaim, "status" | "sessionId">> & { leaseOwner?: string | null; leaseExpiresAt?: string | null }) => CampaignClaim;
+    settleCampaignClaim?: (claimId: string, owner: string, status: Extract<CampaignClaim["status"], "completed" | "failed" | "released">, sessionId?: string) => CampaignClaim | undefined;
   };
 };
 

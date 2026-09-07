@@ -3,6 +3,7 @@ import type { BrowserContextActivity } from "../../agent-tools/browser/context-m
 import type { DisposableInboxActivity } from "../../agent-email/types";
 import type { ContextUsage } from "../store";
 import type { UpdateNotice } from "../update-check";
+import type { MainTab } from "../store";
 import { terminalWidth, truncateTerminal } from "../terminal-text";
 
 export type FooterMode =
@@ -32,21 +33,22 @@ export type FooterItem = {
   count?: number;
 };
 
-export type BottomPaneSlot = "list_overlay" | "center_surface" | "proxy_tab" | "composer";
+export type BottomPaneSlot = "list_overlay" | "center_surface" | "proxy_tab" | "findings_tab" | "composer";
 export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "mcp_server_removal" | "mcp_server_wizard" | "email_account_removal" | "email_account_wizard" | "request_user_input";
 
-export function activityStatusVisible(activeMainTab: "chat" | "proxy"): boolean {
+export function activityStatusVisible(activeMainTab: MainTab): boolean {
   return activeMainTab === "chat";
 }
 
 export function bottomPaneSlot(input: {
   hasListFrame: boolean;
   hasCenterFrame: boolean;
-  activeMainTab: "chat" | "proxy";
+  activeMainTab: MainTab;
 }): BottomPaneSlot {
   if (input.hasListFrame) return "list_overlay";
   if (input.hasCenterFrame) return "center_surface";
   if (input.activeMainTab === "proxy") return "proxy_tab";
+  if (input.activeMainTab === "findings") return "findings_tab";
   return "composer";
 }
 
@@ -60,7 +62,7 @@ export function bottomPaneSurface(input: {
   hasRequestUserInput: boolean;
   hasListFrame: boolean;
   hasCenterFrame: boolean;
-  activeMainTab: "chat" | "proxy";
+  activeMainTab: MainTab;
 }): BottomPaneSurface {
   if (input.hasModelProviderRemoval) return "model_provider_removal";
   if (input.hasModelProviderWizard) return "model_provider_wizard";

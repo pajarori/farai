@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { loadConfig } from "../agent-core/config";
-import { applyContentUpdate, checkContentUpdate, dismissContentVersion, isContentVersionDismissed } from "./updater";
+import { applyContentUpdate, checkContentUpdate, dismissContentVersion, isContentVersionDismissed, type ContentDownloadProgress } from "./updater";
 
 export type StartupPreflightResult = "continue" | "cancelled";
 
@@ -19,7 +19,7 @@ export async function runStartupContentPreflight(workspace: string): Promise<Sta
   if (answer === "later") return "continue";
   console.log("updating farai content...");
   try {
-    const applied = await applyContentUpdate(status.manifest, status.manifestUrl);
+    const applied = await applyContentUpdate(status.manifest, status.manifestUrl, { onProgress: renderDownloadProgress() });
     const parts = [applied.knowledge ? "knowledge" : undefined, applied.skills ? "skills" : undefined].filter(Boolean).join(" + ");
     console.log(`updated farai content to ${applied.version}${parts ? ` (${parts})` : ""}`);
   } catch (error) {
@@ -50,6 +50,24 @@ async function promptForUpdate(version: string, knowledge: boolean, skills: bool
       else finish("apply");
     });
   });
+}
+
+function renderDownloadProgress(): ContentDownloadProgress {
+  let lastPercent = -1;
+  let lastLabel = "";
+  return (received, total, label) => {
+    if (!process.stdout.isTTY || total <= 0) return;
+    if (label !== lastLabel) { lastLabel = label; lastPercent = -1; }
+    const percent = Math.min(100, Math.floor((received / total) * 100));
+    if (percent === lastPercent && received < total) return;
+    lastPercent = percent;
+    process.stdout.write(`\r  downloading ${label} ${String(percent).padStart(3)}%  ${megabytes(received)}/${megabytes(total)} MB   `);
+    if (received >= total) process.stdout.write("\n");
+  };
+}
+
+function megabytes(bytes: number): string {
+  return (bytes / 1_048_576).toFixed(1);
 }
 
 function errorMessage(error: unknown): string {

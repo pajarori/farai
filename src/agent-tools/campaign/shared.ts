@@ -19,6 +19,27 @@ export function requireCampaignStore<T extends keyof ToolContext["store"]>(conte
   return fn.bind(context.store) as NonNullable<ToolContext["store"][T]>;
 }
 
+export function assertCampaignEvidence(context: ToolContext, campaignId: string, evidenceIds: string[]): void {
+  if (evidenceIds.length === 0) return;
+  if (!context.store.loadEvidence || !context.store.loadSession) {
+    const known = new Set(context.store.listEvidence?.(context.session.id).map((item) => item.id) ?? []);
+    const unknown = evidenceIds.filter((item) => !known.has(item));
+    if (unknown.length > 0) throw new Error(`evidence not found in campaign: ${unknown.join(", ")}`);
+    return;
+  }
+  for (const evidenceId of evidenceIds) {
+    const evidence = context.store.loadEvidence(evidenceId);
+    const session = context.store.loadSession(evidence.sessionId);
+    if (session.campaignId !== campaignId) throw new Error(`evidence belongs to another campaign: ${evidenceId}`);
+  }
+}
+
+export function assertCampaignAsset(context: ToolContext, campaignId: string, assetId: string | undefined): void {
+  if (!assetId) return;
+  const asset = requireCampaignStore(context, "listAssets")(campaignId).find((item) => item.id === assetId);
+  if (!asset) throw new Error(`asset does not belong to campaign: ${assetId}`);
+}
+
 export function compactDossier(dossier: CampaignDossier): string {
   return JSON.stringify({
     campaign: { id: dossier.campaign.id, name: dossier.campaign.name, kind: dossier.campaign.kind, status: dossier.campaign.status },

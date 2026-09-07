@@ -8,6 +8,7 @@ import { defineMcpPromptCommands } from "../mcp-prompt-commands";
 import { KeyboardController } from "../input/keyboard-controller";
 import { Transcript } from "../transcript/transcript";
 import { ProxyLogView } from "../proxy/proxy-log-view";
+import { FindingsView } from "../findings/findings-view";
 import { BottomPane } from "../bottom-pane/bottom-pane";
 import { CenterSurfaceView } from "../surfaces/center-surface";
 import { COLOR } from "../theme";
@@ -23,6 +24,7 @@ export function AppShell(): JSX.Element {
   const centerFrame = () => tui.store.ui.centerSurfaceStack.at(-1);
   const chatActive = () => !centerFrame() && tui.store.ui.activeMainTab === "chat";
   const proxyActive = () => !centerFrame() && tui.store.ui.activeMainTab === "proxy";
+  const findingsActive = () => !centerFrame() && tui.store.ui.activeMainTab === "findings";
 
   const disposeCommands = registerCommands(defineDefaultCommands({
     palette: () => tui.actions.overlayOpen("palette"),
@@ -35,7 +37,10 @@ export function AppShell(): JSX.Element {
       });
     },
     evidence: () => tui.actions.overlayOpen("evidence"),
-    findings: () => tui.actions.overlayOpen("findings"),
+    findings: () => {
+      tui.actions.mainTabSet("findings");
+      void tui.refreshFindings();
+    },
     memory: () => tui.actions.overlayOpen("memory"),
     agents: () => { void tui.openAgentsOverlay(); },
     model: () => { void tui.openModelsOverlay(); },
@@ -90,6 +95,15 @@ export function AppShell(): JSX.Element {
             <Transcript active={chatActive()} />
           </SurfaceLayer>
           <SurfaceLayer
+            id="findings-surface-layer"
+            renderChildren={findingsActive()}
+            zIndex={findingsActive() ? 1 : 0}
+            backgroundColor={COLOR.bg}
+            style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", minHeight: 0, overflow: "hidden", flexDirection: "column" }}
+          >
+            <FindingsView active={findingsActive()} />
+          </SurfaceLayer>
+          <SurfaceLayer
             id="proxy-surface"
             renderChildren={proxyActive()}
             zIndex={proxyActive() ? 1 : 0}
@@ -135,7 +149,8 @@ function MainTabs(): JSX.Element {
   const dims = useTuiDimensions();
   const active = () => tui.store.ui.activeMainTab;
   const proxyCount = () => tui.store.ui.proxyFlows.length;
-  const labels = () => mainTabLabels(dims().width, proxyCount());
+  const findingCount = () => tui.store.ui.findingsCatalog.length;
+  const labels = () => mainTabLabels(dims().width, proxyCount(), findingCount());
   const tabSwitchBlocked = () => Boolean(
     tui.store.ui.overlayStack.length
     || tui.store.ui.centerSurfaceStack.length
@@ -153,24 +168,34 @@ function MainTabs(): JSX.Element {
     tui.actions.mainTabSet("proxy");
     void tui.refreshProxyFlows();
   };
+  const openFindings = () => {
+    if (tabSwitchBlocked()) return;
+    tui.actions.mainTabSet("findings");
+    void tui.refreshFindings();
+  };
   return (
     <box id="main-tabs" style={{ height: 2, flexShrink: 0, flexDirection: "row" }}>
       <text selectable={false} fg={active() === "chat" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openChat(); }}>{labels().chat}</text>
       <text fg={COLOR.dim}>{labels().gap}</text>
       <text selectable={false} fg={active() === "proxy" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openProxy(); }}>{labels().proxy}</text>
+      <text fg={COLOR.dim}>{labels().gap}</text>
+      <text selectable={false} fg={active() === "findings" ? COLOR.accent : COLOR.dim} onMouseUp={(event) => { if (isPrimaryClick(event)) openFindings(); }}>{labels().findings}</text>
     </box>
   );
 }
 
-export function mainTabLabels(width: number, proxyCount: number): { chat: string; gap: string; proxy: string } {
+export function mainTabLabels(width: number, proxyCount: number, findingCount = 0): { chat: string; gap: string; proxy: string; findings: string } {
   const proxy = `[2] proxy${proxyCount ? ` (${proxyCount})` : ""}`;
-  if (width >= "[1] chat".length + 2 + proxy.length + 2) {
+  const findings = `[3] findings${findingCount ? ` (${findingCount})` : ""}`;
+  if (width >= "[1] chat".length + 2 + proxy.length + 2 + findings.length + 2) {
     return {
       chat: "[1] chat",
       gap: "  ",
-      proxy
+      proxy,
+      findings
     };
   }
-  if (width >= 17) return { chat: "1 chat", gap: "  ", proxy: "2 proxy" };
-  return { chat: "1", gap: "  ", proxy: "2" };
+  if (width >= 28) return { chat: "1 chat", gap: "  ", proxy: "2 proxy", findings: "3 findings" };
+  if (width >= 17) return { chat: "1 chat", gap: "  ", proxy: "2 proxy", findings: "3" };
+  return { chat: "1", gap: "  ", proxy: "2", findings: "3" };
 }

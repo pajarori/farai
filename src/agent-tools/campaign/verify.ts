@@ -1,7 +1,7 @@
 import type { ToolDefinition, FindingStatus } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
+import { assertCampaignEvidence, campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 export const campaignVerifyTool: ToolDefinition = {
   name: "campaign_verify",
@@ -23,14 +23,8 @@ export const campaignVerifyTool: ToolDefinition = {
     if (!context.store.updateFinding || !context.store.loadFinding) throw new Error("finding update is unavailable");
     const existing = context.store.loadFinding(asString(args.findingId, "findingId"));
     if (existing.campaignId && existing.campaignId !== campaignId) throw new Error("finding belongs to another campaign");
-    if (status === "verified" && context.store.loadEvidence && context.store.loadSession) {
-      const evidenceIds = (args.evidenceIds as unknown[]).map(String);
-      for (const evidenceId of evidenceIds) {
-        const evidence = context.store.loadEvidence(evidenceId);
-        const evidenceSession = context.store.loadSession(evidence.sessionId);
-        if (evidenceSession.campaignId !== campaignId) throw new Error(`evidence belongs to another campaign: ${evidenceId}`);
-      }
-    }
+    const evidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String) : [];
+    assertCampaignEvidence(context, campaignId, evidenceIds);
     if (status === "verified") {
       const attempt = requireCampaignStore(context, "loadTestAttempt")(asString(args.testAttemptId, "testAttemptId"));
       if (attempt.campaignId !== campaignId) throw new Error("test attempt belongs to another campaign");
@@ -39,7 +33,7 @@ export const campaignVerifyTool: ToolDefinition = {
       if (attempt.evidenceLevel === "impact_demonstrated" && attempt.sessionId !== existing.sessionId) throw new Error("impact-demonstration attempts must belong to the finding session");
       if (attempt.evidenceLevel === "independently_verified" && attempt.sessionId === existing.sessionId) throw new Error("independent verification must come from a different session");
       const attemptEvidence = new Set(attempt.evidenceIds);
-      const missingAttemptEvidence = (args.evidenceIds as unknown[]).map(String).filter((evidenceId) => !attemptEvidence.has(evidenceId));
+      const missingAttemptEvidence = evidenceIds.filter((evidenceId) => !attemptEvidence.has(evidenceId));
       if (missingAttemptEvidence.length > 0) throw new Error(`finding evidence is not linked to test attempt: ${missingAttemptEvidence.join(", ")}`);
     }
     const finding = context.store.updateFinding(existing.id, {

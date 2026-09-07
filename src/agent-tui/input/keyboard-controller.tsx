@@ -17,6 +17,7 @@ import { createCenterSurfaceController } from "./center-surface-controller";
 import { createOverlayController } from "./overlay-controller";
 import { createComposerController } from "./composer-controller";
 import { createProxyController } from "./proxy-controller";
+import { createFindingsController } from "./findings-controller";
 import { createTranscriptController } from "./transcript-controller";
 
 export function KeyboardController(): JSX.Element {
@@ -57,6 +58,7 @@ export function KeyboardController(): JSX.Element {
     owns: ownsSession
   });
   const proxy = createProxyController({ tui, port, captureOwner: captureSessionOwner, owns: ownsSession });
+  const findings = createFindingsController({ tui });
   const transcript = createTranscriptController({ tui, port, captureOwner: captureSessionOwner, owns: ownsSession });
   const overlay = createOverlayController({
     tui,
@@ -343,6 +345,30 @@ export function KeyboardController(): JSX.Element {
         return;
       case "mainTab.set":
         await proxy.setMainTab(action.tab);
+        return;
+      case "findings.move":
+        findings.move(action.delta);
+        return;
+      case "findings.focus":
+        findings.focus(action.focus);
+        return;
+      case "findings.filterStart":
+        findings.startFilter();
+        return;
+      case "findings.filterAppend":
+        findings.appendFilter(action.char);
+        return;
+      case "findings.filterBackspace":
+        findings.backspaceFilter();
+        return;
+      case "findings.filterCancel":
+        findings.cancelFilter();
+        return;
+      case "findings.scroll":
+        tui.actions.findingsDetailScrollRequested(action.action);
+        return;
+      case "findings.refresh":
+        await findings.refresh();
         return;
       case "proxy.filterSet":
         proxy.setFilter(action.filter);

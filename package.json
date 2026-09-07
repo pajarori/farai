@@ -1,6 +1,6 @@
 {
   "name": "farai",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "private": false,
   "type": "module",
   "description": "Cyber-first freestyle local AI agent",
@@ -61,7 +61,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "@napi-rs/keyring": "2.0.0",
-    "@opentui/core": "0.5.9",
+    "@opentui/core": "0.5.10",
     "ajv": "8.20.0",
     "bun-pty": "0.4.10",
     "entities": "7.0.1",
@@ -73,7 +73,7 @@
     "solid-js": "1.9.12"
   },
   "devDependencies": {
-    "@opentui/solid": "0.5.9",
+    "@opentui/solid": "0.5.10",
     "@types/bun": "^1.1.0",
     "@types/mailparser": "3.4.6",
     "typescript": "5.9.3"

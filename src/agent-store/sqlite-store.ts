@@ -5,9 +5,15 @@ import type {
   BackgroundJob,
   Campaign,
   CampaignAsset,
+  CampaignClaim,
   CampaignDossier,
   CampaignHypothesis,
   CampaignObservation,
+  CampaignLease,
+  CampaignProgress,
+  CampaignRequirement,
+  CampaignRun,
+  CampaignWave,
   CampaignSearchResult,
   TestAttempt,
   CompactionBoundary,
@@ -45,6 +51,7 @@ import { persistToolAttachment, sessionAttachmentDirectory } from "../tool-attac
 import { assertPersistedText, PERSISTENCE_LIMITS, stringifyPersistedJson } from "./persistence-bounds";
 import { atomicWriteFile } from "../agent-core/atomic-file";
 import { ensurePrivateDirectory, ensurePrivateRegularFileIfExists, ensurePrivateSqlitePath } from "../agent-core/private-path";
+import { calculateCvss31 } from "../security/cvss31";
 
 type Row = Record<string, unknown>;
 type BackgroundToolSettlementInput = {
@@ -158,7 +165,7 @@ export class SqliteStore {
     }
   }
 
-  async createSession(options: Partial<Pick<Session, "title" | "parentId" | "provider" | "model" | "emailPrimaryId" | "emailSecondaryId" | "summary" | "summaryUpdatedAt" | "campaignId">> & { workspace?: string } = {}): Promise<Session> {
+  async createSession(options: Partial<Pick<Session, "title" | "parentId" | "provider" | "model" | "emailPrimaryId" | "emailSecondaryId" | "summary" | "summaryUpdatedAt" | "campaignId" | "campaignRunId">> & { workspace?: string } = {}): Promise<Session> {
     await this.ensure();
     const session: Session = {
       id: id(),
@@ -168,6 +175,7 @@ export class SqliteStore {
       title: options.title ?? DEFAULT_SESSION_TITLE,
       ...(options.parentId ? { parentId: options.parentId } : {}),
       ...(options.campaignId ? { campaignId: options.campaignId } : {}),
+      ...(options.campaignRunId ? { campaignRunId: options.campaignRunId } : {}),
       ...(options.provider ? { provider: options.provider } : {}),
       ...(options.model ? { model: options.model } : {}),
       ...(options.emailPrimaryId ? { emailPrimaryId: options.emailPrimaryId } : {}),
@@ -192,8 +200,8 @@ export class SqliteStore {
   upsertSession(session: Session): void {
     this.database()
       .query(
-        `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, provider, model, email_primary_id, email_secondary_id, summary, summary_updated_at, tool_scope_json, archived_at, created_at, updated_at)
-         values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $provider, $model, $emailPrimaryId, $emailSecondaryId, $summary, $summaryUpdated, $toolScope, $archived, $created, $updated)
+        `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, campaign_run_id, provider, model, email_primary_id, email_secondary_id, summary, summary_updated_at, tool_scope_json, archived_at, created_at, updated_at)
+         values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $campaignRun, $provider, $model, $emailPrimaryId, $emailSecondaryId, $summary, $summaryUpdated, $toolScope, $archived, $created, $updated)
          on conflict(id) do update set
            workspace = excluded.workspace,
            mode = excluded.mode,
@@ -201,6 +209,7 @@ export class SqliteStore {
            title = excluded.title,
            parent_id = excluded.parent_id,
            campaign_id = excluded.campaign_id,
+           campaign_run_id = excluded.campaign_run_id,
            provider = excluded.provider,
            model = excluded.model,
            email_primary_id = excluded.email_primary_id,
@@ -219,6 +228,7 @@ export class SqliteStore {
         $title: session.title ? assertPersistedText(session.title, PERSISTENCE_LIMITS.shortTextBytes, "session title") : null,
         $parent: session.parentId ?? null,
         $campaign: session.campaignId ?? null,
+        $campaignRun: session.campaignRunId ?? null,
         $provider: session.provider ?? null,
         $model: session.model ?? null,
         $emailPrimaryId: session.emailPrimaryId ?? null,
@@ -286,11 +296,12 @@ export class SqliteStore {
     return discarded;
   }
 
-  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">> & { emailPrimaryId?: string | null; emailSecondaryId?: string | null }): Session {
+  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "campaignRunId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">> & { emailPrimaryId?: string | null; emailSecondaryId?: string | null }): Session {
     const current = this.loadSession(sessionId);
     const next: Session = {
       ...current,
       ...(patch.campaignId !== undefined ? { campaignId: patch.campaignId } : {}),
+      ...(patch.campaignRunId !== undefined ? { campaignRunId: patch.campaignRunId } : {}),
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       ...(patch.phase !== undefined ? { phase: patch.phase } : {}),
       ...(patch.provider !== undefined ? { provider: patch.provider } : {}),
@@ -343,6 +354,284 @@ export class SqliteStore {
     this.database().query("update campaigns set name = $name, status = $status, updated_at = $updated where id = $id")
       .run({ $name: assertPersistedText(next.name, PERSISTENCE_LIMITS.shortTextBytes, "campaign name"), $status: next.status, $updated: next.updatedAt, $id: campaignId });
     return next;
+  }
+
+  createCampaignRun(input: Omit<CampaignRun, "id" | "createdAt" | "updatedAt">): CampaignRun {
+    const now = nowIso();
+    const run: CampaignRun = { id: id(), ...input, createdAt: now, updatedAt: now };
+    const db = this.database();
+    db.transaction(() => {
+      const active = db.query(
+        `select id from campaign_runs where root_session_id = $session and status in ('draft', 'ready', 'running', 'waiting', 'paused', 'blocked', 'rate_limited', 'budget_limited', 'time_limited') limit 1`
+      ).get({ $session: run.rootSessionId }) as { id?: string } | null;
+      if (active?.id) throw new Error(`session already has an active campaign run: ${active.id}`);
+      db.query(
+        `insert into campaign_runs (id, campaign_id, root_session_id, workspace, objective, status, current_wave_id, blocker, last_error, metadata_json, created_at, updated_at, started_at, paused_at, completed_at)
+         values ($id, $campaign, $session, $workspace, $objective, $status, $wave, $blocker, $error, $metadata, $created, $updated, $started, $paused, $completed)`
+      ).run({
+        $id: run.id,
+        $campaign: run.campaignId,
+        $session: run.rootSessionId,
+        $workspace: assertPersistedText(run.workspace, PERSISTENCE_LIMITS.shortTextBytes, "campaign run workspace"),
+        $objective: assertPersistedText(run.objective, PERSISTENCE_LIMITS.documentTextBytes, "campaign run objective"),
+        $status: run.status,
+        $wave: run.currentWaveId ?? null,
+        $blocker: run.blocker ?? null,
+        $error: run.lastError ?? null,
+        $metadata: stringifyPersistedJson(run.metadata, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign run metadata"),
+        $created: run.createdAt,
+        $updated: run.updatedAt,
+        $started: run.startedAt ?? null,
+        $paused: run.pausedAt ?? null,
+        $completed: run.completedAt ?? null
+      });
+    })();
+    return run;
+  }
+
+  loadCampaignRun(runId: string): CampaignRun {
+    const row = this.database().query("select * from campaign_runs where id = $id").get({ $id: runId }) as Row | null;
+    if (!row) throw new Error(`Campaign run not found: ${runId}`);
+    return campaignRunFromRow(row);
+  }
+
+  listCampaignRuns(workspace?: string, limit = 100): CampaignRun[] {
+    const rows = workspace
+      ? this.database().query("select * from campaign_runs where workspace = $workspace order by updated_at desc limit $limit").all({ $workspace: workspace, $limit: limit }) as Row[]
+      : this.database().query("select * from campaign_runs order by updated_at desc limit $limit").all({ $limit: limit }) as Row[];
+    return rows.map(campaignRunFromRow);
+  }
+
+  updateCampaignRun(runId: string, patch: Partial<Pick<CampaignRun, "status" | "currentWaveId" | "blocker" | "lastError" | "metadata" | "startedAt" | "pausedAt" | "completedAt">>): CampaignRun {
+    const current = this.loadCampaignRun(runId);
+    const next: CampaignRun = { ...current, ...patch, updatedAt: nowIso() };
+    this.database().query(
+      `update campaign_runs set status = $status, current_wave_id = $wave, blocker = $blocker, last_error = $error,
+       metadata_json = $metadata, updated_at = $updated, started_at = $started, paused_at = $paused, completed_at = $completed where id = $id`
+    ).run({
+      $id: next.id,
+      $status: next.status,
+      $wave: next.currentWaveId ?? null,
+      $blocker: next.blocker ?? null,
+      $error: next.lastError ?? null,
+      $metadata: stringifyPersistedJson(next.metadata, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign run metadata"),
+      $updated: next.updatedAt,
+      $started: next.startedAt ?? null,
+      $paused: next.pausedAt ?? null,
+      $completed: next.completedAt ?? null
+    });
+    return next;
+  }
+
+  upsertCampaignRequirement(input: Omit<CampaignRequirement, "id" | "createdAt" | "updatedAt">): CampaignRequirement {
+    const existing = this.database().query("select * from campaign_requirements where run_id = $run and key = $key").get({ $run: input.runId, $key: input.key }) as Row | null;
+    const now = nowIso();
+    const requirement: CampaignRequirement = existing
+      ? { ...campaignRequirementFromRow(existing), ...input, id: String(existing.id), createdAt: String(existing.created_at), updatedAt: now }
+      : { id: id(), ...input, createdAt: now, updatedAt: now };
+    this.database().query(
+      `insert into campaign_requirements (id, run_id, key, description, status, evidence_ids_json, created_at, updated_at)
+       values ($id, $run, $key, $description, $status, $evidence, $created, $updated)
+       on conflict(run_id, key) do update set description = excluded.description, status = excluded.status, evidence_ids_json = excluded.evidence_ids_json, updated_at = excluded.updated_at`
+    ).run({
+      $id: requirement.id,
+      $run: requirement.runId,
+      $key: assertPersistedText(requirement.key, PERSISTENCE_LIMITS.shortTextBytes, "campaign requirement key"),
+      $description: assertPersistedText(requirement.description, PERSISTENCE_LIMITS.documentTextBytes, "campaign requirement description"),
+      $status: requirement.status,
+      $evidence: stringifyPersistedJson(requirement.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign requirement evidence ids"),
+      $created: requirement.createdAt,
+      $updated: requirement.updatedAt
+    });
+    return requirement;
+  }
+
+  listCampaignRequirements(runId: string): CampaignRequirement[] {
+    return (this.database().query("select * from campaign_requirements where run_id = $run order by created_at asc").all({ $run: runId }) as Row[]).map(campaignRequirementFromRow);
+  }
+
+  createCampaignWave(input: Omit<CampaignWave, "id" | "createdAt" | "updatedAt">): CampaignWave {
+    const now = nowIso();
+    const wave: CampaignWave = { id: id(), ...input, createdAt: now, updatedAt: now };
+    this.database().query(
+      `insert into campaign_waves (id, run_id, sequence, status, objective, progress_summary, blocker, created_at, updated_at, started_at, finished_at)
+       values ($id, $run, $sequence, $status, $objective, $summary, $blocker, $created, $updated, $started, $finished)`
+    ).run({
+      $id: wave.id,
+      $run: wave.runId,
+      $sequence: wave.sequence,
+      $status: wave.status,
+      $objective: assertPersistedText(wave.objective, PERSISTENCE_LIMITS.documentTextBytes, "campaign wave objective"),
+      $summary: wave.progressSummary ?? null,
+      $blocker: wave.blocker ?? null,
+      $created: wave.createdAt,
+      $updated: wave.updatedAt,
+      $started: wave.startedAt ?? null,
+      $finished: wave.finishedAt ?? null
+    });
+    return wave;
+  }
+
+  listCampaignWaves(runId: string): CampaignWave[] {
+    return (this.database().query("select * from campaign_waves where run_id = $run order by sequence asc").all({ $run: runId }) as Row[]).map(campaignWaveFromRow);
+  }
+
+  updateCampaignWave(waveId: string, patch: Partial<Pick<CampaignWave, "status" | "progressSummary" | "blocker" | "startedAt" | "finishedAt">>): CampaignWave {
+    const row = this.database().query("select * from campaign_waves where id = $id").get({ $id: waveId }) as Row | null;
+    if (!row) throw new Error(`Campaign wave not found: ${waveId}`);
+    const current = campaignWaveFromRow(row);
+    const next: CampaignWave = { ...current, ...patch, updatedAt: nowIso() };
+    this.database().query("update campaign_waves set status = $status, progress_summary = $summary, blocker = $blocker, updated_at = $updated, started_at = $started, finished_at = $finished where id = $id").run({
+      $id: next.id, $status: next.status, $summary: next.progressSummary ?? null, $blocker: next.blocker ?? null, $updated: next.updatedAt, $started: next.startedAt ?? null, $finished: next.finishedAt ?? null
+    });
+    return next;
+  }
+
+  createCampaignClaim(input: Omit<CampaignClaim, "id" | "createdAt" | "updatedAt">): CampaignClaim {
+    const existing = this.database().query("select * from campaign_claims where wave_id = $wave and claim_key = $key").get({ $wave: input.waveId, $key: input.claimKey }) as Row | null;
+    if (existing) return campaignClaimFromRow(existing);
+    const now = nowIso();
+    const claim: CampaignClaim = { id: id(), ...input, createdAt: now, updatedAt: now };
+    this.database().query(
+      `insert into campaign_claims (id, run_id, wave_id, claim_key, title, session_id, status, lease_owner, lease_expires_at, created_at, updated_at)
+       values ($id, $run, $wave, $key, $title, $session, $status, $owner, $expires, $created, $updated)`
+    ).run({ $id: claim.id, $run: claim.runId, $wave: claim.waveId, $key: assertPersistedText(claim.claimKey, PERSISTENCE_LIMITS.shortTextBytes, "campaign claim key"), $title: assertPersistedText(claim.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign claim title"), $session: claim.sessionId ?? null, $status: claim.status, $owner: claim.leaseOwner ?? null, $expires: claim.leaseExpiresAt ?? null, $created: claim.createdAt, $updated: claim.updatedAt });
+    return claim;
+  }
+
+  listCampaignClaims(waveId: string): CampaignClaim[] {
+    return (this.database().query("select * from campaign_claims where wave_id = $wave order by created_at asc").all({ $wave: waveId }) as Row[]).map(campaignClaimFromRow);
+  }
+
+  leaseCampaignClaim(claimId: string, owner: string, ttlMs: number): CampaignClaim | undefined {
+    const db = this.database();
+    const now = Date.now();
+    let result: CampaignClaim | undefined;
+    db.transaction(() => {
+      const row = db.query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row | null;
+      if (!row) throw new Error(`Campaign claim not found: ${claimId}`);
+      const current = campaignClaimFromRow(row);
+      const expired = current.leaseExpiresAt ? Date.parse(current.leaseExpiresAt) <= now : true;
+      if (current.status === "completed" || (current.status === "leased" && !expired)) return;
+      const expires = new Date(now + Math.max(1_000, ttlMs)).toISOString();
+      db.query("update campaign_claims set status = 'leased', session_id = null, lease_owner = $owner, lease_expires_at = $expires, updated_at = $updated where id = $id").run({ $id: claimId, $owner: owner, $expires: expires, $updated: nowIso() });
+      result = campaignClaimFromRow(db.query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row);
+    })();
+    return result;
+  }
+
+  updateCampaignClaim(claimId: string, patch: Partial<Pick<CampaignClaim, "status" | "sessionId">> & { leaseOwner?: string | null; leaseExpiresAt?: string | null }): CampaignClaim {
+    const row = this.database().query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row | null;
+    if (!row) throw new Error(`Campaign claim not found: ${claimId}`);
+    const current = campaignClaimFromRow(row);
+    const next: CampaignClaim = { ...current, ...(patch.status ? { status: patch.status } : {}), ...(patch.sessionId ? { sessionId: patch.sessionId } : {}), ...(patch.leaseOwner ? { leaseOwner: patch.leaseOwner } : {}), ...(patch.leaseExpiresAt ? { leaseExpiresAt: patch.leaseExpiresAt } : {}), updatedAt: nowIso() };
+    if (patch.sessionId === null) delete next.sessionId;
+    if (patch.leaseOwner === null) delete next.leaseOwner;
+    if (patch.leaseExpiresAt === null) delete next.leaseExpiresAt;
+    this.database().query("update campaign_claims set status = $status, session_id = $session, lease_owner = $owner, lease_expires_at = $expires, updated_at = $updated where id = $id").run({ $id: next.id, $status: next.status, $session: next.sessionId ?? null, $owner: next.leaseOwner ?? null, $expires: next.leaseExpiresAt ?? null, $updated: next.updatedAt });
+    return next;
+  }
+
+  settleCampaignClaim(claimId: string, owner: string, status: Extract<CampaignClaim["status"], "completed" | "failed" | "released">, sessionId?: string): CampaignClaim | undefined {
+    const db = this.database();
+    const updated = nowIso();
+    const result = db.query(
+      `update campaign_claims
+       set status = $status, session_id = coalesce($session, session_id), lease_owner = null, lease_expires_at = null, updated_at = $updated
+       where id = $id and status = 'leased' and lease_owner = $owner`
+    ).run({ $id: claimId, $owner: owner, $status: status, $session: sessionId ?? null, $updated: updated });
+    if (result.changes !== 1) return undefined;
+    return campaignClaimFromRow(db.query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row);
+  }
+
+  releaseExpiredCampaignClaims(runId?: string): number {
+    const clauses = ["status = 'leased'", "lease_expires_at is not null", "lease_expires_at <= $now"];
+    const params: Record<string, string> = { $now: nowIso() };
+    if (runId) {
+      clauses.push("run_id = $run");
+      params.$run = runId;
+    }
+    return this.database().query(`update campaign_claims set status = 'released', lease_owner = null, lease_expires_at = null, updated_at = $updated where ${clauses.join(" and ")}`).run({ ...params, $updated: nowIso() }).changes;
+  }
+
+  recordCampaignProgress(input: Omit<CampaignProgress, "id" | "createdAt">): CampaignProgress {
+    const progress: CampaignProgress = { id: id(), ...input, createdAt: nowIso() };
+    this.database().query("insert into campaign_progress (id, run_id, wave_id, kind, fingerprint, summary, evidence_count, finding_count, created_at) values ($id, $run, $wave, $kind, $fingerprint, $summary, $evidence, $findings, $created)").run({ $id: progress.id, $run: progress.runId, $wave: progress.waveId ?? null, $kind: progress.kind, $fingerprint: assertPersistedText(progress.fingerprint, PERSISTENCE_LIMITS.shortTextBytes, "campaign progress fingerprint"), $summary: assertPersistedText(progress.summary, PERSISTENCE_LIMITS.documentTextBytes, "campaign progress summary"), $evidence: progress.evidenceCount, $findings: progress.findingCount, $created: progress.createdAt });
+    return progress;
+  }
+
+  listCampaignProgress(runId: string, limit = 100): CampaignProgress[] {
+    return (this.database().query("select * from campaign_progress where run_id = $run order by created_at desc limit $limit").all({ $run: runId, $limit: limit }) as Row[]).map(campaignProgressFromRow);
+  }
+
+  acquireCampaignLease(runId: string, owner: string, ttlMs: number): CampaignLease | undefined {
+    const db = this.database();
+    const now = Date.now();
+    let lease: CampaignLease | undefined;
+    db.transaction(() => {
+      const existing = db.query("select * from campaign_leases where run_id = $run").get({ $run: runId }) as Row | null;
+      if (existing && String(existing.owner) !== owner && Date.parse(String(existing.lease_expires_at)) > now) return;
+      const created = existing ? String(existing.created_at) : nowIso();
+      lease = { runId, owner, heartbeatAt: nowIso(), leaseExpiresAt: new Date(now + Math.max(1_000, ttlMs)).toISOString(), createdAt: created };
+      db.query("insert into campaign_leases (run_id, owner, heartbeat_at, lease_expires_at, created_at) values ($run, $owner, $heartbeat, $expires, $created) on conflict(run_id) do update set owner = excluded.owner, heartbeat_at = excluded.heartbeat_at, lease_expires_at = excluded.lease_expires_at").run({ $run: runId, $owner: lease.owner, $heartbeat: lease.heartbeatAt, $expires: lease.leaseExpiresAt, $created: lease.createdAt });
+    })();
+    return lease;
+  }
+
+  heartbeatCampaignLease(runId: string, owner: string, ttlMs: number): CampaignLease | undefined {
+    const existing = this.database().query("select * from campaign_leases where run_id = $run and owner = $owner").get({ $run: runId, $owner: owner }) as Row | null;
+    if (!existing) return undefined;
+    const lease: CampaignLease = { runId, owner, heartbeatAt: nowIso(), leaseExpiresAt: new Date(Date.now() + Math.max(1_000, ttlMs)).toISOString(), createdAt: String(existing.created_at) };
+    this.database().query("update campaign_leases set heartbeat_at = $heartbeat, lease_expires_at = $expires where run_id = $run and owner = $owner").run({ $run: runId, $owner: owner, $heartbeat: lease.heartbeatAt, $expires: lease.leaseExpiresAt });
+    return lease;
+  }
+
+  campaignLeaseOwner(runId: string): string | undefined {
+    const row = this.database().query("select owner, lease_expires_at from campaign_leases where run_id = $run").get({ $run: runId }) as { owner?: string; lease_expires_at?: string } | null;
+    if (typeof row?.owner !== "string" || typeof row.lease_expires_at !== "string") return undefined;
+    return Date.parse(row.lease_expires_at) > Date.now() ? row.owner : undefined;
+  }
+
+  heartbeatCampaignClaim(claimId: string, owner: string, ttlMs: number): CampaignClaim | undefined {
+    const row = this.database().query("select * from campaign_claims where id = $id and status = 'leased' and lease_owner = $owner").get({ $id: claimId, $owner: owner }) as Row | null;
+    if (!row) return undefined;
+    const expires = new Date(Date.now() + Math.max(1_000, ttlMs)).toISOString();
+    this.database().query("update campaign_claims set lease_expires_at = $expires, updated_at = $updated where id = $id and status = 'leased' and lease_owner = $owner").run({ $id: claimId, $owner: owner, $expires: expires, $updated: nowIso() });
+    return campaignClaimFromRow(this.database().query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row);
+  }
+
+  releaseCampaignLease(runId: string, owner: string): void {
+    this.database().query("delete from campaign_leases where run_id = $run and owner = $owner").run({ $run: runId, $owner: owner });
+  }
+
+  recoverCampaignRun(runId: string, owner: string, ttlMs: number): CampaignRun | undefined {
+    const db = this.database();
+    const now = Date.now();
+    const nowText = nowIso();
+    return db.transaction(() => {
+      const row = db.query("select * from campaign_runs where id = $run").get({ $run: runId }) as Row | null;
+      if (!row) return undefined;
+      const lease = db.query("select owner, lease_expires_at, created_at from campaign_leases where run_id = $run").get({ $run: runId }) as { owner?: string; lease_expires_at?: string; created_at?: string } | null;
+      if (lease?.owner && lease.owner !== owner && typeof lease.lease_expires_at === "string" && Date.parse(lease.lease_expires_at) > now) return undefined;
+      const expires = new Date(now + Math.max(1_000, ttlMs)).toISOString();
+      db.query(
+        `insert into campaign_leases (run_id, owner, heartbeat_at, lease_expires_at, created_at)
+         values ($run, $owner, $heartbeat, $expires, $created)
+         on conflict(run_id) do update set owner = excluded.owner, heartbeat_at = excluded.heartbeat_at, lease_expires_at = excluded.lease_expires_at`
+      ).run({ $run: runId, $owner: owner, $heartbeat: nowText, $expires: expires, $created: lease?.created_at ?? nowText });
+      db.query(
+        `update campaign_waves
+         set status = 'expired', blocker = 'runtime restarted before wave settlement', finished_at = $finished, updated_at = $updated
+         where run_id = $run and status in ('leased', 'running', 'settling')`
+      ).run({ $run: runId, $finished: nowText, $updated: nowText });
+      db.query(
+        `update campaign_claims
+         set status = 'released', lease_owner = null, lease_expires_at = null, updated_at = $updated
+         where run_id = $run and status = 'leased'`
+      ).run({ $run: runId, $updated: nowText });
+      if (String(row.status) === "running") db.query("update campaign_runs set status = 'waiting', updated_at = $updated where id = $run").run({ $run: runId, $updated: nowText });
+      return campaignRunFromRow(db.query("select * from campaign_runs where id = $run").get({ $run: runId }) as Row);
+    }).immediate();
   }
 
   upsertAsset(input: Omit<CampaignAsset, "id" | "firstSeen" | "lastSeen">): CampaignAsset {
@@ -449,11 +738,12 @@ export class SqliteStore {
     const now = nowIso();
     const attempt: TestAttempt = { id: id(), ...input, createdAt: now, updatedAt: now };
     this.database().query(
-      `insert into campaign_test_attempts (id, campaign_id, session_id, hypothesis_id, title, target, method, baseline_json, mutation_json, oracle, observed_json, status, evidence_level, evidence_ids_json, created_at, updated_at)
-       values ($id, $campaign, $session, $hypothesis, $title, $target, $method, $baseline, $mutation, $oracle, $observed, $status, $level, $evidence, $created, $updated)`
+      `insert into campaign_test_attempts (id, campaign_id, run_id, session_id, hypothesis_id, title, target, method, baseline_json, mutation_json, oracle, observed_json, status, evidence_level, evidence_ids_json, created_at, updated_at)
+       values ($id, $campaign, $run, $session, $hypothesis, $title, $target, $method, $baseline, $mutation, $oracle, $observed, $status, $level, $evidence, $created, $updated)`
     ).run({
       $id: attempt.id,
       $campaign: attempt.campaignId,
+      $run: attempt.runId ?? null,
       $session: attempt.sessionId,
       $hypothesis: attempt.hypothesisId ?? null,
       $title: assertPersistedText(attempt.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign test title"),
@@ -550,10 +840,11 @@ export class SqliteStore {
 
   async forkSession(sessionId: string, title?: string): Promise<Session> {
     const source = this.loadSession(sessionId);
-    const options: Partial<Pick<Session, "title" | "parentId" | "campaignId" | "provider" | "model" | "emailPrimaryId" | "emailSecondaryId" | "summary" | "summaryUpdatedAt">> = {
+    const options: Partial<Pick<Session, "title" | "parentId" | "campaignId" | "campaignRunId" | "provider" | "model" | "emailPrimaryId" | "emailSecondaryId" | "summary" | "summaryUpdatedAt">> = {
       title: title ?? `${sessionDisplayName(source)} fork`,
       parentId: source.id,
-      ...(source.campaignId ? { campaignId: source.campaignId } : {})
+      ...(source.campaignId ? { campaignId: source.campaignId } : {}),
+      ...(source.campaignRunId ? { campaignRunId: source.campaignRunId } : {})
     };
     if (source.provider) options.provider = source.provider;
     if (source.model) options.model = source.model;
@@ -1821,28 +2112,34 @@ export class SqliteStore {
   }
 
   saveFinding(finding: Finding): void {
+    const scored = finding.cvssVector ? calculateCvss31(finding.cvssVector) : undefined;
+    const stored = scored
+      ? { ...finding, cvssVector: scored.vector, cvssScore: scored.score, severity: scored.severity }
+      : finding;
     this.database()
       .query(
-        `insert into findings (id, session_id, title, severity, target, evidence_ids_json, impact, reproduction, remediation, status, campaign_id, hypothesis_id, duplicate_of, created_at)
-         values ($id, $session, $title, $severity, $target, $evidence, $impact, $reproduction, $remediation, $status, $campaign, $hypothesis, $duplicate, $created)`
+        `insert into findings (id, session_id, title, severity, cvss_vector, cvss_score, target, evidence_ids_json, impact, reproduction, remediation, status, campaign_id, hypothesis_id, duplicate_of, created_at)
+         values ($id, $session, $title, $severity, $cvssVector, $cvssScore, $target, $evidence, $impact, $reproduction, $remediation, $status, $campaign, $hypothesis, $duplicate, $created)`
       )
       .run({
-        $id: finding.id,
-        $session: finding.sessionId,
-        $title: assertPersistedText(finding.title, PERSISTENCE_LIMITS.shortTextBytes, "finding title"),
-        $severity: finding.severity,
-        $target: assertPersistedText(finding.target, PERSISTENCE_LIMITS.shortTextBytes, "finding target"),
-        $evidence: stringifyPersistedJson(finding.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "finding evidence ids"),
-        $impact: assertPersistedText(finding.impact, PERSISTENCE_LIMITS.documentTextBytes, "finding impact"),
-        $reproduction: assertPersistedText(finding.reproduction, PERSISTENCE_LIMITS.documentTextBytes, "finding reproduction"),
-        $remediation: assertPersistedText(finding.remediation, PERSISTENCE_LIMITS.documentTextBytes, "finding remediation"),
-        $status: finding.status ?? "candidate",
-        $campaign: finding.campaignId ?? null,
-        $hypothesis: finding.hypothesisId ?? null,
-        $duplicate: finding.duplicateOf ?? null,
+        $id: stored.id,
+        $session: stored.sessionId,
+        $title: assertPersistedText(stored.title, PERSISTENCE_LIMITS.shortTextBytes, "finding title"),
+        $severity: stored.severity,
+        $cvssVector: stored.cvssVector ?? null,
+        $cvssScore: stored.cvssScore ?? null,
+        $target: assertPersistedText(stored.target, PERSISTENCE_LIMITS.shortTextBytes, "finding target"),
+        $evidence: stringifyPersistedJson(stored.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "finding evidence ids"),
+        $impact: assertPersistedText(stored.impact, PERSISTENCE_LIMITS.documentTextBytes, "finding impact"),
+        $reproduction: assertPersistedText(stored.reproduction, PERSISTENCE_LIMITS.documentTextBytes, "finding reproduction"),
+        $remediation: assertPersistedText(stored.remediation, PERSISTENCE_LIMITS.documentTextBytes, "finding remediation"),
+        $status: stored.status ?? "candidate",
+        $campaign: stored.campaignId ?? null,
+        $hypothesis: stored.hypothesisId ?? null,
+        $duplicate: stored.duplicateOf ?? null,
         $created: nowIso()
       });
-    this.emit({ kind: "finding", sessionId: finding.sessionId, finding });
+    this.emit({ kind: "finding", sessionId: stored.sessionId, finding: stored });
   }
 
   listFindings(sessionId: string): Finding[] {
@@ -1850,6 +2147,23 @@ export class SqliteStore {
       .query("select * from findings where session_id = $session order by created_at asc")
       .all({ $session: sessionId }) as Row[];
     return rows.map(findingFromRow);
+  }
+
+  listFindingsForSessionScope(sessionId: string): Finding[] {
+    const session = this.loadSession(sessionId);
+    if (session.campaignRunId) {
+      const rows = this.database()
+        .query("select f.* from findings f join sessions s on s.id = f.session_id where s.campaign_run_id = $run order by f.created_at asc")
+        .all({ $run: session.campaignRunId }) as Row[];
+      return rows.map(findingFromRow);
+    }
+    if (session.campaignId) {
+      const rows = this.database()
+        .query("select f.* from findings f join sessions s on s.id = f.session_id where s.campaign_id = $campaign order by f.created_at asc")
+        .all({ $campaign: session.campaignId }) as Row[];
+      return rows.map(findingFromRow);
+    }
+    return this.listFindings(sessionId);
   }
 
   loadFinding(findingId: string): Finding {
@@ -2013,7 +2327,7 @@ export class SqliteStore {
 
   private migrate(db: Database): void {
     const version = Number((db.query("pragma user_version").get() as { user_version?: number } | null)?.user_version ?? 0);
-    if (version > 9) throw new Error(`Unsupported Farai database version: ${version}`);
+    if (version > 11) throw new Error(`Unsupported Farai database version: ${version}`);
     db.transaction(() => {
       this.ensureBaselineSchema(db);
       if (version < 2) this.addJobAndMailboxSchema(db);
@@ -2024,12 +2338,109 @@ export class SqliteStore {
       if (version < 7) this.addRuntimeLeaseSchema(db);
       if (version < 8) this.addAgentJobMetadataSchema(db);
       if (version < 9) this.addUsagePricingSchema(db);
-      db.exec("pragma user_version = 9");
+      if (version < 10) this.addCampaignLifecycleSchema(db);
+      if (version < 11) this.addCvssSchema(db);
+      db.exec("pragma user_version = 11");
     })();
   }
 
   private addUsagePricingSchema(db: Database): void {
     addColumnIfMissing(db, "usage", "pricing_json", "text");
+  }
+
+  private addCvssSchema(db: Database): void {
+    addColumnIfMissing(db, "findings", "cvss_vector", "text");
+    addColumnIfMissing(db, "findings", "cvss_score", "real");
+  }
+
+  private addCampaignLifecycleSchema(db: Database): void {
+    addColumnIfMissing(db, "sessions", "campaign_run_id", "text");
+    addColumnIfMissing(db, "background_jobs", "campaign_claim_id", "text");
+    addColumnIfMissing(db, "background_jobs", "campaign_run_id", "text");
+    addColumnIfMissing(db, "campaign_test_attempts", "run_id", "text");
+    db.exec(`
+      create table if not exists campaign_runs (
+        id text primary key,
+        campaign_id text not null,
+        root_session_id text not null,
+        workspace text not null,
+        objective text not null,
+        status text not null,
+        current_wave_id text,
+        blocker text,
+        last_error text,
+        metadata_json text not null,
+        created_at text not null,
+        updated_at text not null,
+        started_at text,
+        paused_at text,
+        completed_at text
+      );
+      create index if not exists campaign_runs_campaign_idx on campaign_runs(campaign_id, updated_at);
+      create index if not exists campaign_runs_session_idx on campaign_runs(root_session_id, updated_at);
+      create table if not exists campaign_requirements (
+        id text primary key,
+        run_id text not null,
+        key text not null,
+        description text not null,
+        status text not null,
+        evidence_ids_json text not null,
+        created_at text not null,
+        updated_at text not null,
+        unique(run_id, key)
+      );
+      create index if not exists campaign_requirements_run_idx on campaign_requirements(run_id, status, updated_at);
+      create table if not exists campaign_waves (
+        id text primary key,
+        run_id text not null,
+        sequence integer not null,
+        status text not null,
+        objective text not null,
+        progress_summary text,
+        blocker text,
+        created_at text not null,
+        updated_at text not null,
+        started_at text,
+        finished_at text,
+        unique(run_id, sequence)
+      );
+      create index if not exists campaign_waves_run_idx on campaign_waves(run_id, sequence);
+      create table if not exists campaign_claims (
+        id text primary key,
+        run_id text not null,
+        wave_id text not null,
+        claim_key text not null,
+        title text not null,
+        session_id text,
+        status text not null,
+        lease_owner text,
+        lease_expires_at text,
+        created_at text not null,
+        updated_at text not null,
+        unique(wave_id, claim_key)
+      );
+      create index if not exists campaign_claims_wave_idx on campaign_claims(wave_id, status, updated_at);
+      create table if not exists campaign_progress (
+        id text primary key,
+        run_id text not null,
+        wave_id text,
+        kind text not null,
+        fingerprint text not null,
+        summary text not null,
+        evidence_count integer not null,
+        finding_count integer not null,
+        created_at text not null
+      );
+      create index if not exists campaign_progress_run_idx on campaign_progress(run_id, created_at);
+      create table if not exists campaign_leases (
+        run_id text primary key,
+        owner text not null,
+        heartbeat_at text not null,
+        lease_expires_at text not null,
+        created_at text not null
+      );
+      create index if not exists campaign_leases_expiry_idx on campaign_leases(lease_expires_at);
+    `);
   }
 
   private addAgentJobMetadataSchema(db: Database): void {
@@ -2090,6 +2501,8 @@ export class SqliteStore {
         turn_id text,
         tool_call_id text,
         child_session_id text,
+        campaign_run_id text,
+        campaign_claim_id text,
         title text,
         lane text,
         agent_mode text,
@@ -2139,6 +2552,7 @@ export class SqliteStore {
         title text,
         parent_id text,
         campaign_id text,
+        campaign_run_id text,
         provider text,
         model text,
         email_primary_id text,
@@ -2229,6 +2643,8 @@ export class SqliteStore {
         session_id text not null,
         title text not null,
         severity text not null,
+        cvss_vector text,
+        cvss_score real,
         target text not null,
         evidence_ids_json text not null,
         impact text not null,
@@ -2297,6 +2713,7 @@ export class SqliteStore {
       create table if not exists campaign_test_attempts (
         id text primary key,
         campaign_id text not null,
+        run_id text,
         session_id text not null,
         hypothesis_id text,
         title text not null,
@@ -2437,12 +2854,12 @@ function dropColumnIfPresent(db: Database, table: string, column: string): void 
 function writeJobRow(db: Database, job: BackgroundJob): void {
   db.query(
     `insert into background_jobs
-     (id, kind, status, runtime_id, session_id, turn_id, tool_call_id, child_session_id, title, lane, agent_mode, backend_kind, process_id,
+     (id, kind, status, runtime_id, session_id, turn_id, tool_call_id, child_session_id, campaign_run_id, campaign_claim_id, title, lane, agent_mode, backend_kind, process_id,
       cancellation_policy, delivery_state, output_artifact_id, result_json, error, mailbox_id, created_at, started_at, completed_at, updated_at)
-     values ($id, $kind, $status, $runtime, $session, $turn, $toolCall, $childSession, $title, $lane, $agentMode, $backend, $process,
+     values ($id, $kind, $status, $runtime, $session, $turn, $toolCall, $childSession, $campaignRun, $campaignClaim, $title, $lane, $agentMode, $backend, $process,
       $cancelPolicy, $delivery, $artifact, $result, $error, $mailbox, $created, $started, $completed, $updated)
      on conflict(id) do update set status = excluded.status, title = excluded.title, lane = excluded.lane, agent_mode = excluded.agent_mode, backend_kind = excluded.backend_kind,
-      process_id = excluded.process_id, output_artifact_id = excluded.output_artifact_id, result_json = excluded.result_json,
+      process_id = excluded.process_id, campaign_run_id = excluded.campaign_run_id, campaign_claim_id = excluded.campaign_claim_id, output_artifact_id = excluded.output_artifact_id, result_json = excluded.result_json,
       error = excluded.error, mailbox_id = excluded.mailbox_id, delivery_state = excluded.delivery_state, started_at = excluded.started_at,
       completed_at = excluded.completed_at, updated_at = excluded.updated_at`
   ).run({
@@ -2454,6 +2871,8 @@ function writeJobRow(db: Database, job: BackgroundJob): void {
     $turn: job.turnId ?? null,
     $toolCall: job.toolCallId ?? null,
     $childSession: job.childSessionId ?? null,
+    $campaignRun: job.campaignRunId ?? null,
+    $campaignClaim: job.campaignClaimId ?? null,
     $title: job.title ?? null,
     $lane: job.lane ?? null,
     $agentMode: job.agentMode ?? null,
@@ -2643,6 +3062,8 @@ function backgroundJobFromRow(row: Row): BackgroundJob {
     ...(typeof row.turn_id === "string" ? { turnId: row.turn_id } : {}),
     ...(typeof row.tool_call_id === "string" ? { toolCallId: row.tool_call_id } : {}),
     ...(typeof row.child_session_id === "string" ? { childSessionId: row.child_session_id } : {}),
+    ...(typeof row.campaign_run_id === "string" ? { campaignRunId: row.campaign_run_id } : {}),
+    ...(typeof row.campaign_claim_id === "string" ? { campaignClaimId: row.campaign_claim_id } : {}),
     ...(typeof row.title === "string" ? { title: row.title } : {}),
     ...(typeof row.lane === "string" ? { lane: row.lane } : {}),
     ...(row.agent_mode === "attached" || row.agent_mode === "detached" ? { agentMode: row.agent_mode } : {}),
@@ -2720,6 +3141,7 @@ function sessionFromRow(row: Row): Session {
   if (typeof row.title === "string") session.title = row.title;
   if (typeof row.parent_id === "string") session.parentId = row.parent_id;
   if (typeof row.campaign_id === "string") session.campaignId = row.campaign_id;
+  if (typeof row.campaign_run_id === "string") session.campaignRunId = row.campaign_run_id;
   if (typeof row.provider === "string") session.provider = row.provider;
   if (typeof row.model === "string") session.model = row.model;
   if (typeof row.email_primary_id === "string") session.emailPrimaryId = row.email_primary_id;
@@ -2742,6 +3164,103 @@ function campaignFromRow(row: Row): Campaign {
     updatedAt: String(row.updated_at)
   };
   return campaign;
+}
+
+function campaignRunFromRow(row: Row): CampaignRun {
+  return {
+    id: String(row.id),
+    campaignId: String(row.campaign_id),
+    rootSessionId: String(row.root_session_id),
+    workspace: String(row.workspace),
+    objective: String(row.objective),
+    status: row.status as CampaignRun["status"],
+    ...(row.current_wave_id ? { currentWaveId: String(row.current_wave_id) } : {}),
+    ...(row.blocker ? { blocker: String(row.blocker) } : {}),
+    ...(row.last_error ? { lastError: String(row.last_error) } : {}),
+    metadata: parseJsonRecord(row.metadata_json),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    ...(row.started_at ? { startedAt: String(row.started_at) } : {}),
+    ...(row.paused_at ? { pausedAt: String(row.paused_at) } : {}),
+    ...(row.completed_at ? { completedAt: String(row.completed_at) } : {})
+  };
+}
+
+function campaignRequirementFromRow(row: Row): CampaignRequirement {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    key: String(row.key),
+    description: String(row.description),
+    status: row.status as CampaignRequirement["status"],
+    evidenceIds: parseJsonArray(row.evidence_ids_json),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
+  };
+}
+
+function campaignWaveFromRow(row: Row): CampaignWave {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    sequence: Number(row.sequence),
+    status: row.status as CampaignWave["status"],
+    objective: String(row.objective),
+    ...(row.progress_summary ? { progressSummary: String(row.progress_summary) } : {}),
+    ...(row.blocker ? { blocker: String(row.blocker) } : {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    ...(row.started_at ? { startedAt: String(row.started_at) } : {}),
+    ...(row.finished_at ? { finishedAt: String(row.finished_at) } : {})
+  };
+}
+
+function campaignClaimFromRow(row: Row): CampaignClaim {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    waveId: String(row.wave_id),
+    claimKey: String(row.claim_key),
+    title: String(row.title),
+    ...(row.session_id ? { sessionId: String(row.session_id) } : {}),
+    status: row.status as CampaignClaim["status"],
+    ...(row.lease_owner ? { leaseOwner: String(row.lease_owner) } : {}),
+    ...(row.lease_expires_at ? { leaseExpiresAt: String(row.lease_expires_at) } : {}),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
+  };
+}
+
+function campaignProgressFromRow(row: Row): CampaignProgress {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    ...(row.wave_id ? { waveId: String(row.wave_id) } : {}),
+    kind: row.kind as CampaignProgress["kind"],
+    fingerprint: String(row.fingerprint),
+    summary: String(row.summary),
+    evidenceCount: Number(row.evidence_count),
+    findingCount: Number(row.finding_count),
+    createdAt: String(row.created_at)
+  };
+}
+
+function parseJsonArray(value: unknown): string[] {
+  try {
+    const parsed = JSON.parse(String(value ?? "[]"));
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(String(value ?? "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
 }
 
 function campaignAssetFromRow(row: Row): CampaignAsset {
@@ -2796,6 +3315,7 @@ function testAttemptFromRow(row: Row): TestAttempt {
   const attempt: TestAttempt = {
     id: String(row.id),
     campaignId: String(row.campaign_id),
+    ...(typeof row.run_id === "string" ? { runId: row.run_id } : {}),
     sessionId: String(row.session_id),
     title: String(row.title),
     target: String(row.target),
@@ -2820,6 +3340,8 @@ function findingFromRow(row: Row): Finding {
     sessionId: String(row.session_id),
     title: String(row.title),
     severity: row.severity as Finding["severity"],
+    ...(typeof row.cvss_vector === "string" ? { cvssVector: row.cvss_vector } : {}),
+    ...(typeof row.cvss_score === "number" && Number.isFinite(row.cvss_score) ? { cvssScore: row.cvss_score } : {}),
     target: String(row.target),
     evidenceIds: JSON.parse(String(row.evidence_ids_json)) as string[],
     impact: String(row.impact),

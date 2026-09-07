@@ -24,7 +24,19 @@ export function defineDefaultCommands(openers: CommandOpeners = {}): Command[] {
     opener("overlay.palette", "open command palette", "search every action by name", "ctrl+p", openers.palette),
     opener("overlay.sessions", "switch session", "pick from recent, running, or archived sessions", undefined, openers.sessions),
     opener("overlay.evidence", "browse evidence", "search captured evidence", undefined, openers.evidence),
-    opener("overlay.findings", "browse findings", "review security findings", undefined, openers.findings),
+    {
+      name: "overlay.findings",
+      title: "show findings tab",
+      desc: "review durable security findings with markdown detail",
+      category: "runtime",
+      slashName: "findings",
+      slashBehavior: "local",
+      run: ({ tui }) => {
+        tui.actions.mainTabSet("findings");
+        void tui.refreshFindings();
+        openers.findings?.();
+      }
+    },
     opener("overlay.memory", "browse memory", "credentials, services, endpoints, and hypotheses", undefined, openers.memory),
     opener("overlay.model", "switch model", "change provider or model", undefined, openers.model),
     opener("overlay.report", "preview report", "render and save the current security report", undefined, openers.report),
@@ -124,6 +136,7 @@ export function defineDefaultCommands(openers: CommandOpeners = {}): Command[] {
     slashLocal("model", "switch model", "choose a model or add a provider", () => openers.model?.(), "visible", ["models"]),
     slashLocal("mcp", "mcp servers", "show configured mcp server status", () => openers.mcp?.()),
     slashLocal("email", "email inboxes", "choose primary or secondary email and add imap accounts", () => openers.email?.()),
+    slashPrompt("campaign", "campaign control", "start, pause, resume, inspect, or stop a durable campaign"),
     slashLocal("exit", "exit", "exit farai", ({ exit }) => { void exit(); }),
     slashLocal("quit", "quit", "exit farai", ({ exit }) => { void exit(); }, "hidden")
   ];

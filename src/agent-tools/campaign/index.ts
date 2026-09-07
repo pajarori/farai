@@ -7,5 +7,7 @@ import { campaignVerifyTool } from "./verify";
 import { campaignNextActionTool } from "./next-action";
 import { campaignDispatchTool } from "./dispatch";
 import { campaignTestAttemptTool } from "./test-attempt";
+import { campaignCheckpointTool } from "./checkpoint";
+import { campaignRequirementTool } from "./requirement";
 
-export const campaignTools = [campaignCreateTool, campaignAssetTool, campaignObserveTool, campaignHypothesisTool, campaignSearchTool, campaignVerifyTool, campaignNextActionTool, campaignDispatchTool, campaignTestAttemptTool];
+export const campaignTools = [campaignCreateTool, campaignAssetTool, campaignObserveTool, campaignHypothesisTool, campaignSearchTool, campaignVerifyTool, campaignNextActionTool, campaignDispatchTool, campaignTestAttemptTool, campaignRequirementTool, campaignCheckpointTool];

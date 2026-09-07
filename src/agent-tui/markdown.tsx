@@ -11,7 +11,8 @@ import {
 } from "@opentui/core";
 import { createEffect, onCleanup, onMount, type JSX } from "solid-js";
 import { highlightCodeFallback } from "./code-highlighter";
-import { normalizeTaskListMarkers, styleMermaidContent, styleTaskGlyphs, styleUnorderedListGlyphs } from "./markdown-content";
+import { TextRenderable } from "@opentui/core";
+import { blankUnorderedListMarker, normalizeTaskListMarkers, styleMermaidContent, styleTaskGlyphs, styleUnorderedListGlyphs, styleUnorderedListMarker } from "./markdown-content";
 import { decorateDiffBackground, styleDiffContent } from "./markdown-diff";
 import { decorateMarkdownLayout } from "./markdown-layout";
 import { markdownStrikethroughSentinel, markdownSyntax } from "./syntax";
@@ -79,6 +80,24 @@ function enhanceMarkdownChunks(renderable: CodeRenderable): void {
   };
 }
 
+function markerIsTaskItem(marker: BaseRenderable): boolean {
+  const content = marker.parent?.getChildren()[1];
+  const child = content?.getChildren()[0];
+  const text = child instanceof CodeRenderable ? child.content : "";
+  const trimmed = text.trimStart();
+  return trimmed.startsWith("✓") || trimmed.startsWith("□");
+}
+
+function listMarkerDepth(renderable: BaseRenderable): number {
+  let depth = 0;
+  let current: BaseRenderable | null | undefined = renderable.parent;
+  while (current) {
+    if (typeof current.id === "string" && current.id.endsWith("-content")) depth += 1;
+    current = current.parent;
+  }
+  return depth;
+}
+
 function enableTextFallback(renderable: BaseRenderable | null | undefined): void {
   if (renderable instanceof CodeRenderable) {
     enhanceMarkdownChunks(renderable);
@@ -92,6 +111,11 @@ function enableTextFallback(renderable: BaseRenderable | null | undefined): void
     return;
   }
   if (!renderable) return;
+  if (renderable instanceof TextRenderable && typeof renderable.id === "string" && renderable.id.endsWith("-marker")) {
+    if (markerIsTaskItem(renderable)) blankUnorderedListMarker(renderable);
+    else styleUnorderedListMarker(renderable, listMarkerDepth(renderable));
+    return;
+  }
   if (decorateMarkdownLayout(renderable)) return;
   for (const child of renderable.getChildren()) enableTextFallback(child);
 }
@@ -127,7 +151,7 @@ export function MarkdownView(props: MarkdownViewProps): JSX.Element {
       }}
       {...(props.id ? { id: props.id } : {})}
       width="100%"
-      internalBlockMode="coalesced"
+      internalBlockMode="top-level"
       conceal={true}
       concealCode={false}
       syntaxStyle={markdownSyntax(props.fg ?? COLOR.markdownText)}

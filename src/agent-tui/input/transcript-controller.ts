@@ -3,6 +3,7 @@ import { projectMessagesToRows, type TimelineRow } from "../renderers";
 import type { TuiRuntimePort } from "../runtime-port";
 import type { SessionOwner } from "./center-surface-controller";
 import { createControllerOperations } from "./controller-operation";
+import type { MainTab } from "../store";
 
 type TranscriptControllerInput = {
   tui: TuiStoreValue;
@@ -38,7 +39,7 @@ export function createTranscriptController(input: TranscriptControllerInput) {
     }
   }
 
-  function ownsRequest(operation: number, owner: SessionOwner, sourceTab: "chat" | "proxy"): boolean {
+  function ownsRequest(operation: number, owner: SessionOwner, sourceTab: MainTab): boolean {
     return operations.owns(operation)
       && input.owns(owner)
       && tui.store.ui.activeMainTab === sourceTab

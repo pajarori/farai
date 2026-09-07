@@ -1,7 +1,7 @@
 import type { EvidenceLevel, TestAttempt, TestAttemptStatus, ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { campaignIdFor, requireCampaignStore } from "./shared";
+import { assertCampaignEvidence, campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 const STATUSES: TestAttemptStatus[] = ["planned", "running", "passed", "failed", "inconclusive", "cancelled"];
 const LEVELS: EvidenceLevel[] = ["signal", "differential_observed", "reproduced", "impact_demonstrated", "independently_verified"];
@@ -41,6 +41,7 @@ export const campaignTestAttemptTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const campaignId = campaignIdFor(context, args);
+    loadCampaign(context, campaignId);
     const target = asString(args.target, "target");
 
     const status = (typeof args.status === "string" ? args.status : "planned") as TestAttemptStatus;
@@ -48,11 +49,7 @@ export const campaignTestAttemptTool: ToolDefinition = {
     const evidenceLevel = (typeof args.evidenceLevel === "string" ? args.evidenceLevel : "signal") as EvidenceLevel;
     if (!LEVELS.includes(evidenceLevel)) throw new Error(`unsupported evidence level: ${evidenceLevel}`);
     const evidenceIds = stringArray(args.evidenceIds);
-    if (context.store.listEvidence && evidenceIds.length > 0) {
-      const known = new Set(context.store.listEvidence(context.session.id).map((item) => item.id));
-      const unknown = evidenceIds.filter((item) => !known.has(item));
-      if (unknown.length > 0) throw new Error(`evidence not found in session: ${unknown.join(", ")}`);
-    }
+    assertCampaignEvidence(context, campaignId, evidenceIds);
 
     if (typeof args.attemptId === "string" && args.attemptId.trim()) {
       const load = requireCampaignStore(context, "loadTestAttempt");
@@ -73,9 +70,12 @@ export const campaignTestAttemptTool: ToolDefinition = {
       if (!hypothesis) throw new Error("hypothesis does not belong to this campaign");
     }
     const create = requireCampaignStore(context, "createTestAttempt");
+    const activeRun = context.campaignControl?.active();
+    if (activeRun && activeRun.campaignId !== campaignId) throw new Error("test attempt campaign does not match the active campaign run");
     const attempt = create({
       campaignId,
       sessionId: context.session.id,
+      ...(activeRun ? { runId: activeRun.id } : {}),
       ...(typeof args.hypothesisId === "string" ? { hypothesisId: args.hypothesisId } : {}),
       title: asString(args.title, "title"),
       target,

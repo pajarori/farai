@@ -8,13 +8,14 @@ import { loadModelProfiles, resolveProfile } from "./model-profiles";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import type { PlannerContextBlock } from "./context-builder";
 import { buildSystemPromptBlocks } from "./provider/system-prompt";
-import { assembleStream, ProviderStreamError, type AssembledMessage, type ChatProvider, type ChatRequest, type ProviderMessage, type ProviderStreamEvent, type ProviderToolDef } from "./provider/protocol";
+import { assembleStream, isProviderIncompleteFinishReason, ProviderStreamError, type AssembledMessage, type ChatProvider, type ChatRequest, type ProviderMessage, type ProviderStreamEvent, type ProviderToolDef } from "./provider/protocol";
 import { providerResponseLimits } from "./provider/stream-bounds";
 import { toolAttachmentBytes } from "../tool-attachment";
 import { OpenAiChatProvider, parseXmlToolCalls } from "./provider/openai-chat";
 import { AnthropicMessagesProvider } from "./provider/anthropic-messages";
 import { createChatProvider, resolveProtocol } from "./provider/registry";
 import { computeHeuristicActions } from "./provider/heuristic";
+import { isInternalMetaReasoning, isReasoningDuplicate, mergeReasoningText, reasoningTextEqual, separateEmbeddedReasoning, stripReasoningEcho } from "./reasoning-summary";
 
 export { createChatProvider } from "./provider/registry";
 
@@ -25,6 +26,42 @@ export type PlannerAction =
   | { kind: "reasoning"; text: string }
   | { kind: "tool"; tool: string; args: unknown; rationale: string; toolCallId?: string }
   | { kind: "tool_parse_error"; tool: string; toolCallId: string; rawArguments: string; error: string };
+
+export function sanitizePlannerActions(actions: PlannerAction[]): PlannerAction[] {
+  const normalized: PlannerAction[] = [];
+  for (const action of actions) {
+    if (action.kind === "reasoning") {
+      const separated = separateEmbeddedReasoning(action.text);
+      const text = mergeReasoningText(separated.reasoningText) || separated.visibleText.trim();
+      if (text) normalized.push({ ...action, text });
+      continue;
+    }
+    if (action.kind !== "respond") {
+      normalized.push(action);
+      continue;
+    }
+    const separated = separateEmbeddedReasoning(action.text);
+    if (separated.reasoningText && !normalized.some((item) => item.kind === "reasoning" && reasoningTextEqual(item.text, separated.reasoningText!))) {
+      normalized.push({ kind: "reasoning", text: separated.reasoningText });
+    }
+    const visibleText = separated.visibleText.trim();
+    if (visibleText && isInternalMetaReasoning(visibleText)) {
+      normalized.push({ kind: "reasoning", text: visibleText });
+      continue;
+    }
+    if (visibleText) {
+      normalized.push({
+        ...action,
+        text: separated.visibleText,
+        ...(separated.pendingTag ? { truncated: true } : {})
+      });
+    }
+  }
+  const reasoning = mergeReasoningText(...normalized
+    .filter((action): action is Extract<PlannerAction, { kind: "reasoning" }> => action.kind === "reasoning")
+    .map((action) => action.text));
+  return normalized.filter((action) => action.kind !== "respond" || !isReasoningDuplicate(action.text, reasoning));
+}
 
 export type ConversationEntry =
   | { role: "user"; text: string; attachments?: ToolAttachment[] }
@@ -230,12 +267,14 @@ export function promptCacheKey(session: Session): string {
 export function actionsFromMessage(message: AssembledMessage): PlannerAction[] {
   const finishReason = message.finishReason;
   const actions: PlannerAction[] = [];
-  const reasoningText = message.reasoning.trim() ? takeBytes(message.reasoning.trim(), REASONING_MAX_BYTES, "head") : undefined;
+  const separated = separateEmbeddedReasoning(message.content);
+  const combinedReasoning = mergeReasoningText(message.reasoning, separated.reasoningText);
+  const reasoningText = combinedReasoning ? takeBytes(combinedReasoning, REASONING_MAX_BYTES, "head") : undefined;
   if (reasoningText) actions.push({ kind: "reasoning", text: reasoningText });
 
-  const content = message.content;
+  const content = stripReasoningEcho(separated.visibleText, combinedReasoning);
   const respondText = content.includes("<function=") ? parseXmlToolCalls(content).prefix : content.trim();
-  if (respondText) actions.push({ kind: "respond", text: respondText, ...(finishReason === "length" ? { truncated: true } : {}) });
+  if (respondText) actions.push({ kind: "respond", text: respondText, ...(isProviderIncompleteFinishReason(finishReason) ? { truncated: true } : {}) });
 
   for (const call of message.toolCalls) {
     const name = call.name;
@@ -258,15 +297,13 @@ export function actionsFromMessage(message: AssembledMessage): PlannerAction[] {
 
   const hasVisibleAction = actions.some((action) => action.kind !== "reasoning");
   if (!hasVisibleAction) {
-    if (reasoningText) {
-      return [{ kind: "respond", text: reasoningText, recoverable: true, ...(finishReason === "length" ? { truncated: true } : {}) }];
-    }
+    if (reasoningText) return actions;
     throw new Error(
       `Planner returned empty output: no content and no tool_calls (finish_reason=${finishReason ?? "unknown"}). ` +
         `Raw message: ${JSON.stringify(message).slice(0, 1000)}`
     );
   }
-  return actions;
+  return sanitizePlannerActions(actions);
 }
 
 export function createPlannerForSession(session: Session, configWorkspace = session.workspace): PlannerProvider {

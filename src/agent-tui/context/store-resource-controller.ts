@@ -21,6 +21,7 @@ export function proxyRefreshQuery(): ProxyFlowQuery {
 export function createStoreResourceController(input: StoreResourceControllerInput) {
   const { port, store, actions, sessions } = input;
   const proxyRefreshes = new Map<string, Promise<void>>();
+  const findingsRefreshes = new Map<string, { epoch: number; promise: Promise<void> }>();
   const mcpRefreshes = new Map<string, { epoch: number; promise: Promise<void> }>();
   const agentThreadRefreshes = new Map<string, { epoch: number; promise: Promise<void> }>();
   const containerToggles = new Map<string, { epoch: number; promise: Promise<void> }>();
@@ -115,6 +116,33 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     proxyRefreshes.set(key, refresh);
     const cleanup = () => {
       if (proxyRefreshes.get(key) === refresh) proxyRefreshes.delete(key);
+    };
+    void refresh.then(cleanup, cleanup);
+    return refresh;
+  }
+
+  function refreshFindings(): Promise<void> {
+    if (typeof (port as Partial<TuiRuntimePort>).loadFindings !== "function") return Promise.resolve();
+    const owner = sessions.captureOwner();
+    if (!owner) return Promise.resolve();
+    const existing = findingsRefreshes.get(owner.sessionId);
+    if (existing?.epoch === owner.epoch) return existing.promise;
+    actions.findingsLoadingSet(true);
+    const refresh = (async () => {
+      try {
+        const catalog = await port.loadFindings(owner.sessionId);
+        if (!sessions.owns(owner)) return;
+        actions.findingsCatalogSet(catalog.findings, catalog.scopeLabel);
+      } catch (error) {
+        if (!sessions.owns(owner)) return;
+        actions.findingsLoadingSet(false);
+        actions.errorSet(error instanceof Error ? error.message : String(error));
+      }
+    })();
+    const entry = { epoch: owner.epoch, promise: refresh };
+    findingsRefreshes.set(owner.sessionId, entry);
+    const cleanup = () => {
+      if (findingsRefreshes.get(owner.sessionId) === entry) findingsRefreshes.delete(owner.sessionId);
     };
     void refresh.then(cleanup, cleanup);
     return refresh;
@@ -291,6 +319,7 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     mcpOverlayGeneration += 1;
     emailOverlayGeneration += 1;
     proxyRefreshes.clear();
+    findingsRefreshes.clear();
     mcpRefreshes.clear();
     agentThreadRefreshes.clear();
     containerToggles.clear();
@@ -301,6 +330,7 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     refreshContainerStatus,
     refreshServices,
     refreshProxyFlows,
+    refreshFindings,
     refreshAvailableModels,
     openModelsOverlay,
     refreshAgentThreads,

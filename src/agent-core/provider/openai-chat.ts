@@ -135,6 +135,7 @@ export class OpenAiChatProvider implements ChatProvider {
     let suppressText = false;
     let xmlProbe = "";
     let finishReason: string | undefined;
+    let sawDone = false;
     const slots: Array<{ id?: string; name: string; arguments: BoundedTextAccumulator; emitted?: boolean }> = [];
     let activeIndex = -1;
     const capture = createProviderDebugCapture();
@@ -149,7 +150,10 @@ export class OpenAiChatProvider implements ChatProvider {
     try {
       for await (const data of iterateSseData(response, limits, capture)) {
         if (!data) continue;
-        if (data === "[DONE]") break;
+        if (data === "[DONE]") {
+          sawDone = true;
+          break;
+        }
         let chunk: { choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: string | null }>; usage?: OpenAiUsage };
         try { chunk = JSON.parse(data); } catch { throw new Error("provider returned malformed sse json"); }
         if (hasUsage(chunk.usage)) {
@@ -203,7 +207,7 @@ export class OpenAiChatProvider implements ChatProvider {
         yield { type: "tool_call_complete", index: index++, id: "", name: call.name, arguments: JSON.stringify(coerceXmlArgs(call.args)) };
       }
     }
-    yield { type: "message_complete", ...(finishReason ? { finishReason } : {}) };
+    yield { type: "message_complete", finishReason: finishReason ?? (sawDone ? "stop" : "incomplete") };
   }
 }
 

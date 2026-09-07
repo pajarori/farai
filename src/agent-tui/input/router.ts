@@ -1,4 +1,5 @@
 import { slashPopupVisible } from "../slash-autocomplete";
+import type { MainTab } from "../store";
 
 export type OverlayKind =
   | "palette"
@@ -43,7 +44,15 @@ export type RouterAction =
   | { kind: "composer.copyLast" }
   | { kind: "transcript.clear" }
   | { kind: "transcript.rawToggle" }
-  | { kind: "mainTab.set"; tab: "chat" | "proxy" }
+  | { kind: "mainTab.set"; tab: MainTab }
+  | { kind: "findings.move"; delta: number }
+  | { kind: "findings.focus"; focus: "list" | "detail" }
+  | { kind: "findings.filterStart" }
+  | { kind: "findings.filterAppend"; char: string }
+  | { kind: "findings.filterBackspace" }
+  | { kind: "findings.filterCancel" }
+  | { kind: "findings.scroll"; action: "up" | "down" | "pageUp" | "pageDown" | "home" | "end" }
+  | { kind: "findings.refresh" }
   | { kind: "proxy.filterSet"; filter: "all" | "http" | "websocket" }
   | { kind: "proxy.filterCycle"; delta: number }
   | { kind: "proxy.move"; delta: number }
@@ -148,7 +157,8 @@ export type RouterContext = {
   slashOptionCount?: number;
   historySearchActive?: boolean;
   queuedCount?: number;
-  activeMainTab?: "chat" | "proxy";
+  activeMainTab?: MainTab;
+  findings?: { focus: "list" | "detail"; filtering: boolean };
   requestUserInput?: {
     textMode: boolean;
     canExitTextMode: boolean;
@@ -245,7 +255,7 @@ function consumed(...actions: RouterAction[]): RouteResult {
 }
 
 export function slashActive(ctx: RouterContext): boolean {
-  if (ctx.activeMainTab === "proxy") return false;
+  if (ctx.activeMainTab && ctx.activeMainTab !== "chat") return false;
   return slashPopupVisible(
     ctx.composerText,
     ctx.slashSuppressed,
@@ -271,7 +281,36 @@ export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
     if (slash) return slash;
 
   }
+  if (ctx.activeMainTab === "findings") return routeFindings(key, ctx);
   return routeBase(key, ctx);
+}
+
+function routeFindings(key: KeyToken, ctx: RouterContext): RouteResult {
+  if (key.ctrl || key.meta) return routeBase(key, ctx);
+  const findings = ctx.findings;
+  if (findings?.filtering) {
+    if (key.name === "escape") return consumed({ kind: "findings.filterCancel" });
+    if (key.name === "backspace") return consumed({ kind: "findings.filterBackspace" });
+    if (key.char && !key.ctrl && !key.meta) return consumed({ kind: "findings.filterAppend", char: key.char });
+    return consumed();
+  }
+  if (key.name === "r") return consumed({ kind: "findings.refresh" });
+  if (key.name === "tab") return consumed({ kind: "findings.focus", focus: findings?.focus === "detail" ? "list" : "detail" });
+  if (key.name === "escape") return consumed({ kind: "findings.focus", focus: "list" });
+  if (key.name === "slash" || key.char === "/") return consumed({ kind: "findings.filterStart" });
+  if (findings?.focus === "detail") {
+    if (key.name === "up" || key.name === "k") return consumed({ kind: "findings.scroll", action: "up" });
+    if (key.name === "down" || key.name === "j") return consumed({ kind: "findings.scroll", action: "down" });
+    if (key.name === "pageup") return consumed({ kind: "findings.scroll", action: "pageUp" });
+    if (key.name === "pagedown") return consumed({ kind: "findings.scroll", action: "pageDown" });
+    if (key.name === "home") return consumed({ kind: "findings.scroll", action: "home" });
+    if (key.name === "end") return consumed({ kind: "findings.scroll", action: "end" });
+    return consumed();
+  }
+  if (key.name === "up" || key.name === "k") return consumed({ kind: "findings.move", delta: -1 });
+  if (key.name === "down" || key.name === "j") return consumed({ kind: "findings.move", delta: 1 });
+  if (key.name === "return") return consumed({ kind: "findings.focus", focus: "detail" });
+  return consumed();
 }
 
 function routeEmailAccountRemoval(key: KeyToken, state: NonNullable<RouterContext["emailAccountRemoval"]>): RouteResult {
@@ -529,11 +568,13 @@ function routeBase(key: KeyToken, ctx: RouterContext): RouteResult {
   if (key.meta) {
     if (key.name === "1") return consumed({ kind: "mainTab.set", tab: "chat" });
     if (key.name === "2") return consumed({ kind: "mainTab.set", tab: "proxy" });
+    if (key.name === "3") return consumed({ kind: "mainTab.set", tab: "findings" });
   }
   if (key.ctrl) {
     switch (key.name) {
       case "1": return consumed({ kind: "mainTab.set", tab: "chat" });
       case "2": return consumed({ kind: "mainTab.set", tab: "proxy" });
+      case "3": return consumed({ kind: "mainTab.set", tab: "findings" });
       case "c": return consumed({ kind: "composer.clearOrExit" });
       case "p": return consumed({ kind: "overlay.open", overlay: "palette" });
       case "r": return consumed({ kind: "composer.historySearchStart" });

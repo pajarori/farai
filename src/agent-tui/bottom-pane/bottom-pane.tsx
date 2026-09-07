@@ -173,6 +173,9 @@ export function BottomPane(): JSX.Element {
         <Match when={surface() === "proxy_tab"}>
           <ProxyTabFooter />
         </Match>
+        <Match when={surface() === "findings_tab"}>
+          <FindingsTabFooter />
+        </Match>
       </Switch>
       <Composer visible={composerSurfaceVisible()} active={composerSurfaceVisible()} />
       <Show when={!footerHidden()}>
@@ -204,6 +207,20 @@ function ProxyTabFooter(): JSX.Element {
   );
 }
 
+function FindingsTabFooter(): JSX.Element {
+  const dims = useTuiDimensions();
+  const hint = dims().width >= 88
+    ? "↑↓ select · tab detail · / filter · r refresh"
+    : dims().width >= 56
+      ? "↑↓ select · tab detail · / filter"
+      : "↑↓ select · tab detail";
+  return (
+    <box style={{ height: 1, flexDirection: "row", justifyContent: "space-between" }}>
+      <text fg={COLOR.dim}>{hint}</text>
+    </box>
+  );
+}
+
 function CenterSurfaceFooter(props: { frame: CenterSurfaceFrame }): JSX.Element {
   const tui = useTuiStore();
   const dims = useTuiDimensions();
@@ -219,12 +236,12 @@ function CenterSurfaceFooter(props: { frame: CenterSurfaceFrame }): JSX.Element 
 
 export function proxyTabFooterLayout(width: number, filter: string, status?: string, state?: string): { left: string; right: string } {
   const hint = width >= 88
-    ? "↑↓ flow · tab detail · p/n ws msg · ←→ filter · a/h/w tabs · alt+1 chat"
+    ? "↑↓ flow · tab detail · p/n ws msg · ←→ filter"
     : width >= 56
-      ? "alt+1 chat · ↑↓ flow · tab detail · ←→ filter"
+      ? "↑↓ flow · tab detail · ←→ filter"
       : width >= 32
-        ? "alt+1 chat · ↑↓ flow"
-        : "alt+1 chat";
+        ? "↑↓ flow · tab detail"
+        : "↑↓ flow";
   return fitFooterLine(hint, [
     ...(status ? [{ id: "status", kind: "message" as const, text: status }] : []),
     { id: "proxy", kind: "message", text: `proxy · ${state ? `${state} · ` : ""}${filter}` }

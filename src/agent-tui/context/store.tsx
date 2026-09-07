@@ -38,6 +38,7 @@ export type TuiStoreValue = {
   refreshContainerStatus: () => Promise<void>;
   refreshServices: () => Promise<void>;
   refreshProxyFlows: () => Promise<void>;
+  refreshFindings: () => Promise<void>;
   refreshAvailableModels: () => Promise<void>;
   openModelsOverlay: () => Promise<void>;
   refreshAgentThreads: () => Promise<void>;
@@ -74,7 +75,10 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     isDisposed: () => disposed,
     ...(props.onActiveSessionChange ? { onActiveSessionChange: props.onActiveSessionChange } : {}),
     onSessionActivated: (sessionId) => prompts.onSessionActivated(sessionId),
-    onSessionReady: (sessionId) => { void resources.refreshSessionMcp(sessionId); }
+    onSessionReady: (sessionId) => {
+      void resources.refreshSessionMcp(sessionId);
+      void resources.refreshFindings();
+    }
   });
   resources = createStoreResourceController({
     port,
@@ -138,6 +142,21 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
   });
 
   createEffect(() => {
+    if (store.ui.activeMainTab !== "findings" || store.ui.centerSurfaceStack.length > 0) return;
+    let disposed = false;
+    const tick = async () => {
+      if (disposed) return;
+      await resources.refreshFindings();
+    };
+    void tick();
+    const timer = setInterval(() => { void tick(); }, 1_000);
+    onCleanup(() => {
+      disposed = true;
+      clearInterval(timer);
+    });
+  });
+
+  createEffect(() => {
     if (store.ui.activeMainTab !== "proxy" || store.ui.centerSurfaceStack.length > 0) return;
     let disposed = false;
     const tick = async () => {
@@ -188,6 +207,7 @@ export function TuiStoreProvider(props: TuiStoreProviderProps): JSX.Element {
     refreshContainerStatus: resources.refreshContainerStatus,
     refreshServices: resources.refreshServices,
     refreshProxyFlows: resources.refreshProxyFlows,
+    refreshFindings: resources.refreshFindings,
     refreshAvailableModels: resources.refreshAvailableModels,
     openModelsOverlay: resources.openModelsOverlay,
     refreshAgentThreads: resources.refreshAgentThreads,

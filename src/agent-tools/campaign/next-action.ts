@@ -1,22 +1,11 @@
 import type { CampaignNextAction, ToolDefinition } from "../../types";
 import { assertObject } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { campaignIdFor, requireCampaignStore } from "./shared";
-
-function laneForCategory(category: string): CampaignNextAction["lane"] {
-  const normalized = category.toLowerCase();
-  if (/(auth|access|idor|permission)/.test(normalized)) return "authz";
-  if (/(inject|xss|sqli|ssrf|command|template)/.test(normalized)) return "injection";
-  if (/(logic|workflow|race|business)/.test(normalized)) return "business_logic";
-  if (/(client|javascript|dom|mobile)/.test(normalized)) return "client_side";
-  if (/(cloud|config|secret|storage)/.test(normalized)) return "cloud_config";
-  if (/(verify|reproduce)/.test(normalized)) return "verification";
-  return "web_api";
-}
+import { campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 export const campaignNextActionTool: ToolDefinition = {
   name: "campaign_next_action",
-  description: "Select one recommended next campaign lane and bounded task from current assets, open hypotheses, evidence gaps, prior attempts, confidence, novelty, and estimated cost. This is a deterministic prioritization aid; it does not execute the selected work.",
+  description: "Select one recommended next campaign action from durable state, evidence gaps, prior attempts, confidence, novelty, and estimated cost. This is a bounded prioritization signal, not a workflow prescription; the model decides whether and how to execute it.",
   inputSchema: { type: "object", required: [], properties: { campaignId: { type: "string" } } },
   mutates: false,
   timeoutMs: 5_000,
@@ -26,6 +15,7 @@ export const campaignNextActionTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const campaignId = campaignIdFor(context, args);
+    loadCampaign(context, campaignId);
     const listAssets = requireCampaignStore(context, "listAssets");
     const listHypotheses = requireCampaignStore(context, "listHypotheses");
     const assets = listAssets(campaignId);
@@ -43,7 +33,7 @@ export const campaignNextActionTool: ToolDefinition = {
           return { hypothesis, priority, attempts, failedAttempts };
         })
         .sort((a, b) => b.priority - a.priority)[0]!;
-      const lane = laneForCategory(selected.hypothesis.category);
+      const lane = selected.hypothesis.category.trim() || "investigation";
       action = {
         lane,
         title: `Test hypothesis: ${selected.hypothesis.title}`,

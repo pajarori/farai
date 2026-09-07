@@ -19,6 +19,8 @@ export type AgentJobStart = {
   turnId?: string;
   toolCallId?: string;
   childSessionId: string;
+  campaignRunId?: string;
+  campaignClaimId?: string;
   title: string;
   lane?: string;
   mode: "attached" | "detached";
@@ -70,6 +72,8 @@ export class JobManager {
       ...(input.turnId ? { turnId: input.turnId } : {}),
       ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
       childSessionId: input.childSessionId,
+      ...(input.campaignRunId ? { campaignRunId: input.campaignRunId } : {}),
+      ...(input.campaignClaimId ? { campaignClaimId: input.campaignClaimId } : {}),
       title: input.title,
       ...(input.lane ? { lane: input.lane } : {}),
       agentMode: input.mode,

@@ -1,7 +1,7 @@
 import type { ToolDefinition, CampaignHypothesis } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
+import { assertCampaignAsset, assertCampaignEvidence, campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 export const campaignHypothesisTool: ToolDefinition = {
   name: "campaign_hypothesis",
@@ -16,15 +16,13 @@ export const campaignHypothesisTool: ToolDefinition = {
     assertObject(args, "args");
     const campaignId = campaignIdFor(context, args);
     loadCampaign(context, campaignId);
+    const assetId = typeof args.assetId === "string" && args.assetId.trim() ? args.assetId.trim() : undefined;
+    assertCampaignAsset(context, campaignId, assetId);
     const evidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String) : [];
-    if (context.store.listEvidence && evidenceIds.length > 0) {
-      const known = new Set(context.store.listEvidence(context.session.id).map((item) => item.id));
-      const unknown = evidenceIds.filter((item) => !known.has(item));
-      if (unknown.length > 0) throw new Error(`evidence not found in session: ${unknown.join(", ")}`);
-    }
+    assertCampaignEvidence(context, campaignId, evidenceIds);
     const hypothesis = requireCampaignStore(context, "upsertHypothesis")({
       campaignId,
-      ...(typeof args.assetId === "string" ? { assetId: args.assetId } : {}),
+      ...(assetId ? { assetId } : {}),
       title: asString(args.title, "title"),
       category: asString(args.category, "category"),
       status: typeof args.status === "string" ? args.status as CampaignHypothesis["status"] : "open",

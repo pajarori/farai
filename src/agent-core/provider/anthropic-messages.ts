@@ -90,6 +90,7 @@ export class AnthropicMessagesProvider implements ChatProvider {
 
   private async *consume(response: Response, requestBody: unknown, limits: ProviderResponseLimits): AsyncIterable<ProviderStreamEvent> {
     let finishReason: string | undefined;
+    let sawMessageStop = false;
     const blocks = new Map<number, { type: string; id?: string; name?: string; arguments: BoundedTextAccumulator }>();
     const content = new BoundedTextAccumulator(limits.contentBytes, "provider content", limits.sseEvents);
     const reasoning = new BoundedTextAccumulator(limits.reasoningBytes, "provider reasoning", limits.sseEvents);
@@ -145,6 +146,9 @@ export class AnthropicMessagesProvider implements ChatProvider {
           if (hasAnthropicUsage(event.usage)) yield anthropicUsageEvent(event.usage);
           break;
         }
+        case "message_stop":
+          sawMessageStop = true;
+          break;
         case "error":
           yield { type: "error", message: event.error?.message ?? "anthropic stream error" };
           break;
@@ -161,7 +165,7 @@ export class AnthropicMessagesProvider implements ChatProvider {
     } finally {
       logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText: capture?.text() ?? "" });
     }
-    yield { type: "message_complete", ...(finishReason ? { finishReason } : {}) };
+    yield { type: "message_complete", finishReason: finishReason ?? (sawMessageStop ? "stop" : "incomplete") };
   }
 }
 

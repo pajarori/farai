@@ -10,6 +10,14 @@ export type ProviderStreamEvent =
   | { type: "usage"; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheWriteInputTokens?: number }
   | { type: "error"; message: string; status?: number; retryAfterMs?: number };
 
+export function isProviderIncompleteFinishReason(reason: string | undefined): boolean {
+  const normalized = reason?.trim().toLowerCase();
+  return normalized === "length"
+    || normalized === "max_tokens"
+    || normalized === "max_output_tokens"
+    || normalized === "incomplete";
+}
+
 export type ProviderMessage =
   | { role: "user"; text: string; attachments?: ToolAttachment[] }
   | { role: "context"; text: string }

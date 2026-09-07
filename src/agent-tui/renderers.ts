@@ -10,7 +10,7 @@ import type {
 } from "../types";
 import type { ToolResult } from "../types";
 import { parseReasoning } from "./reasoning";
-import { isInternalMetaReasoning, normalizeReasoningSummary } from "../agent-core/reasoning-summary";
+import { isInternalMetaReasoning, isReasoningDuplicate, normalizeReasoningSummary, separateEmbeddedReasoning, stripReasoningEcho } from "../agent-core/reasoning-summary";
 import {
   summarizeToolInput,
   TOOL_PAYLOAD_KEYS
@@ -22,6 +22,7 @@ import {
   presentToolActivity,
   type ToolActivityPresentation
 } from "./tool-activity";
+import { takeBytes } from "../agent-tools/shared/output-bound";
 
 export const MAX_PAYLOAD_BYTES = 200_000;
 const HEAD_BUDGET = 4_096;
@@ -33,11 +34,27 @@ export function truncateLine(line: string, maxWidth: number): string {
 }
 
 export function truncatePayload(text: string, maxBytes = MAX_PAYLOAD_BYTES): string {
-  if (text.length <= maxBytes) return text;
-  const head = text.slice(0, HEAD_BUDGET);
-  const tail = text.slice(text.length - TAIL_BUDGET);
-  const dropped = text.length - HEAD_BUDGET - TAIL_BUDGET;
-  return `${head}\n… [truncated ${dropped} bytes] …\n${tail}`;
+  const totalBytes = Buffer.byteLength(text, "utf8");
+  if (totalBytes <= maxBytes) return text;
+  if (maxBytes <= 0) return "";
+  const markerReserve = 64;
+  if (maxBytes <= markerReserve) {
+    const marker = "…";
+    return `${takeBytes(text, Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8")), "head")}${marker}`;
+  }
+  let headLimit = Math.min(HEAD_BUDGET, Math.floor(Math.max(0, maxBytes - markerReserve) * 0.75));
+  let tailLimit = Math.min(TAIL_BUDGET, Math.max(0, maxBytes - markerReserve - headLimit));
+  let result = "";
+  for (;;) {
+    const head = takeBytes(text, headLimit, "head");
+    const tail = takeBytes(text, tailLimit, "tail");
+    const retainedBytes = Buffer.byteLength(head, "utf8") + Buffer.byteLength(tail, "utf8");
+    const dropped = Math.max(0, totalBytes - retainedBytes);
+    result = `${head}\n… [truncated ${dropped} bytes] …\n${tail}`;
+    if (Buffer.byteLength(result, "utf8") <= maxBytes || (headLimit === 0 && tailLimit === 0)) return result;
+    if (tailLimit > 0) tailLimit -= 1;
+    else headLimit -= 1;
+  }
 }
 
 export function formatPayload(payload: unknown, maxBytes = MAX_PAYLOAD_BYTES): string {
@@ -269,11 +286,18 @@ export function projectMessagesToRows(
     const assistantTexts = assistantTextsByTurn.get(message.turnId) ?? new Set<string>();
     assistantTextsByTurn.set(message.turnId, assistantTexts);
     const suppressCompactionLeak = message.role === "assistant" && message.parts.some((part) => (
-      part.type === "text" && looksLikeInternalCompactionLeak(safeText(part.payload, width * 20))
+      part.type === "text" && looksLikeInternalCompactionLeak(fullText(part.payload))
     ));
+    const reasoningTexts = message.role === "assistant"
+      ? new Set(message.parts
+        .filter((part) => part.type === "reasoning_summary")
+        .map((part) => normalizeReasoningSummary(extractField(part.payload, "rationale") ?? extractField(part.payload, "text") ?? fullText(part.payload)))
+        .filter(Boolean))
+      : undefined;
     for (const part of message.parts) {
       if (suppressCompactionLeak && (part.type === "text" || part.type === "reasoning_summary")) continue;
-      const row = partToRow(message, part, width, runningTurnId === message.turnId, toolRows, latestToolRecords, reasoningRows, Boolean(options.fullToolResults));
+      if (message.role === "assistant" && part.type === "text" && reasoningTexts && [...reasoningTexts].some((reasoning) => isReasoningDuplicate(fullText(part.payload), reasoning))) continue;
+      const row = partToRow(message, part, width, runningTurnId === message.turnId, toolRows, latestToolRecords, reasoningRows, Boolean(options.fullToolResults), reasoningTexts);
       if (!row) continue;
       if (row.kind === "assistant" && message.role === "assistant") {
         const text = row.text.trim();
@@ -359,7 +383,7 @@ function looksLikeInternalCompactionLeak(text: string): boolean {
 function stopStaleStreaming(messageRows: TimelineRow[], message: MessageWithParts, reasoning: Extract<TimelineRow, { kind: "thinking" }> | undefined): void {
   const lastMeaningful = [...message.parts].reverse().find((part) => part.type !== "planner_attempt");
   if (!lastMeaningful) return;
-  const lastText = lastMeaningful.type === "text" ? safeText(lastMeaningful.payload, 100_000).trim() : undefined;
+  const lastText = lastMeaningful.type === "text" ? fullText(lastMeaningful.payload).trim() : undefined;
   if (reasoning && lastMeaningful.type !== "reasoning_summary") reasoning.streaming = false;
   for (const row of messageRows) {
     if (row.kind === "thinking") continue;
@@ -378,15 +402,21 @@ function partToRow(
   toolRows: Map<string, Extract<TimelineRow, { kind: "tool" }>>,
   latestToolRecords: Map<string, ToolCallRecord>,
   reasoningRows: Map<string, Extract<TimelineRow, { kind: "thinking" }>>,
-  includeFullToolResults: boolean
+  includeFullToolResults: boolean,
+  reasoningTexts?: Set<string>
 ): TimelineRow | null {
   switch (part.type) {
     case "text": {
       if (message.role === "user") {
-        return { kind: "user", text: stripOuterBlankLines(safeText(part.payload, width * 20)), id: part.id };
+        return { kind: "user", text: stripOuterBlankLines(fullText(part.payload)), id: part.id };
       }
       if (message.role === "assistant" || message.role === "system") {
-        const text = safeText(part.payload, width * 20);
+        const rawText = fullText(part.payload);
+        let text = message.role === "assistant" ? separateEmbeddedReasoning(rawText).visibleText : rawText;
+        if (message.role === "assistant" && reasoningTexts) {
+          for (const reasoning of reasoningTexts) text = stripReasoningEcho(text, reasoning);
+        }
+        if (!text.trim()) return null;
         if (message.role === "assistant" && isInternalMetaReasoning(text)) return null;
         return { kind: "assistant", text, streaming, id: part.id };
       }
@@ -919,6 +949,20 @@ function safeText(payload: unknown, maxBytes: number): string {
   }
 }
 
+function fullText(payload: unknown): string {
+  if (payload === null || payload === undefined) return "";
+  if (typeof payload === "string") return payload;
+  if (typeof payload === "object" && "text" in (payload as Record<string, unknown>)) {
+    const text = (payload as Record<string, unknown>).text;
+    if (typeof text === "string") return text;
+  }
+  try {
+    return safeStringify(payload);
+  } catch {
+    return String(payload);
+  }
+}
+
 function extractField(payload: unknown, field: string): string | undefined {
   if (payload && typeof payload === "object" && field in (payload as Record<string, unknown>)) {
     const value = (payload as Record<string, unknown>)[field];
@@ -969,6 +1013,7 @@ function progressStatus(payload: unknown): "running" | "done" | "info" {
 function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "artifact" }> {
   const payload = part.payload;
   const kind = extractField(payload, "kind") ?? "artifact";
+  if (kind === "campaign") return campaignArtifactRow(part.id, payload, width);
   if (kind === "background_job_completion") {
     const status = extractField(payload, "status") ?? "completed";
     if (extractField(payload, "mailboxKind") === "agent_completion") {
@@ -1015,6 +1060,26 @@ function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "a
     detail: truncateLine(singleLine(detail), width),
     ...(body ? { body: truncatePayload(body, width * 40) } : {}),
     id: part.id
+  };
+}
+
+function campaignArtifactRow(id: string, payload: unknown, width: number): Extract<TimelineRow, { kind: "artifact" }> {
+  const event = extractObject(payload, "campaignEvent");
+  const eventKind = stringField(event, "kind") ?? "update";
+  const label = eventKind.replace(/^campaign_/, "").replaceAll("_", " ");
+  const wave = field(event, "wave");
+  const status = stringField(event, "status");
+  const objective = stringField(event, "objective");
+  const detail = [
+    typeof wave === "number" ? `wave ${wave}` : undefined,
+    status,
+    objective
+  ].filter(Boolean).join(" · ") || "durable campaign state updated";
+  return {
+    kind: "artifact",
+    title: truncateLine(`campaign ${label}`, width),
+    detail: truncateLine(singleLine(detail), width),
+    id
   };
 }
 

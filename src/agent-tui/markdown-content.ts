@@ -1,4 +1,4 @@
-import { createTextAttributes, parseColor, type TextChunk } from "@opentui/core";
+import { createTextAttributes, parseColor, StyledText, TextRenderable, type TextChunk } from "@opentui/core";
 import { COLOR } from "./theme";
 
 const checkedTaskColor = parseColor(COLOR.success);
@@ -75,6 +75,24 @@ export function styleUnorderedListGlyphs(chunks: TextChunk[]): TextChunk[] {
     offset += chunk.text.length;
     return parts.length > 0 ? parts : chunk;
   });
+}
+
+export function styleUnorderedListMarker(renderable: TextRenderable, depth: number): void {
+  const text = renderable.chunks.map((chunk) => chunk.text).join("");
+  const index = text.indexOf("-");
+  if (index === -1 || text.trim() !== "-") return;
+  const marker = unorderedListMarkers[depth % unorderedListMarkers.length]!;
+  const fg = unorderedListMarkerColors[depth % unorderedListMarkerColors.length]!;
+  const replaced = `${text.slice(0, index)}${marker}${text.slice(index + 1)}`;
+  const current = renderable.chunks[0];
+  if (current?.text === replaced && current?.fg === fg) return;
+  renderable.content = new StyledText([{ __isChunk: true, text: replaced, fg, attributes: 0 }]);
+}
+
+export function blankUnorderedListMarker(renderable: TextRenderable): void {
+  if (renderable.width === 0 && renderable.chunks[0]?.text === "") return;
+  renderable.width = 0;
+  renderable.content = new StyledText([{ __isChunk: true, text: "", fg: unorderedListMarkerColors[0], attributes: 0 }]);
 }
 
 function mermaidLineStyle(line: string): Pick<TextChunk, "fg" | "attributes"> | undefined {

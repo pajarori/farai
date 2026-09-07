@@ -46,6 +46,7 @@ export function renderCtfNotes(input: {
       `### ${finding.title}`,
       "",
       `- Severity: ${finding.severity}`,
+      ...(finding.cvssVector && finding.cvssScore !== undefined ? [`- CVSS: ${finding.cvssScore.toFixed(1)} (${finding.cvssVector})`] : []),
       `- Target: ${finding.target}`,
       `- Evidence: ${finding.evidenceIds.join(", ") || "none linked"}`,
       "",

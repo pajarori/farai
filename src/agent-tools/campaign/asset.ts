@@ -1,7 +1,7 @@
 import type { ToolDefinition, CampaignAsset } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { campaignIdFor, requireCampaignStore } from "./shared";
+import { assertCampaignAsset, campaignIdFor, loadCampaign, requireCampaignStore } from "./shared";
 
 export const campaignAssetTool: ToolDefinition = {
   name: "campaign_asset",
@@ -15,12 +15,15 @@ export const campaignAssetTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const campaignId = campaignIdFor(context, args);
+    loadCampaign(context, campaignId);
     const canonical = asString(args.canonical, "canonical");
+    const parentId = typeof args.parentId === "string" && args.parentId.trim() ? args.parentId.trim() : undefined;
+    assertCampaignAsset(context, campaignId, parentId);
     const asset = requireCampaignStore(context, "upsertAsset")({
       campaignId,
       canonical,
       kind: asString(args.kind, "kind") as CampaignAsset["kind"],
-      ...(typeof args.parentId === "string" ? { parentId: args.parentId } : {}),
+      ...(parentId ? { parentId } : {}),
       technologies: Array.isArray(args.technologies) ? args.technologies.map(String) : [],
       metadata: args.metadata && typeof args.metadata === "object" ? args.metadata as Record<string, unknown> : {},
       confidence: typeof args.confidence === "number" ? Math.max(0, Math.min(1, args.confidence)) : 0.5

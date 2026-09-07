@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, Message, MessageWithParts, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
+import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, CampaignRun, Message, MessageWithParts, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/registry";
 import { formatMcpInventory, getMcpPrompt, getMcpPromptDescriptor, listMcpServerStatuses, probeMcpServer as probeMcpServerConfig, renderMcpPromptResult, renderMcpServerInstructionContext, requestMcpFormElicitation, startMcpServer, stopMcpServer, stopMcpToolsForSession, type McpRefreshInput, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
@@ -19,8 +19,8 @@ import { runCapturedProcess } from "../agent-tools/backends/captured-process";
 import { INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
 import { renderModelToolResultEnvelope } from "./context-builder";
 import { sanitizeToolOutput } from "../agent-tools/shared/output-sanitize";
-import { buildChatRequest, ChatProviderPlanner, createChatProviderForSession, createPlannerForSessionAsync, PlannerHttpError, type ConversationEntry, type PlanStreamEvent, type PlannerAction, type PlannerInput, type PlannerProvider } from "./provider";
-import type { ChatProvider, ProviderToolDef } from "./provider/protocol";
+import { buildChatRequest, ChatProviderPlanner, createChatProviderForSession, createPlannerForSessionAsync, PlannerHttpError, sanitizePlannerActions, type ConversationEntry, type PlanStreamEvent, type PlannerAction, type PlannerInput, type PlannerProvider } from "./provider";
+import { isProviderIncompleteFinishReason, type ChatProvider, type ProviderToolDef } from "./provider/protocol";
 import { BoundedTextAccumulator, PROVIDER_TOOL_PREVIEW_MAX_BYTES, providerResponseLimits, utf8Prefix } from "./provider/stream-bounds";
 import { buildSystemPrompt } from "./provider/system-prompt";
 import { resolveContextWindow, resolveMaxOutputTokens, resolveMaxSteps, resolveMaxTurnMs } from "./model-registry";
@@ -52,7 +52,7 @@ import { LspManager } from "../agent-lsp";
 import { BACKGROUND_MAILBOX_BATCH_SIZE, backgroundCompletionArtifact, renderMailboxItems } from "./mailbox-render";
 import { browserObservationSignature } from "../agent-tools/browser/observation";
 import { classifyModelRetry, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from "./provider/retry";
-import { isInternalMetaReasoning, normalizeReasoningSummary } from "./reasoning-summary";
+import { isInternalMetaReasoning, isReasoningDuplicate, isReasoningPrefix, mergeReasoningText, normalizeReasoningSummary, sanitizeVisibleResponse, separateEmbeddedReasoning, stripReasoningEcho } from "./reasoning-summary";
 import { KnowledgeStore } from "../agent-knowledge/store";
 import { knowledgeDbPath } from "../agent-knowledge/paths";
 import { calculateUsageCost, estimateMaximumRequestCost, normalizeUsageTokenCounts, type UsageTokenCounts } from "./model-pricing";
@@ -74,6 +74,7 @@ import { validateToolArgs } from "./tool-input-validation";
 import { normalizeToolResult } from "./tool-result-normalization";
 import { atomicWriteFile } from "./atomic-file";
 import { ToolCallJournal, type ToolErrorState } from "./tool-call-journal";
+import { CampaignSupervisor } from "./campaign-supervisor";
 
 export { activeBackgroundJobs } from "./loop/background";
 export type { ActiveBackgroundJob } from "./loop/background";
@@ -90,8 +91,11 @@ const LOOP_PATTERN_MAX_PERIOD = 8;
 const PROGRESS_ACTION_TOOLS = new Set(["http_request", "subdomain_enum", "dns_probe", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "dir_enum", "port_scan", "nmap_scan", "fs_edit", "fs_write", "patch_apply", "code_write_script", "campaign_verify", "campaign_test", "callback_oast", "exploit_search"]);
 const AUTO_COMPACTION_CONTINUATION = "[internal continuation after context compaction: Continue the active user task from the compacted prior context. Do not repeat, regenerate, or explain the summary. Resume with the exact next useful action.]";
 const WRAPUP_MODEL_TIMEOUT_MS = 15_000;
+const WRAPUP_CONTINUATION_ATTEMPTS = 3;
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 2_000;
 const SHUTDOWN_OPERATION_TIMEOUT_MS = 1_500;
+const CONTAINER_SHUTDOWN_OPERATION_TIMEOUT_MS = 4_000;
+const TOOL_OPERATION_DRAIN_TIMEOUT_MS = 10_000;
 const RUNTIME_LEASE_MS = 60_000;
 const RUNTIME_HEARTBEAT_MS = 15_000;
 const RESTART_TOOL_ERROR = "Interrupted by runtime restart; tool execution was not replayed.";
@@ -147,9 +151,12 @@ type ProviderCatalogPayload = { key: string; tools: ProviderToolDef[] };
 type StreamingPartsState = {
   textPartId?: string;
   textAccum: string;
+  rawTextAccum?: string;
   lastTextPersist?: number;
   reasoningPartId?: string;
   reasoningAccum?: string;
+  nativeReasoningAccum?: string;
+  embeddedReasoningAccum?: string;
   lastReasoningPersist?: number;
 };
 type RenderedToolResult = { result: ToolResult; humanResult: string; modelResult: string };
@@ -160,6 +167,45 @@ function shouldBufferInitialTextStream(text: string): boolean {
   const normalized = text.trimStart().toLowerCase().replace(/\s+/g, " ");
   if (!normalized) return false;
   return INTERNAL_META_STREAM_PREFIXES.some((prefix) => prefix.startsWith(normalized));
+}
+
+function shouldBufferEmbeddedReasoningPrefix(text: string): boolean {
+  const normalized = text.trimStart().toLowerCase();
+  if (!normalized.startsWith("<")) return false;
+  if (/^<(?:think|thinking|analysis|reasoning)\b[^>]*$/i.test(normalized)) return true;
+  return ["<think>", "<thinking>", "<analysis>", "<reasoning>"].some((tag) => tag.startsWith(normalized));
+}
+
+function suppressReasoningEchoActions(actions: PlannerAction[]): PlannerAction[] {
+  const normalized = sanitizePlannerActions(actions);
+  const reasoning = mergeReasoningText(...normalized
+    .filter((action): action is Extract<PlannerAction, { kind: "reasoning" }> => action.kind === "reasoning")
+    .map((action) => action.text));
+  if (!reasoning) return normalized;
+  return normalized.filter((action) => action.kind !== "respond" || !isReasoningDuplicate(action.text, reasoning));
+}
+
+function continuationText(previous: string, next: string): string {
+  if (!previous) return next;
+  if (!next) return previous;
+  const previousTrimmed = previous.trimEnd();
+  const nextTrimmed = next.trimStart();
+  if (nextTrimmed.startsWith(previousTrimmed)) {
+    const prefix = next.slice(0, next.length - nextTrimmed.length);
+    return `${prefix}${nextTrimmed}`;
+  }
+  const maxOverlap = Math.min(previous.length, next.length);
+  for (let length = maxOverlap; length >= 3; length -= 1) {
+    if (previous.slice(-length) !== next.slice(0, length)) continue;
+    const previousBoundary = previous.length - length === 0 ? " " : previous[previous.length - length - 1];
+    const nextBoundary = next[length];
+    if (length >= 8 || /\s|[.,;:!?()[\]{}]/.test(previousBoundary ?? "") || /\s|[.,;:!?()[\]{}]/.test(nextBoundary ?? "")) {
+      return `${previous}${next.slice(length)}`;
+    }
+  }
+  if (/^[\p{L}\p{N}]/u.test(next) && /[\p{L}\p{N},;:!?)]$/u.test(previous)) return `${previous} ${next}`;
+  if (/^[.,;:!?)]/u.test(next) || /[(/\[{\-–—/]$/u.test(previous)) return `${previous}${next}`;
+  return `${previous}${next}`;
 }
 
 class IneffectiveCompactionError extends Error {
@@ -176,7 +222,7 @@ class ModelCallDeadlineError extends Error {
   }
 }
 
-export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "toolScope" | "workspace">> & {
+export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "campaignRunId" | "toolScope" | "workspace">> & {
   emailPrimaryId?: string | null;
   emailSecondaryId?: string | null;
 };
@@ -208,6 +254,9 @@ export class AgentRuntime {
   private readonly turnControllers = new Map<string, AbortController[]>();
   private readonly activeToolControllers = new Set<AbortController>();
   private readonly activeToolLeases = new Set<ToolExecutionLease>();
+  private readonly activeToolOperations = new Set<Promise<unknown>>();
+  private toolOperationDrain: Promise<void> | undefined;
+  private resolveToolOperationDrain: (() => void) | undefined;
   private readonly subagentControllers = new Map<string, AbortController>();
   private readonly shutdownController = new AbortController();
   private readonly actors = new Map<string, SessionActor>();
@@ -215,6 +264,7 @@ export class AgentRuntime {
   private readonly modelCallsByTurn = new Map<string, number>();
   private readonly providerCatalogs = new Map<string, ProviderToolDef[]>();
   private readonly streamingParts = new Map<string, StreamingPartsState>();
+  private readonly responseContinuations = new Map<string, { partId: string; text: string; responseIndex: number }>();
   private readonly toolInputPreviews = new Map<string, { id?: string; name: string; arguments: string; bytes: number; truncated: boolean }>();
   private readonly toolExecutionGate = new ToolExecutionGate();
   private readonly workspaceBindingGate = new ToolExecutionGate();
@@ -230,6 +280,7 @@ export class AgentRuntime {
   private readonly autoCompactFailures = new Map<string, number>();
   private readonly compactionControllers = new Map<string, AbortController>();
   private readonly runtimeId = id();
+  private readonly campaignSupervisor: CampaignSupervisor;
   private readonly mailbox: SessionMailbox;
   private readonly inputQueue: SessionInputQueue;
   private readonly mailboxDispatcher: SessionMailboxDispatcher;
@@ -261,6 +312,14 @@ export class AgentRuntime {
     this.inheritConfig = options.inheritConfig !== false;
     const config: FaraiConfig = this.inheritConfig ? loadConfig(workspace) : {};
     this.store = new SqliteStore(join(workspace, ".farai"));
+    this.campaignSupervisor = new CampaignSupervisor(
+      this.store,
+      workspace,
+      this.runtimeId,
+      (sessionId, payload) => this.event(sessionId, "artifact", { kind: "campaign", campaignEvent: payload }),
+      (run) => this.scheduleCampaignContinuation(run),
+      (runId) => this.stopCampaignWorkers(runId)
+    );
     this.toolCalls = new ToolCallJournal(this.store, (sessionId, type, payload) => this.event(sessionId, type, payload));
     this.knowledgeEnabled = options.enableKnowledge !== false;
     this.hooksEnabled = options.enableHooks !== false;
@@ -353,9 +412,9 @@ export class AgentRuntime {
     const drainGracePeriod = shutdownGracePeriod(options.gracePeriodMs);
     this.shutdownFinalizationPromise = (async () => {
       const failures: Error[] = [];
-      const attempt = async (label: string, operation: () => Promise<unknown> | unknown): Promise<void> => {
+      const attempt = async (label: string, operation: () => Promise<unknown> | unknown, timeoutMs = SHUTDOWN_OPERATION_TIMEOUT_MS): Promise<void> => {
         try {
-          await withDeadlineMs(Promise.resolve().then(operation), SHUTDOWN_OPERATION_TIMEOUT_MS, label);
+          await withDeadlineMs(Promise.resolve().then(operation), timeoutMs, label);
         } catch (error) {
           failures.push(new Error(`${label}: ${error instanceof Error ? error.message : String(error)}`, { cause: error }));
         }
@@ -366,7 +425,6 @@ export class AgentRuntime {
           for (const lease of this.activeToolLeases) lease.revoke("runtime shutdown grace period expired");
         }
         this.activeToolControllers.clear();
-        this.activeToolLeases.clear();
         this.subagentControllers.clear();
         this.actors.clear();
         await attempt("lsp shutdown", () => this.lsp.shutdown());
@@ -393,13 +451,16 @@ export class AgentRuntime {
           }));
         }
         this.resourceSessionIds.clear();
-        await attempt("container shutdown", () => this.containerLifecycle?.suspendAll());
+        await attempt("container shutdown", () => this.containerLifecycle?.suspendAll(), CONTAINER_SHUTDOWN_OPERATION_TIMEOUT_MS);
+        if (drained) await drain;
+        await attempt("tool operation drain", () => this.waitForToolOperations(), TOOL_OPERATION_DRAIN_TIMEOUT_MS);
       } finally {
         this.stopRuntimeLease();
-        await attempt("container lifecycle disposal", () => this.containerLifecycle?.dispose());
+        await attempt("container lifecycle disposal", () => this.containerLifecycle?.dispose(), CONTAINER_SHUTDOWN_OPERATION_TIMEOUT_MS);
         await attempt("knowledge store shutdown", () => this.knowledgeStore?.close());
         this.knowledgeStore = null;
         await attempt("session store shutdown", () => this.store.close());
+        this.activeToolLeases.clear();
       }
       if (failures.length) throw new AggregateError(failures, "runtime shutdown completed with cleanup failures");
     })();
@@ -461,6 +522,8 @@ export class AgentRuntime {
       if (this.shuttingDown || !this.store.isOpen()) return;
       try { this.store.renewRuntimeLease(this.runtimeId, RUNTIME_LEASE_MS); } catch {
       }
+      try { this.campaignSupervisor.heartbeat(); } catch {
+      }
       try { this.containerLifecycle?.renew(); } catch {
       }
     }, RUNTIME_HEARTBEAT_MS);
@@ -484,6 +547,7 @@ export class AgentRuntime {
     this.recoveryPromise = (async () => {
       await this.store.ensure();
       this.startRuntimeLease();
+      this.campaignSupervisor.recover();
       void this.containerLifecycle?.reconcile().catch(() => undefined);
       const activeRuntimeIds = new Set(this.store.listActiveRuntimeIds());
       if (activeRuntimeIds.size === 1 && activeRuntimeIds.has(this.runtimeId)) {
@@ -539,6 +603,7 @@ export class AgentRuntime {
       for (const job of this.store.listTerminalJobsMissingMailbox()) this.jobs.repairTerminalMailbox(job.id);
       for (const session of sessions) this.reconcileRecoveredBackgroundTools(session.id, activeRuntimeIds);
       this.recovered = true;
+      this.campaignSupervisor.resumeWaiting();
       for (const sessionId of this.store.listSessionsWithQueuedMailbox()) {
         const session = this.store.loadSession(sessionId);
         if (!session.archivedAt) void this.mailboxDispatcher.wakePending(sessionId);
@@ -647,7 +712,10 @@ export class AgentRuntime {
       .filter((part) => part.type === "text")
       .map((part) => (part.payload as { text?: unknown }).text)
       .filter((text): text is string => typeof text === "string" && text.trim().length > 0);
-    return texts.at(-1);
+    const finalText = texts.at(-1);
+    if (!finalText) return undefined;
+    const visible = sanitizeVisibleResponse(finalText);
+    return visible || undefined;
   }
 
   private async recordJobCompletion(item: SessionMailboxItem, job: BackgroundJob): Promise<void> {
@@ -739,6 +807,22 @@ export class AgentRuntime {
     return queue.map((body) => ({ title: "Steering Timing", body, stable: false }));
   }
 
+  private queueVisibleResponseContinuation(sessionId: string): void {
+    const queue = this.pendingSteeringContext.get(sessionId) ?? [];
+    if (!queue.some((item) => item.includes("reasoning without a user-visible answer"))) {
+      queue.push("the previous model pass produced reasoning without a user-visible answer. continue from that work and return only a final answer or a tool call; do not repeat private reasoning.");
+      this.pendingSteeringContext.set(sessionId, queue);
+    }
+  }
+
+  private queueTruncatedResponseContinuation(sessionId: string): void {
+    const queue = this.pendingSteeringContext.get(sessionId) ?? [];
+    if (!queue.some((item) => item.includes("visible response was cut off by the provider"))) {
+      queue.push("the previous visible response was cut off by the provider output limit. continue exactly where it ended without restarting, repeating earlier text, or adding a new preamble; finish the answer completely.");
+      this.pendingSteeringContext.set(sessionId, queue);
+    }
+  }
+
   async createSession(options: Partial<Pick<Session, "title" | "provider" | "model" | "campaignId">> = {}): Promise<Session> {
     this.assertAcceptingWork();
     await this.recover();
@@ -780,6 +864,22 @@ export class AgentRuntime {
     if (!queued) return undefined;
     if (!this.hasRunningTurn(sessionId) && !this.compactionControllers.has(sessionId)) void this.mailboxDispatcher.wakeQueuedInputs(sessionId);
     return queued;
+  }
+
+  private scheduleCampaignContinuation(run: CampaignRun): void {
+    if (this.shuttingDown || run.status !== "waiting") return;
+    const waveCount = this.store.listCampaignWaves(run.id).length;
+    const text = `continue the active campaign run ${run.id} from its durable state. inspect the campaign dossier and current evidence first, then choose the next bounded wave. do not repeat completed work; call campaign_checkpoint when this wave is waiting, blocked, or genuinely complete.`;
+    const queued = this.inputQueue.enqueueFollowup(run.rootSessionId, text, "plain", `campaign-continuation:${run.id}:${waveCount}`);
+    if (queued && !this.hasRunningTurn(run.rootSessionId) && !this.compactionControllers.has(run.rootSessionId)) void this.mailboxDispatcher.wakeQueuedInputs(run.rootSessionId);
+  }
+
+  private stopCampaignWorkers(runId: string): void {
+    for (const job of this.store.listRecoverableJobs(10_000)) {
+      if (job.campaignRunId !== runId || job.runtimeId !== this.runtimeId) continue;
+      this.subagentControllers.get(job.id)?.abort("campaign stopped");
+      void this.jobs.cancel(job.id, false).catch(() => undefined);
+    }
   }
 
   private queueRecoveredUserInput(sessionId: string, text: string, requestId: string): void {
@@ -961,6 +1061,14 @@ export class AgentRuntime {
 
   cancelTurn(turnId: string, reason = "cancelled by user"): Turn {
     const turn = this.store.cancelTurn(turnId, reason);
+    this.responseContinuations.delete(turn.id);
+    const session = this.store.loadSession(turn.sessionId);
+    if (session.campaignRunId) {
+      try {
+        const run = this.store.loadCampaignRun(session.campaignRunId);
+        if (run.rootSessionId === session.id && ["running", "waiting", "ready", "rate_limited", "time_limited"].includes(run.status)) this.campaignSupervisor.pause(run.id);
+      } catch {  }
+    }
     this.inputQueue.restorePendingSteersAfterCancellation(turn.sessionId);
     const controllers = this.turnControllers.get(turnId);
     if (controllers) {
@@ -1404,6 +1512,10 @@ export class AgentRuntime {
     session = this.store.loadSession(session.id);
     const source = options.source ?? "user";
     const trimmed = input.trim();
+    const activeCampaignRun = source === "user" && !trimmed.startsWith("/") && !trimmed.startsWith("!")
+      ? this.campaignSupervisor.prepare(session.id, input)
+      : undefined;
+    if (activeCampaignRun) session = this.store.loadSession(session.id);
     if (source === "user" && isDefaultSessionTitle(session.title)) {
       const title = titleFromPrompt(input);
       if (!isDefaultSessionTitle(title)) {
@@ -1466,6 +1578,10 @@ export class AgentRuntime {
       this.stopTurn(turn, "completed", "final_response");
     } else {
       response = await this.runAgentLoop(session, turn, contextMessage, assistantMessage, input, source === "user", options.mailboxItems);
+      const settledRun = activeCampaignRun ?? this.campaignSupervisor.activeRunForSession(session.id);
+      const persistedRun = this.store.loadSession(session.id).campaignRunId;
+      const runToSettle = settledRun ?? (persistedRun ? this.store.loadCampaignRun(persistedRun) : undefined);
+      if (runToSettle && runToSettle.rootSessionId === session.id && !["completed", "cancelled", "failed"].includes(runToSettle.status)) this.campaignSupervisor.settleAfterTurn(runToSettle.id, session.id, this.store.loadTurn(turn.id).stopReason);
     }
 
     if (source === "user" && !this.shuttingDown && this.store.loadTurn(turn.id).status !== "cancelled") {
@@ -1525,7 +1641,7 @@ export class AgentRuntime {
         responses.push(text);
         this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "error", payload: { text } });
         this.event(session.id, "loop_stop", { turnId: turn.id, reason: "cancelled" });
-        return responses.join("\n");
+        return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
       }
       session = this.store.loadSession(session.id);
       const elapsedMs = Date.now() - loopStartedAt;
@@ -1674,7 +1790,7 @@ export class AgentRuntime {
         ? await this.streamStep(chatProvider, plannerInput, session, turn, assistantMessage, planner.name, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs)
         : await this.batchStep(planner, plannerInput, session, turn, assistantMessage, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs);
       autoContinueStreak = autoContinue.streak;
-      if (control.cancelled) return responses.join("\n");
+      if (control.cancelled) return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
       if (control.timedOut) {
         responses.push(...await this.forceTimeLimitWrapUp(session, turn, assistantMessage, planner, maxTurnMs));
         break;
@@ -1720,7 +1836,7 @@ export class AgentRuntime {
         this.stopTurn(turn, "failed", "planner_error", loopError ?? "agent loop ended without a terminal state");
       }
     }
-    return responses.join("\n");
+    return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
   }
 
   private turnHasTranscriptOwnedActivity(sessionId: string, turnId: string): boolean {
@@ -1791,7 +1907,7 @@ export class AgentRuntime {
   ): Promise<StepControl> {
     let actions: PlannerAction[];
     try {
-      actions = await this.planWithRetry(planner, plannerInput, session, turn, assistantMessage, context, modelTimeoutMs, !userAuthored);
+      actions = suppressReasoningEchoActions(await this.planWithRetry(planner, plannerInput, session, turn, assistantMessage, context, modelTimeoutMs, !userAuthored));
     } catch (error) {
       if (error instanceof ModelCallDeadlineError) return { timedOut: true, shouldContinue: false };
       throw error;
@@ -1801,6 +1917,7 @@ export class AgentRuntime {
     let shouldContinue = false;
     let sawResponse = false;
     const hasToolAction = actions.some((action) => action.kind === "tool");
+    const hasReasoningAction = actions.some((action) => action.kind === "reasoning");
     const toolBatch: ToolPlannerAction[] = [];
     const flushToolBatch = async (): Promise<boolean> => {
       if (toolBatch.length === 0) return false;
@@ -1839,6 +1956,10 @@ export class AgentRuntime {
       }
     }
     if (await flushToolBatch()) return { cancelled: true, shouldContinue };
+    if (!sawResponse && !hasToolAction && hasReasoningAction) {
+      this.queueVisibleResponseContinuation(session.id);
+      shouldContinue = true;
+    }
     return { shouldContinue };
   }
 
@@ -1912,6 +2033,7 @@ export class AgentRuntime {
               this.applyStreamEvent(session, turn, assistantMessage, { kind: "text", delta: event.delta });
             } else if (event.type === "reasoning_delta") {
               reasoning.append(event.delta);
+              this.applyStreamEvent(session, turn, assistantMessage, { kind: "reasoning", delta: event.delta });
             } else if (event.type === "tool_call_delta") {
               assertProviderToolIndex(event.index, providerLimits.toolCalls);
               this.applyToolInputPreview(session.id, turn.id, event);
@@ -2012,12 +2134,21 @@ export class AgentRuntime {
           this.persistModelUsage(provider, session, turn, usage, Date.now() - requestStarted);
         }
         let shouldContinue = false;
-        const completeReasoning = reasoning.text();
+        const separated = separateEmbeddedReasoning(content.text());
+        const providerReasoning = mergeReasoningText(reasoning.text(), separated.reasoningText);
+        const strippedVisibleText = stripReasoningEcho(separated.visibleText, providerReasoning);
+        const candidateRespondText = strippedVisibleText.trim();
+        const internalMeta = Boolean(candidateRespondText && isInternalMetaReasoning(candidateRespondText));
+        const completeReasoning = mergeReasoningText(providerReasoning, internalMeta ? candidateRespondText : undefined);
         const reasoningText = completeReasoning.trim() ? takeBytes(completeReasoning.trim(), REASONING_MAX_BYTES, "head") : undefined;
         if (reasoningText) this.finalizeReasoning(session, turn, assistantMessage, plannerName, reasoningText);
-        const rawRespondText = content.text().trim();
-        const respondText = dispatched.length > 0 && isInternalMetaReasoning(rawRespondText) ? "" : rawRespondText;
-        if (!respondText && rawRespondText && dispatched.length > 0) this.discardStreamingText(session.id, turn.id);
+        const rawRespondText = internalMeta ? "" : strippedVisibleText;
+        const duplicateReasoning = isReasoningDuplicate(candidateRespondText, completeReasoning);
+        const respondText = duplicateReasoning || internalMeta
+          ? ""
+          : candidateRespondText ? rawRespondText : "";
+        if (!respondText && (rawRespondText || separated.reasoningText || internalMeta) && (dispatched.length > 0 || duplicateReasoning || internalMeta)) this.discardStreamingText(session.id, turn.id);
+        if (!rawRespondText && (separated.visibleText.trim() || separated.reasoningText) && dispatched.length === 0) this.discardStreamingText(session.id, turn.id);
         const outcomes = await Promise.all(dispatched);
         const toolCancelled = outcomes.some((outcome) => outcome.cancelled);
         for (const outcome of outcomes) {
@@ -2030,14 +2161,16 @@ export class AgentRuntime {
             ? { timedOut: true, shouldContinue }
             : { cancelled: true, shouldContinue };
         }
-        const truncated = finishReason === "length";
+        const truncated = isProviderIncompleteFinishReason(finishReason);
         if (respondText) {
           if (await this.applyRespond(session, turn, assistantMessage, plannerName, respondText, truncated, false, responses, autoContinue)) shouldContinue = true;
-        } else if (dispatched.length === 0 && !sawParseError && !reasoningText && userAuthored) {
+        } else if (dispatched.length === 0 && !sawParseError && !reasoningText && userAuthored && !truncated) {
           const fallback = "Completed without model-visible response.";
           if (await this.applyRespond(session, turn, assistantMessage, plannerName, fallback, truncated, true, responses, autoContinue)) shouldContinue = true;
-        } else if (respondText === "" && dispatched.length === 0 && !sawParseError && reasoningText) {
-          if (await this.applyRespond(session, turn, assistantMessage, plannerName, reasoningText, truncated, true, responses, autoContinue)) shouldContinue = true;
+        } else if (respondText === "" && dispatched.length === 0 && !sawParseError && (reasoningText || truncated)) {
+          if (reasoningText) this.queueVisibleResponseContinuation(session.id);
+          if (truncated) this.queueTruncatedResponseContinuation(session.id);
+          shouldContinue = true;
         }
         if (sawParseError) shouldContinue = true;
         if (interrupted) shouldContinue = true;
@@ -2159,6 +2292,8 @@ export class AgentRuntime {
       if (state?.reasoningPartId) this.store.updatePartPayload(state.reasoningPartId, { planner: plannerName, rationale: "" });
       if (state) {
         state.reasoningAccum = "";
+        state.nativeReasoningAccum = "";
+        delete state.embeddedReasoningAccum;
         this.publishStreamingReasoning(session.id, turn.id, state);
         delete state.reasoningPartId;
         delete state.reasoningAccum;
@@ -2169,10 +2304,14 @@ export class AgentRuntime {
     this.event(session.id, "reasoning_summary", { planner: plannerName, rationale });
     if (state?.reasoningPartId) {
       state.reasoningAccum = rationale;
+      state.nativeReasoningAccum = rationale;
+      delete state.embeddedReasoningAccum;
       this.publishStreamingReasoning(session.id, turn.id, state);
       this.store.updatePartPayload(state.reasoningPartId, { planner: plannerName, rationale });
       delete state.reasoningPartId;
       delete state.reasoningAccum;
+      delete state.nativeReasoningAccum;
+      delete state.embeddedReasoningAccum;
       delete state.lastReasoningPersist;
     } else {
       this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "reasoning_summary", payload: { planner: plannerName, rationale } });
@@ -2180,19 +2319,44 @@ export class AgentRuntime {
   }
 
   private async applyRespond(session: Session, turn: Turn, assistantMessage: Message, plannerName: string, text: string, truncated: boolean, recoverable: boolean, responses: string[], autoContinue: { streak: number }): Promise<boolean> {
-    responses.push(text);
+    const continuation = this.responseContinuations.get(turn.id);
     const streamed = this.streamingParts.get(turn.id);
-    if (streamed?.textPartId) {
-      streamed.textAccum = text;
+    let visibleText: string;
+    if (continuation) {
+      const combined = continuationText(continuation.text, text);
+      visibleText = truncated ? combined : combined.trim();
+      continuation.text = combined;
+      responses[continuation.responseIndex] = visibleText;
+      this.store.updatePartPayload(continuation.partId, { text: visibleText });
+      if (streamed?.textPartId && streamed.textPartId !== continuation.partId) this.store.updatePartPayload(streamed.textPartId, { text: "" });
+      if (streamed) {
+        streamed.textAccum = "";
+        streamed.rawTextAccum = "";
+        this.publishStreamingText(session.id, turn.id, streamed);
+        delete streamed.textPartId;
+        delete streamed.lastTextPersist;
+      }
+      if (!truncated) this.responseContinuations.delete(turn.id);
+    } else if (streamed?.textPartId) {
+      visibleText = truncated ? text : text.trim();
+      responses.push(visibleText);
+      streamed.textAccum = visibleText;
+      streamed.rawTextAccum = visibleText;
       this.publishStreamingText(session.id, turn.id, streamed);
-      this.store.updatePartPayload(streamed.textPartId, { text });
+      this.store.updatePartPayload(streamed.textPartId, { text: visibleText });
+      if (truncated) this.responseContinuations.set(turn.id, { partId: streamed.textPartId, text, responseIndex: responses.length - 1 });
       delete streamed.textPartId;
       streamed.textAccum = "";
+      streamed.rawTextAccum = "";
     } else {
-      this.persistTextPart(session.id, turn.id, assistantMessage.id, text);
+      visibleText = truncated ? text : text.trim();
+      responses.push(visibleText);
+      const part = this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "text", payload: { text: visibleText } });
+      if (truncated) this.responseContinuations.set(turn.id, { partId: part.id, text, responseIndex: responses.length - 1 });
     }
-    this.event(session.id, "text", { role: "assistant", text, planner: plannerName, truncated, recoverable });
+    this.event(session.id, "text", { role: "assistant", text: visibleText, planner: plannerName, truncated, recoverable });
     if (truncated || recoverable) {
+      if (truncated) this.queueTruncatedResponseContinuation(session.id);
       autoContinue.streak += 1;
       return true;
     }
@@ -2255,6 +2419,7 @@ export class AgentRuntime {
     stopReason: "step_limit" | "time_limit";
   }): Promise<string[]> {
     const responses: string[] = [];
+    this.responseContinuations.delete(input.turn.id);
     responses.push(input.notice);
     this.persistTextPart(input.session.id, input.turn.id, input.assistantMessage.id, input.notice);
     this.event(input.session.id, "text", { role: "assistant", text: input.notice, planner: input.planner.name });
@@ -2291,44 +2456,61 @@ export class AgentRuntime {
       toolCatalog: projection.toolCatalog,
       toolChoice: "none"
     };
-    let actions: PlannerAction[] = [];
-    try {
-      actions = await this.planWithRetry(
-        input.planner,
-        plannerInput,
-        input.session,
-        input.turn,
-        input.assistantMessage,
-        projection.manifest,
-        WRAPUP_MODEL_TIMEOUT_MS
-      );
-    } catch (error) {
-      this.event(input.session.id, "planner_error", {
-        turnId: input.turn.id,
-        planner: input.planner.name,
-        error: `Final text-only wrap-up failed: ${error instanceof Error ? error.message : String(error)}`,
-        recoverable: false
-      });
-    }
     let responded = false;
     const autoContinue = { streak: 0 };
-    for (const action of actions) {
-      if (action.kind === "reasoning") {
-        this.finalizeReasoning(input.session, input.turn, input.assistantMessage, input.planner.name, action.text);
-      } else if (action.kind === "respond") {
-        responded = true;
-        await this.applyRespond(
+    let nextInput = plannerInput;
+    for (let attempt = 0; attempt <= WRAPUP_CONTINUATION_ATTEMPTS; attempt += 1) {
+      let actions: PlannerAction[] = [];
+      try {
+        actions = suppressReasoningEchoActions(await this.planWithRetry(
+          input.planner,
+          nextInput,
           input.session,
           input.turn,
           input.assistantMessage,
-          input.planner.name,
-          action.text,
-          action.truncated ?? false,
-          false,
-          responses,
-          autoContinue
-        );
+          projection.manifest,
+          WRAPUP_MODEL_TIMEOUT_MS
+        ));
+      } catch (error) {
+        this.event(input.session.id, "planner_error", {
+          turnId: input.turn.id,
+          planner: input.planner.name,
+          error: `Final text-only wrap-up failed: ${error instanceof Error ? error.message : String(error)}`,
+          recoverable: false
+        });
       }
+      let truncated = false;
+      for (const action of actions) {
+        if (action.kind === "reasoning") {
+          this.finalizeReasoning(input.session, input.turn, input.assistantMessage, input.planner.name, action.text);
+        } else if (action.kind === "respond") {
+          responded = true;
+          truncated = truncated || action.truncated === true;
+          await this.applyRespond(
+            input.session,
+            input.turn,
+            input.assistantMessage,
+            input.planner.name,
+            action.text,
+            action.truncated ?? false,
+            false,
+            responses,
+            autoContinue
+          );
+        }
+      }
+      if (!truncated || attempt >= WRAPUP_CONTINUATION_ATTEMPTS) break;
+      const continuation = this.responseContinuations.get(input.turn.id);
+      if (!continuation) break;
+      nextInput = {
+        ...nextInput,
+        userText: "continue the final answer exactly where it ended; do not repeat earlier text or add a preamble.",
+        history: [
+          ...nextInput.history,
+          { role: "assistant", text: continuation.text },
+          { role: "user", text: "continue the final answer exactly where it ended; do not repeat earlier text or add a preamble." }
+        ]
+      };
     }
     if (!responded) {
       const fallback = "Stopped safely; the final model-generated status was unavailable. Review the durable transcript, evidence, and active jobs before continuing.";
@@ -2603,7 +2785,8 @@ export class AgentRuntime {
     const now = Date.now();
     const state = this.streamingParts.get(turn.id) ?? { textAccum: "" };
     if (event.kind === "reasoning") {
-      state.reasoningAccum = (state.reasoningAccum ?? "") + event.delta;
+      state.nativeReasoningAccum = (state.nativeReasoningAccum ?? "") + event.delta;
+      state.reasoningAccum = mergeReasoningText(state.nativeReasoningAccum, state.embeddedReasoningAccum);
       const rationale = normalizeReasoningSummary(state.reasoningAccum);
       if (!rationale || (!state.reasoningPartId && rationale.length < 24 && !rationale.includes("\n"))) {
         this.streamingParts.set(turn.id, state);
@@ -2621,9 +2804,19 @@ export class AgentRuntime {
       this.streamingParts.set(turn.id, state);
       return;
     }
-    state.textAccum += event.delta;
+    state.rawTextAccum = (state.rawTextAccum ?? "") + event.delta;
+    const separated = separateEmbeddedReasoning(state.rawTextAccum);
+    const nativeEcho = state.nativeReasoningAccum && (isReasoningPrefix(separated.visibleText, state.nativeReasoningAccum) || isReasoningDuplicate(separated.visibleText, state.nativeReasoningAccum));
+    state.textAccum = nativeEcho ? "" : stripReasoningEcho(separated.visibleText, state.nativeReasoningAccum ?? "");
+    if (separated.reasoningText) state.embeddedReasoningAccum = separated.reasoningText;
+    else delete state.embeddedReasoningAccum;
+    state.reasoningAccum = mergeReasoningText(state.nativeReasoningAccum, state.embeddedReasoningAccum);
     if (!state.textPartId) {
-      if (shouldBufferInitialTextStream(state.textAccum)) {
+      if (!state.textAccum) {
+        this.streamingParts.set(turn.id, state);
+        return;
+      }
+      if (shouldBufferInitialTextStream(state.textAccum) || shouldBufferEmbeddedReasoningPrefix(state.rawTextAccum ?? "")) {
         this.streamingParts.set(turn.id, state);
         return;
       }
@@ -2658,6 +2851,8 @@ export class AgentRuntime {
     if (!state) return;
     if (state.textPartId) this.store.updatePartPayload(state.textPartId, { text: "" });
     state.textAccum = "";
+    state.rawTextAccum = "";
+      delete state.embeddedReasoningAccum;
     this.publishStreamingText(sessionId, turnId, state);
     delete state.textPartId;
     delete state.lastTextPersist;
@@ -2669,7 +2864,10 @@ export class AgentRuntime {
     if (state.textPartId) this.store.updatePartPayload(state.textPartId, { text: "" });
     if (state.reasoningPartId) this.store.updatePartPayload(state.reasoningPartId, { rationale: "" });
     state.textAccum = "";
+    state.rawTextAccum = "";
     state.reasoningAccum = "";
+    delete state.nativeReasoningAccum;
+    delete state.embeddedReasoningAccum;
     this.publishStreamingText(sessionId, turnId, state);
     this.publishStreamingReasoning(sessionId, turnId, state);
     delete state.reasoningPartId;
@@ -2781,6 +2979,7 @@ export class AgentRuntime {
     this.event(turn.sessionId, "loop_stop", { turnId: turn.id, status, reason, ...(errorSummary ? { errorSummary } : {}) });
     const updated = this.store.updateTurn(turn.id, { status, stopReason: reason, ...(errorSummary ? { errorSummary } : {}) });
     this.modelCallsByTurn.delete(turn.id);
+    this.responseContinuations.delete(turn.id);
     this.deleteStreamingParts(turn.id);
     void this.fireHooks({ id: turn.sessionId } as Session, "turn.stop", undefined, { turnId: turn.id, status, reason });
     return updated;
@@ -3015,6 +3214,17 @@ export class AgentRuntime {
         return listToolsForSession(session);
       },
       requestUserInput: (input, signal) => this.requestUserInput(session, input, signal ?? deadline.signal),
+      campaignControl: {
+        owner: this.runtimeId,
+        start: (campaignId, objective) => this.campaignSupervisor.start(session.id, campaignId, objective),
+        active: () => this.campaignSupervisor.activeRunForSession(session.id),
+        checkpoint: (input) => {
+          const run = this.campaignSupervisor.activeRunForSession(session.id);
+          if (!run) throw new Error("no active campaign run");
+          if (run.rootSessionId !== session.id) throw new Error("only the campaign root session can checkpoint the run");
+          return this.campaignSupervisor.checkpoint(run.id, input);
+        }
+      },
       agentControl: {
         list: () => {
           lease.assertActive();
@@ -3150,7 +3360,7 @@ export class AgentRuntime {
         }
         return this.jobs.cancel(jobId, false);
       },
-      delegateSession: async ({ title, prompt, lane, tools, model, mode = "attached", sessionId: resumeSessionId, linkToolCall = true }) => {
+      delegateSession: async ({ title, prompt, lane, tools, model, mode = "attached", sessionId: resumeSessionId, linkToolCall = true, campaignRunId, campaignClaimId, campaignClaimOwner }) => {
         lease.assertActive();
         const previousJob = resumeSessionId
           ? this.store.listJobs(session.id, 10_000).find((job) => job.kind === "agent" && job.childSessionId === resumeSessionId)
@@ -3158,6 +3368,21 @@ export class AgentRuntime {
         const effectiveLane = lane ?? previousJob?.lane;
         const laneDef = effectiveLane ? resolveLane(this.workspace, effectiveLane) : undefined;
         if (effectiveLane && !laneDef) throw new Error(`unknown subagent lane: ${effectiveLane}`);
+        let campaignRun: CampaignRun | undefined;
+        if (campaignRunId) {
+          campaignRun = this.store.loadCampaignRun(campaignRunId);
+          if (campaignRun.workspace !== this.workspace) throw new Error("campaign run belongs to another workspace");
+          if (!["draft", "ready", "running", "waiting", "rate_limited", "time_limited"].includes(campaignRun.status)) throw new Error(`campaign run is not accepting workers: ${campaignRun.status}`);
+          if (campaignClaimId) {
+            if (!campaignClaimOwner) throw new Error("campaign claim owner is required");
+            const claim = this.store.listCampaignWaves(campaignRun.id).flatMap((wave) => this.store.listCampaignClaims(wave.id)).find((item) => item.id === campaignClaimId);
+            if (!claim || claim.runId !== campaignRun.id || claim.status !== "leased" || claim.leaseOwner !== campaignClaimOwner) throw new Error("campaign claim is no longer leased by this worker");
+          }
+        } else if (campaignClaimId) {
+          throw new Error("campaign claim requires a campaign run");
+        } else {
+          campaignRun = this.campaignSupervisor.activeRunForSession(session.id);
+        }
         let child: Session;
         let scopedTools: string[] | undefined;
         let editsSharedWorkspace: boolean;
@@ -3192,6 +3417,9 @@ export class AgentRuntime {
           if (childModel && childModel !== child.model) this.updateSession(child.id, { model: childModel });
           if (scopedTools?.length) this.updateSession(child.id, { toolScope: scopedTools });
         }
+        if (campaignRun) {
+          child = this.updateSession(child.id, { campaignId: campaignRun.campaignId, campaignRunId: campaignRun.id });
+        }
         const workerPrompt = buildSubagentTaskPrompt({
           title,
           task: prompt,
@@ -3205,6 +3433,8 @@ export class AgentRuntime {
           ...(turnId ? { turnId } : {}),
           ...(mode === "detached" && linkToolCall ? { toolCallId: toolCall.id } : {}),
           childSessionId: child.id,
+          ...(campaignRun ? { campaignRunId: campaignRun.id } : {}),
+          ...(campaignClaimId ? { campaignClaimId } : {}),
           title,
           ...(effectiveLane ? { lane: effectiveLane } : {}),
           mode
@@ -3258,6 +3488,7 @@ export class AgentRuntime {
                 findingCount: this.store.listFindings(child.id).length
               });
               this.jobs.completeAgent(job.id, response, mode === "detached");
+              if (campaignClaimId && campaignClaimOwner && this.store.isOpen()) this.store.settleCampaignClaim(campaignClaimId, campaignClaimOwner, "completed", child.id);
               return response;
             };
             const gated = () => session.parentId
@@ -3272,6 +3503,7 @@ export class AgentRuntime {
               if (!["succeeded", "failed", "cancelled", "lost"].includes(current.status)) {
                 if (agentController.signal.aborted) await this.jobs.cancel(job.id, false);
                 else this.jobs.failAgent(job.id, error instanceof Error ? error.message : String(error), mode === "detached");
+                if (campaignClaimId && campaignClaimOwner && this.store.isOpen()) this.store.settleCampaignClaim(campaignClaimId, campaignClaimOwner, agentController.signal.aborted ? "released" : "failed", child.id);
               }
             }
             throw error;
@@ -3303,7 +3535,9 @@ export class AgentRuntime {
     await this.fireHooks(session, "tool.pre", toolCall.tool, { tool: toolCall.tool, toolCallId: toolCall.id, args: toolCall.args });
     try {
       lease.assertActive();
-      result = await deadline.run(() => tool.run(toolCall.args, context));
+      const operation = Promise.resolve().then(() => tool.run(toolCall.args, context));
+      this.trackToolOperation(operation);
+      result = await deadline.run(() => operation);
     } catch (error) {
       settleLiveOutput();
       releaseController();
@@ -3548,12 +3782,7 @@ export class AgentRuntime {
     if (command === "/context") return formatContextManifest(this.inspectContext(session));
     if (command === "/status") return this.summary(session);
     if (command === "/campaign") {
-      if (!session.campaignId) {
-        const campaigns = this.store.listCampaigns(this.workspace);
-        return campaigns.length ? campaigns.map((item) => `${item.id}\t${item.status}\t${item.name} (${item.kind})`).join("\n") : "No campaigns. Use campaign_create or ask Farai to start one.";
-      }
-      const dossier = this.store.campaignDossier(session.campaignId, rest.join(" "));
-      return JSON.stringify(dossier, null, 2);
+      return this.handleCampaignCommand(session, rest);
     }
     if (command === "/memory") {
       const kind = rest[0];
@@ -3566,13 +3795,67 @@ export class AgentRuntime {
     }
     if (command === "/findings") {
       const items = this.store.listFindings(session.id);
-      return items.length ? items.map((item) => `${item.severity}\t${item.title}\t${item.target}`).join("\n") : "No findings.";
+      if (items.length === 0) return "No findings.";
+      const open = items.filter((item) => item.status === undefined || item.status === "candidate" || item.status === "needs_verification").length;
+      return [
+        `findings · ${items.length} total · ${open} open`,
+        "",
+        ...items.slice().reverse().map((item) => [
+          `[${item.severity}] ${item.title}`,
+          `  target: ${item.target || "not recorded"}`,
+          `  status: ${(item.status ?? "candidate").replaceAll("_", " ")}`,
+          ...(item.cvssScore === undefined ? [] : [`  cvss: ${item.cvssScore.toFixed(1)}${item.cvssVector ? ` · ${item.cvssVector}` : ""}`]),
+          `  evidence: ${item.evidenceIds.length}`,
+          `  id: ${item.id}`
+        ].join("\n"))
+      ].join("\n\n");
     }
     if (command === "/report") {
       if (rest[0] === "save") return `Report saved: ${this.exportReport(session.id, { write: true }).path}`;
       return this.exportReport(session.id).markdown;
     }
     return `Unknown command ${command}. Try /mcp, /scan, /shell, /note, /todos, /events, /tools, /context, /status, /campaign, /memory, /evidence, /findings, /report.`;
+  }
+
+  private handleCampaignCommand(session: Session, args: string[]): string {
+    const [subcommand, ...rest] = args;
+    const runs = this.store.listCampaignRuns(this.workspace).filter((run) => run.rootSessionId === session.id);
+    const run = runs[0];
+    if (subcommand === "create" || subcommand === "start") {
+      const objective = rest.join(" ").trim();
+      if (!objective) return "usage: /campaign create <objective>";
+      const existingRun = this.store.listCampaignRuns(this.workspace).find((item) => item.rootSessionId === session.id && !["completed", "cancelled", "failed"].includes(item.status));
+      if (existingRun) return `campaign already active · ${existingRun.id}`;
+      const campaign = this.store.createCampaign({ workspace: this.workspace, name: objective.slice(0, 96), kind: "pentest", status: "active" });
+      let created: CampaignRun;
+      try {
+        created = this.campaignSupervisor.start(session.id, campaign.id, objective);
+      } catch (error) {
+        this.store.updateCampaign(campaign.id, { status: "archived" });
+        throw error;
+      }
+      return `campaign started · ${created.id} · ${created.objective}`;
+    }
+    if (!run) {
+      const campaigns = this.store.listCampaigns(this.workspace);
+      return campaigns.length
+        ? campaigns.map((item) => `${item.id}  ${item.status}  ${item.name} (${item.kind})`).join("\n")
+        : "no campaigns. use /campaign create <objective> or ask farai to start one.";
+    }
+    if (subcommand === "pause") return `campaign paused · ${this.campaignSupervisor.pause(run.id).id}`;
+    if (subcommand === "resume") return `campaign resumed · ${this.campaignSupervisor.resume(run.id).id}`;
+    if (subcommand === "stop" || subcommand === "cancel") return `campaign stopped · ${this.campaignSupervisor.stop(run.id).id}`;
+    if (subcommand === "waves") return this.store.listCampaignWaves(run.id).map((wave) => `${wave.sequence}  ${wave.status}  ${wave.objective}`).join("\n") || "no waves";
+    if (subcommand === "requirements") return this.store.listCampaignRequirements(run.id).map((item) => `${item.status}  ${item.key}  ${item.description}`).join("\n") || "no requirements";
+    if (subcommand === "evidence") return this.store.listEvidence(session.id).map((item) => `${item.id}  ${item.title}  ${item.summary}`).join("\n") || "no evidence";
+    if (subcommand === "report") return this.exportReport(session.id).markdown;
+    const status = this.campaignSupervisor.status(run.id);
+    return [
+      `campaign ${status.run.status} · ${status.run.id}`,
+      `objective: ${status.run.objective}`,
+      `waves: ${status.waves.length} · requirements: ${status.requirements.filter((item) => item.status === "satisfied").length}/${status.requirements.length}`,
+      `progress: ${status.progress[0]?.summary ?? "not recorded"}`
+    ].join("\n");
   }
 
   private renderMcpStatus(session: Session): string {
@@ -3745,7 +4028,7 @@ export class AgentRuntime {
       ...nonEmpty(evidence.map((item) => `- ${item.id}: ${item.title} — ${item.summary.slice(0, 180)}`)),
       "",
       "Findings:",
-      ...nonEmpty(findings.map((finding) => `- ${finding.severity}: ${finding.title} on ${finding.target}`)),
+      ...nonEmpty(findings.map((finding) => `- ${finding.severity}${finding.cvssScore === undefined ? "" : ` (cvss ${finding.cvssScore.toFixed(1)})`}: ${finding.title} on ${finding.target}`)),
       ...(attempts.length > 0 ? ["", "Campaign test attempts:", ...attempts.map((attempt) => `- ${attempt.status}/${attempt.evidenceLevel}: ${attempt.title} on ${attempt.target}`)] : []),
       "",
       "Recent tools:",
@@ -3784,6 +4067,27 @@ export class AgentRuntime {
       toolCalls: toolCalls.map((call) => ({ id: call.id, tool: call.tool, status: call.status })),
       activeBackgroundJobs: activeBackgroundJobs(this.store.listToolCalls(session.id, 200))
     });
+  }
+
+  private trackToolOperation(operation: Promise<unknown>): void {
+    this.activeToolOperations.add(operation);
+    void operation.finally(() => {
+      this.activeToolOperations.delete(operation);
+      if (this.activeToolOperations.size !== 0) return;
+      this.resolveToolOperationDrain?.();
+      this.resolveToolOperationDrain = undefined;
+      this.toolOperationDrain = undefined;
+    }).catch(() => undefined);
+  }
+
+  private waitForToolOperations(): Promise<void> {
+    if (this.activeToolOperations.size === 0) return Promise.resolve();
+    if (!this.toolOperationDrain) {
+      this.toolOperationDrain = new Promise<void>((resolve) => {
+        this.resolveToolOperationDrain = resolve;
+      });
+    }
+    return this.toolOperationDrain;
   }
 
   inspectContext(session: Session, hypotheticalInput?: string): ContextManifest {

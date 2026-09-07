@@ -40,6 +40,10 @@ export function buildRouterContext(input: RouterContextInput): RouterContext {
     historySearchActive: Boolean(tui.store.ui.historySearch),
     queuedCount: tui.store.snapshot.queuedPrompts.length,
     activeMainTab: tui.store.ui.activeMainTab,
+    findings: {
+      focus: tui.store.ui.findingsFocus,
+      filtering: tui.store.ui.findingsFiltering
+    },
     pendingUserInput: Boolean(pendingRequest),
     ...(pendingRequest && requestState && pendingQuestion && !requestState.dismissed ? {
       requestUserInput: {

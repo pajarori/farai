@@ -3,6 +3,7 @@ import type { TuiRuntimePort } from "../runtime-port";
 import { proxyFlowsForFilter } from "../store";
 import type { SessionOwner } from "./center-surface-controller";
 import { createControllerOperations } from "./controller-operation";
+import type { MainTab } from "../store";
 
 type ProxyControllerInput = {
   tui: TuiStoreValue;
@@ -19,10 +20,11 @@ export function createProxyController(input: ProxyControllerInput) {
     operations.invalidate();
   }
 
-  async function setMainTab(tab: "chat" | "proxy"): Promise<void> {
+  async function setMainTab(tab: MainTab): Promise<void> {
     if (tab !== "proxy") reset();
     tui.actions.mainTabSet(tab);
     if (tab === "proxy") await tui.refreshProxyFlows();
+    if (tab === "findings") await tui.refreshFindings();
   }
 
   async function openSelected(): Promise<void> {

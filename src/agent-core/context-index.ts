@@ -86,7 +86,7 @@ function documents(store: SqliteStore, sessionId: string): IndexedDocument[] {
     ...store.listFindings(sessionId).map((item) => ({
       id: item.id,
       kind: "finding",
-      text: `${item.severity} ${item.title} ${item.target} ${item.impact} ${item.reproduction} ${item.remediation}`,
+      text: `${item.severity} ${item.cvssScore === undefined ? "" : `cvss ${item.cvssScore}`} ${item.title} ${item.target} ${item.impact} ${item.reproduction} ${item.remediation}`,
       version: `${item.status ?? "candidate"}:${item.evidenceIds.join(",")}`
     }))
   ];

@@ -3,7 +3,7 @@ import { assertObject, asString } from "../../utils";
 import { resolveLane } from "../../agent-core/subagents/lanes";
 import { resolveSubagentToolScope } from "../../agent-core/subagents/scope";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { campaignIdFor, loadCampaign } from "./shared";
+import { assertCampaignAsset, campaignIdFor, loadCampaign } from "./shared";
 
 type DispatchTask = { title: string; prompt: string; lane?: string; assetIds?: string[]; claim?: string };
 
@@ -51,7 +51,20 @@ export const campaignDispatchTool: ToolDefinition = {
         });
       }
     }
+    const activeRun = context.campaignControl?.active();
+    if (activeRun && activeRun.campaignId !== campaignId) throw new Error("dispatch campaign does not match the active campaign run");
+    for (const task of tasks) for (const assetId of task.assetIds ?? []) assertCampaignAsset(context, campaignId, assetId);
+    const wave = activeRun
+      ? context.store.listCampaignWaves?.(activeRun.id).find((item) => item.id === activeRun.currentWaveId)
+      : undefined;
+    if (activeRun && !wave) throw new Error("active campaign run has no leased wave");
+    const owner = context.campaignControl?.owner ?? context.toolCallId ?? context.session.id;
     const results = await Promise.all(tasks.map(async (task) => {
+      const claim = activeRun && wave && context.store.createCampaignClaim && context.store.leaseCampaignClaim
+        ? context.store.createCampaignClaim({ runId: activeRun.id, waveId: wave.id, claimKey: normalizeClaim(task.claim ?? task.title), title: task.title, status: "available" })
+        : undefined;
+      const leasedClaim = claim && context.store.leaseCampaignClaim ? context.store.leaseCampaignClaim(claim.id, owner, 60_000) : undefined;
+      if (claim && !leasedClaim) throw new Error(`campaign claim is already owned: ${claim.claimKey}`);
       const contract = [
         `Campaign: ${campaign.name} (${campaign.kind})`,
         `Lane: ${task.lane ?? "unspecified"}`,
@@ -60,7 +73,20 @@ export const campaignDispatchTool: ToolDefinition = {
         "Worker contract: stay inside the exclusive claim; do not duplicate sibling work; save observations/evidence; create candidate hypotheses; never mark findings verified; return concise structured next steps.",
         `Task: ${task.prompt}`
       ].join("\n");
-      return { task, result: await context.delegateSession!({ title: `worker: ${task.title}`, prompt: contract, ...(task.lane ? { lane: task.lane } : {}), mode: background ? "detached" : "attached", linkToolCall: false }) };
+      try {
+        const result = await context.delegateSession!({ title: `worker: ${task.title}`, prompt: contract, ...(task.lane ? { lane: task.lane } : {}), mode: background ? "detached" : "attached", linkToolCall: false, ...(activeRun ? { campaignRunId: activeRun.id } : {}), ...(leasedClaim ? { campaignClaimId: leasedClaim.id, campaignClaimOwner: owner } : {}) });
+        if (leasedClaim && !background) {
+          if (context.store.settleCampaignClaim) context.store.settleCampaignClaim(leasedClaim.id, owner, "completed", result.sessionId);
+          else if (context.store.updateCampaignClaim) context.store.updateCampaignClaim(leasedClaim.id, { status: "completed", sessionId: result.sessionId, leaseOwner: null, leaseExpiresAt: null });
+        }
+        return { task, result, ...(leasedClaim ? { claimId: leasedClaim.id } : {}) };
+      } catch (error) {
+        if (leasedClaim) {
+          if (context.store.settleCampaignClaim) context.store.settleCampaignClaim(leasedClaim.id, owner, "failed");
+          else if (context.store.updateCampaignClaim) context.store.updateCampaignClaim(leasedClaim.id, { status: "failed", leaseOwner: null, leaseExpiresAt: null });
+        }
+        throw error;
+      }
     }));
     return {
       ok: true,

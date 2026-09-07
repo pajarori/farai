@@ -29,6 +29,7 @@ export type SkillDiagnostic = {
 export type SkillDiscoveryOptions = {
   workspace?: string;
   includeUser?: boolean;
+  includeContent?: boolean;
   extraRoots?: string[];
 };
 
@@ -128,8 +129,10 @@ export function renderSkillCatalog(workspace: string, maxChars = 8_000): string 
 
 function skillRoots(options: SkillDiscoveryOptions): SkillRoot[] {
   const roots: SkillRoot[] = [];
-  const content = activeContentSkillsDir();
-  if (content) roots.push({ path: content, source: "content", priority: 5 });
+  if (options.includeContent !== false) {
+    const content = activeContentSkillsDir();
+    if (content) roots.push({ path: content, source: "content", priority: 5 });
+  }
   if (options.includeUser !== false) roots.push({ path: join(homedir(), ".agents", "skills"), source: "user", priority: 10 });
   const environmentRoots = [
     ...(process.env.FARAI_SKILLS_DIR?.split(delimiter) ?? []),

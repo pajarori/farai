@@ -126,6 +126,11 @@ export type SessionListItem = {
   running: boolean;
 };
 
+export type FindingsSnapshot = {
+  findings: Finding[];
+  scopeLabel: string;
+};
+
 export type ModelCatalogSnapshot = {
   providers: ModelProviderInfo[];
   models: ModelChoiceInfo[];
@@ -193,6 +198,7 @@ export interface TuiRuntimePort {
   startContainer(): Promise<void>;
   stopContainer(): Promise<void>;
   loadSnapshot(sessionId: string): Promise<SessionSnapshot>;
+  loadFindings(sessionId: string): Promise<FindingsSnapshot>;
   loadActivityState(sessionId: string): Promise<ActivityState>;
   prompt(sessionId: string, input: string): Promise<AgentPromptResult>;
   answerUserInput(sessionId: string, input: string): Promise<UserInputAnswer>;
@@ -745,6 +751,17 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       await runtime.stopContainer(activeSessionId);
     },
     async loadSnapshot(sessionId) { return readSnapshot(sessionId); },
+    async loadFindings(sessionId) {
+      const session = store.loadSession(sessionId);
+      return {
+        findings: store.listFindingsForSessionScope(sessionId),
+        scopeLabel: session.campaignRunId
+          ? `run ${session.campaignRunId}`
+          : session.campaignId
+            ? `campaign ${session.campaignId}`
+            : "current session"
+      };
+    },
     async loadActivityState(sessionId) {
       return {
         backgroundActivities: summarizeBackgroundActivities(store, sessionId),
