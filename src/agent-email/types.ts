@@ -5,6 +5,21 @@ export type EmailAuthMode = "password" | "oauth";
 export type EmailCredentialStorage = "system" | "session";
 export type EmailRole = "primary" | "secondary";
 
+export type EmailPasswordCredential = { kind: "password"; secret: string };
+export type EmailOAuthCredential = {
+  kind: "oauth";
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: string;
+  clientId: string;
+  clientSecret?: string;
+  scopes: string[];
+  authorizeUrl: string;
+  tokenUrl: string;
+  deviceCodeUrl?: string;
+};
+export type EmailCredential = EmailPasswordCredential | EmailOAuthCredential;
+
 export type EmailProviderPreset = {
   id: EmailProviderID;
   label: string;
@@ -12,7 +27,10 @@ export type EmailProviderPreset = {
   port: number;
   secure: boolean;
   auth: EmailAuthMode;
+  authMethods: EmailAuthMode[];
   credentialLabel: string;
+  appPasswordUrl?: string;
+  credentialHint?: string;
 };
 
 export type EmailAccountInfo = {
@@ -43,6 +61,7 @@ export type SaveEmailAccountInput = {
   secure?: boolean;
   auth?: EmailAuthMode;
   credential?: string;
+  oauthCredential?: EmailOAuthCredential;
   credentialAction?: "keep" | "replace" | "remove";
   credentialStorage?: EmailCredentialStorage;
   location?: ConfigLocation;

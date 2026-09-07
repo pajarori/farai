@@ -73,7 +73,7 @@ export function buildRouterContext(input: RouterContextInput): RouterContext {
       emailAccountWizard: {
         field: tui.store.ui.emailAccountWizard.field,
         busy: tui.store.ui.emailAccountWizard.busy,
-        cancellable: tui.store.ui.emailAccountWizard.busyKind === "probe"
+        cancellable: tui.store.ui.emailAccountWizard.busyKind === "probe" || tui.store.ui.emailAccountWizard.busyKind === "connect"
       }
     } : {}),
     ...(tui.store.ui.emailAccountRemoval ? { emailAccountRemoval: { busy: tui.store.ui.emailAccountRemoval.busy } } : {}),

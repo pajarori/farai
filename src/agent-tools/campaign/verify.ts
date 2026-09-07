@@ -5,8 +5,23 @@ import { assertCampaignEvidence, campaignIdFor, loadCampaign, requireCampaignSto
 
 export const campaignVerifyTool: ToolDefinition = {
   name: "campaign_verify",
-  description: "Change a campaign finding's verification state using explicit evidence and a reproducible test attempt. Verified status requires a passed attempt with demonstrated impact or independent cross-session verification; use this only after report_add_finding has created the candidate.",
-  inputSchema: { type: "object", required: ["findingId", "status"], properties: { campaignId: { type: "string" }, findingId: { type: "string" }, status: { type: "string" }, testAttemptId: { type: "string" }, evidenceIds: { type: "array", items: { type: "string" } }, duplicateOf: { type: "string" }, reproduction: { type: "string" }, impact: { type: "string" }, remediation: { type: "string" } } },
+  description: "Change a campaign finding's lifecycle state using explicit evidence and a reproducible test attempt. Use only after report_add_finding created the candidate. Use verified only with a passed campaign_test at impact_demonstrated or independently_verified; use duplicate only when duplicateOf points to the canonical finding.",
+  inputSchema: {
+    type: "object",
+    required: ["findingId", "status"],
+    properties: {
+      campaignId: { type: "string", description: "campaign id; omit when the active campaign owns the finding" },
+      findingId: { type: "string", description: "finding id returned by report_add_finding or campaign search" },
+      status: { type: "string", enum: ["candidate", "needs_verification", "verified", "duplicate", "not_applicable", "reported", "accepted", "rejected"], description: "lifecycle state; verified has strict evidence requirements" },
+      testAttemptId: { type: "string", description: "required for verified; must reference a passed campaign_test" },
+      evidenceIds: { type: "array", items: { type: "string" }, uniqueItems: true, description: "evidence supporting the state; required and linked to the test for verified" },
+      duplicateOf: { type: "string", description: "canonical finding id when status is duplicate" },
+      reproduction: { type: "string", description: "concise reproducible steps to preserve on the finding" },
+      impact: { type: "string", description: "observed security impact, not an unverified possibility" },
+      remediation: { type: "string", description: "specific remediation supported by the observed issue" }
+    },
+    additionalProperties: false
+  },
   mutates: true,
   timeoutMs: 5_000,
   parallel: false,
@@ -17,7 +32,8 @@ export const campaignVerifyTool: ToolDefinition = {
     const campaignId = campaignIdFor(context, args);
     loadCampaign(context, campaignId);
     const status = asString(args.status, "status") as FindingStatus;
-    if (!["needs_verification", "verified", "duplicate", "not_applicable", "reported", "accepted", "rejected"].includes(status)) throw new Error(`unsupported finding status: ${status}`);
+    const allowedStatuses = ["candidate", "needs_verification", "verified", "duplicate", "not_applicable", "reported", "accepted", "rejected"] as const;
+    if (!allowedStatuses.includes(status)) throw new Error(`unsupported finding status: ${status}; use one of: ${allowedStatuses.join(", ")}`);
     if (status === "verified" && (!Array.isArray(args.evidenceIds) || args.evidenceIds.length === 0)) throw new Error("verified findings require evidenceIds");
     if (status === "verified" && (typeof args.testAttemptId !== "string" || !args.testAttemptId.trim())) throw new Error("verified findings require a passed testAttemptId");
     if (!context.store.updateFinding || !context.store.loadFinding) throw new Error("finding update is unavailable");

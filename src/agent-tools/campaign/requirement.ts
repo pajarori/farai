@@ -35,7 +35,7 @@ export const campaignRequirementTool: ToolDefinition = {
     const description = asString(args.description, "description").trim();
     if (!key || !description) throw new Error("requirement key and description must be non-empty");
     const status = (typeof args.status === "string" ? args.status : "pending") as CampaignRequirementStatus;
-    if (!STATUSES.includes(status)) throw new Error(`unsupported requirement status: ${status}`);
+    if (!STATUSES.includes(status)) throw new Error(`unsupported requirement status: ${status}; use one of: ${STATUSES.join(", ")}`);
     const evidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String).filter(Boolean) : [];
     assertCampaignEvidence(context, campaignId, evidenceIds);
     if (status === "satisfied" && evidenceIds.length === 0) throw new Error("satisfied requirements require evidenceIds");

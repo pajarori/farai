@@ -10,7 +10,7 @@ export const cvssCalculateTool: ToolDefinition = {
     type: "object",
     required: ["vector"],
     properties: {
-      vector: { type: "string", description: "complete CVSS:3.1 base vector, for example CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" }
+      vector: { type: "string", description: "complete CVSS:3.1 base vector in this order or any order: CVSS:3.1/AV:<N|A|L|P>/AC:<L|H>/PR:<N|L|H>/UI:<N|R>/S:<U|C>/C:<N|L|H>/I:<N|L|H>/A:<N|L|H>" }
     },
     additionalProperties: false
   },

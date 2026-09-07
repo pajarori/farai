@@ -37,7 +37,7 @@ export const lspInspectTool: ToolDefinition = {
     if (!context.lsp) throw new Error("LSP is unavailable in this runtime");
     assertObject(args, "args");
     const operation = asString(args.operation, "operation") as LspInspectOperation;
-    if (!OPERATIONS.has(operation)) throw new Error(`unsupported LSP operation: ${operation}`);
+    if (!OPERATIONS.has(operation)) throw new Error(`unsupported LSP operation: ${operation}; use one of: ${[...OPERATIONS].join(", ")}`);
     const path = asString(args.path, "path");
     const positional = operation === "definition" || operation === "references" || operation === "hover";
     const line = positiveInteger(args.line, "line", positional);

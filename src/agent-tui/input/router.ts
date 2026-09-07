@@ -123,7 +123,9 @@ export type RouterAction =
   | { kind: "emailAccount.next"; test?: boolean }
   | { kind: "emailAccount.back" }
   | { kind: "emailAccount.providerMove"; delta: number }
+  | { kind: "emailAccount.methodMove"; delta: number }
   | { kind: "emailAccount.storageMove"; delta: number }
+  | { kind: "emailAccount.connect"; mode: "loopback" | "device" }
   | { kind: "emailAccount.secretBackspace" }
   | { kind: "emailAccount.credentialRemove" }
   | { kind: "emailAccountRemoval.confirm" }
@@ -183,7 +185,7 @@ export type RouterContext = {
     busy: boolean;
   };
   emailAccountWizard?: {
-    field: "provider" | "label" | "address" | "username" | "endpoint" | "credential" | "storage" | "review";
+    field: "provider" | "method" | "label" | "address" | "username" | "endpoint" | "clientId" | "clientSecret" | "connect" | "credential" | "storage" | "review";
     busy: boolean;
     cancellable?: boolean;
   };
@@ -329,14 +331,25 @@ function routeEmailAccountWizard(key: KeyToken, state: NonNullable<RouterContext
     if (key.name === "return") return consumed({ kind: "emailAccount.next" });
     return consumed();
   }
+  if (state.field === "method") {
+    if (key.name === "up" || key.name === "left") return consumed({ kind: "emailAccount.methodMove", delta: -1 });
+    if (key.name === "down" || key.name === "right") return consumed({ kind: "emailAccount.methodMove", delta: 1 });
+    if (key.name === "return") return consumed({ kind: "emailAccount.next" });
+    return consumed();
+  }
+  if (state.field === "connect") {
+    if (key.name === "d" && !key.ctrl && !key.meta) return consumed({ kind: "emailAccount.connect", mode: "device" });
+    if (key.name === "return") return consumed({ kind: "emailAccount.connect", mode: "loopback" });
+    return consumed();
+  }
   if (state.field === "storage") {
     if (key.name === "up" || key.name === "left") return consumed({ kind: "emailAccount.storageMove", delta: -1 });
     if (key.name === "down" || key.name === "right") return consumed({ kind: "emailAccount.storageMove", delta: 1 });
     if (key.name === "return") return consumed({ kind: "emailAccount.next" });
     return consumed();
   }
-  if (state.field === "credential") {
-    if (key.ctrl && key.name === "r") return consumed({ kind: "emailAccount.credentialRemove" });
+  if (state.field === "credential" || state.field === "clientSecret") {
+    if (state.field === "credential" && key.ctrl && key.name === "r") return consumed({ kind: "emailAccount.credentialRemove" });
     if (key.name === "backspace") return consumed({ kind: "emailAccount.secretBackspace" });
     if (key.name === "return") return consumed({ kind: "emailAccount.next" });
     return PASSTHROUGH;

@@ -5,22 +5,23 @@ import { cvssAssessment } from "./shared";
 
 export const reportAddFindingTool: ToolDefinition = {
   name: "report_add_finding",
-  description: "Create and persist a candidate security finding for the current session; persisted findings immediately appear in Farai's Findings tab and reports. For every new finding, provide cvssVector as a complete CVSS:3.1 base vector; Farai calculates cvssScore and derives severity from that score. The severity input is retained only for legacy records without CVSS data. This drafts a finding but does not verify it; campaign findings require campaign_verify and reproducible evidence before being treated as confirmed.",
+  description: "Create and persist a candidate security finding for the current session; persisted findings immediately appear in Farai's Findings tab and reports. Provide a complete CVSS:3.1 base vector; Farai calculates the score and derives severity. This drafts a finding but does not verify it; campaign findings require campaign_verify and reproducible evidence before being treated as confirmed.",
   inputSchema: {
     type: "object",
     required: ["title", "cvssVector"],
     properties: {
-      title: { type: "string" },
-      cvssVector: { type: "string", description: "complete CVSS:3.1 base vector, for example CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" },
-      severity: { type: "string", description: "deprecated legacy input; severity is always derived from cvssVector" },
-      target: { type: "string" },
-      evidenceIds: { type: "array", items: { type: "string" } },
-      impact: { type: "string" },
-      reproduction: { type: "string" },
-      remediation: { type: "string" }
-      ,campaignId: { type: "string" }
-      ,hypothesisId: { type: "string" }
-    }
+      title: { type: "string", description: "short, specific vulnerability title" },
+      cvssVector: { type: "string", description: "complete CVSS:3.1 base vector. use only AV, AC, PR, UI, S, C, I, and A metrics; calculate it with cvss_calculate first when uncertain" },
+      severity: { type: "string", description: "legacy compatibility only; ignored when cvssVector is present. never use this to guess severity" },
+      target: { type: "string", description: "affected URL, endpoint, host, service, file, or asset" },
+      evidenceIds: { type: "array", items: { type: "string" }, uniqueItems: true, description: "ids of saved evidence that directly support the finding" },
+      impact: { type: "string", description: "security impact demonstrated by the evidence" },
+      reproduction: { type: "string", description: "minimal reproducible steps and observed result" },
+      remediation: { type: "string", description: "specific corrective action" },
+      campaignId: { type: "string", description: "campaign to attach; normally inherited from the active campaign" },
+      hypothesisId: { type: "string", description: "campaign hypothesis supported by this candidate" }
+    },
+    additionalProperties: false
   },
   mutates: true,
   timeoutMs: 5_000,

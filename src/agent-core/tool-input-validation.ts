@@ -19,7 +19,7 @@ export function validateToolArgs(schema: Record<string, unknown> | undefined, ar
   }
   if (validate(args)) return undefined;
   const error = validate.errors?.[0];
-  return error ? formatValidationError(error) : "arguments do not match the tool input schema";
+  return error ? formatValidationError(error, schema) : "arguments do not match the tool input schema";
 }
 
 function compiledValidator(schema: Record<string, unknown>): ValidateFunction {
@@ -32,13 +32,13 @@ function compiledValidator(schema: Record<string, unknown>): ValidateFunction {
   return validate;
 }
 
-function formatValidationError(error: ErrorObject): string {
+function formatValidationError(error: ErrorObject, schema: Record<string, unknown>): string {
   const path = pointerPath(error.instancePath);
   switch (error.keyword) {
     case "required":
       return `missing required field "${joinFieldPath(path, String(error.params.missingProperty ?? ""))}"`;
     case "additionalProperties":
-      return `unexpected field "${joinFieldPath(path, String(error.params.additionalProperty ?? ""))}"`;
+      return unexpectedFieldError(path, String(error.params.additionalProperty ?? ""), schema);
     case "type":
       return `${fieldName(path)} should be of type ${String(error.params.type ?? "the declared schema type")}`;
     case "enum":
@@ -80,6 +80,40 @@ function formatValidationError(error: ErrorObject): string {
     default:
       return `${fieldName(path)} ${error.message ?? `failed ${error.keyword} validation`}`;
   }
+}
+
+function unexpectedFieldError(path: string, property: string, schema: Record<string, unknown>): string {
+  const field = joinFieldPath(path, property);
+  const enumOwner = enumOwnerForValue(schema, property);
+  return enumOwner
+    ? `unexpected field "${field}"; use field "${enumOwner}" with value "${property}"`
+    : `unexpected field "${field}"`;
+}
+
+function enumOwnerForValue(schema: unknown, value: string): string | undefined {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined;
+  const record = schema as Record<string, unknown>;
+  const properties = record.properties;
+  if (properties && typeof properties === "object" && !Array.isArray(properties)) {
+    for (const [name, propertySchema] of Object.entries(properties as Record<string, unknown>)) {
+      if (propertySchema && typeof propertySchema === "object" && !Array.isArray(propertySchema)) {
+        const allowed = (propertySchema as Record<string, unknown>).enum;
+        if (Array.isArray(allowed) && allowed.includes(value)) return name;
+      }
+    }
+  }
+  for (const nested of Object.values(record)) {
+    if (Array.isArray(nested)) {
+      for (const item of nested) {
+        const owner = enumOwnerForValue(item, value);
+        if (owner) return owner;
+      }
+    } else {
+      const owner = enumOwnerForValue(nested, value);
+      if (owner) return owner;
+    }
+  }
+  return undefined;
 }
 
 function pointerPath(pointer: string): string {

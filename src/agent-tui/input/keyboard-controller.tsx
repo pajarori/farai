@@ -180,8 +180,14 @@ export function KeyboardController(): JSX.Element {
       case "emailAccount.providerMove":
         emailAccount.providerMove(action.delta);
         return;
+      case "emailAccount.methodMove":
+        emailAccount.methodMove(action.delta);
+        return;
       case "emailAccount.storageMove":
         emailAccount.storageMove(action.delta);
+        return;
+      case "emailAccount.connect":
+        await emailAccount.connect(action.mode);
         return;
       case "emailAccount.secretBackspace":
         emailAccount.secretBackspace();

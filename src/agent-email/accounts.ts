@@ -3,16 +3,18 @@ import { configPath, loadRawConfig, writeConfig, type ConfigLocation, type Farai
 import { secretStore, type SecretLocator, type SecretStore } from "../agent-core/secret-store";
 import { id as createID } from "../utils";
 import { probeImapAccount } from "./imap";
+import { oauthCredentialExpired, parseEmailCredential, serializeEmailCredential } from "./credential";
+import { refreshEmailOAuth } from "./oauth";
 import type { EmailAccountInfo, EmailAccountProbe, EmailAuthMode, EmailCredentialStorage, EmailProviderID, EmailProviderPreset, ProbeEmailAccountInput, SaveEmailAccountInput } from "./types";
 
 export const EMAIL_PROVIDER_PRESETS: readonly EmailProviderPreset[] = [
-  { id: "gmail", label: "gmail", host: "imap.gmail.com", port: 993, secure: true, auth: "password", credentialLabel: "app password" },
-  { id: "yahoo", label: "yahoo", host: "imap.mail.yahoo.com", port: 993, secure: true, auth: "password", credentialLabel: "app password" },
-  { id: "outlook", label: "outlook", host: "outlook.office365.com", port: 993, secure: true, auth: "oauth", credentialLabel: "oauth access token" },
-  { id: "icloud", label: "icloud", host: "imap.mail.me.com", port: 993, secure: true, auth: "password", credentialLabel: "app-specific password" },
-  { id: "fastmail", label: "fastmail", host: "imap.fastmail.com", port: 993, secure: true, auth: "password", credentialLabel: "app password" },
-  { id: "zoho", label: "zoho", host: "imap.zoho.com", port: 993, secure: true, auth: "password", credentialLabel: "app password" },
-  { id: "custom", label: "custom imap", host: "", port: 993, secure: true, auth: "password", credentialLabel: "password or app password" }
+  { id: "gmail", label: "gmail", host: "imap.gmail.com", port: 993, secure: true, auth: "oauth", authMethods: ["oauth", "password"], credentialLabel: "app password", appPasswordUrl: "https://myaccount.google.com/apppasswords" },
+  { id: "yahoo", label: "yahoo", host: "imap.mail.yahoo.com", port: 993, secure: true, auth: "password", authMethods: ["password", "oauth"], credentialLabel: "app password", appPasswordUrl: "https://login.yahoo.com/account/security/app-passwords" },
+  { id: "outlook", label: "outlook", host: "outlook.office365.com", port: 993, secure: true, auth: "oauth", authMethods: ["oauth"], credentialLabel: "oauth access token" },
+  { id: "icloud", label: "icloud", host: "imap.mail.me.com", port: 993, secure: true, auth: "password", authMethods: ["password"], credentialLabel: "app-specific password", appPasswordUrl: "https://account.apple.com/account/manage" },
+  { id: "fastmail", label: "fastmail", host: "imap.fastmail.com", port: 993, secure: true, auth: "password", authMethods: ["password"], credentialLabel: "app password", appPasswordUrl: "https://app.fastmail.com/settings/security/apppassword" },
+  { id: "zoho", label: "zoho", host: "imap.zoho.com", port: 993, secure: true, auth: "password", authMethods: ["password"], credentialLabel: "app-specific password", appPasswordUrl: "https://accounts.zoho.com/home#security/app_password" },
+  { id: "custom", label: "custom imap", host: "", port: 993, secure: true, auth: "password", authMethods: ["password", "oauth"], credentialLabel: "password or app password" }
 ];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -48,9 +50,15 @@ export function findEmailAccount(workspace: string, emailId: string): EmailAccou
 }
 
 export async function readEmailCredential(workspace: string, account: EmailAccountInfo, signal?: AbortSignal): Promise<string> {
-  const credential = await secretStore.get(emailSecretLocator(account.id, account.location, workspace), account.credentialStorage, signal);
-  if (!credential) throw new Error(`${account.label} has no usable credential. open /email and reconnect it`);
-  return credential;
+  const locator = emailSecretLocator(account.id, account.location, workspace);
+  const raw = await secretStore.get(locator, account.credentialStorage, signal);
+  if (!raw) throw new Error(`${account.label} has no usable credential. open /email and reconnect it`);
+  const credential = parseEmailCredential(raw);
+  if (credential.kind === "password") return credential.secret;
+  if (!oauthCredentialExpired(credential)) return credential.accessToken;
+  const refreshed = await refreshEmailOAuth(credential, signal);
+  await secretStore.set(locator, serializeEmailCredential(refreshed), account.credentialStorage, signal);
+  return refreshed.accessToken;
 }
 
 export async function saveEmailAccount(workspace: string, input: SaveEmailAccountInput, signal?: AbortSignal, secrets: SecretStore = secretStore): Promise<EmailAccountInfo> {
@@ -71,7 +79,7 @@ export async function saveEmailAccount(workspace: string, input: SaveEmailAccoun
   const auth = normalizeAuth(input.auth ?? preset.auth);
   const credentialStorage = normalizeStorage(input.credentialStorage ?? previous?.credentialStorage ?? "system");
   const credentialAction = input.credentialAction ?? "keep";
-  const credential = input.credential?.trim();
+  const credential = input.oauthCredential ? serializeEmailCredential(input.oauthCredential) : input.credential?.trim();
   if (credentialAction === "replace" && !credential) throw new Error(`${preset.credentialLabel} cannot be empty`);
   const previousConfigured = previous?.credentialConfigured ?? false;
   const credentialConfigured = credentialAction === "replace" ? true : credentialAction === "remove" ? false : previousConfigured;

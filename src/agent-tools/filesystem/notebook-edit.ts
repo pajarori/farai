@@ -41,9 +41,10 @@ export const notebookEditTool: ToolDefinition = {
     if (typeof args.index !== "number" || !Number.isFinite(args.index) || !Number.isInteger(args.index)) throw new Error("index must be a finite integer");
     const index = args.index;
     const operation = asString(args.operation, "operation");
-    if (operation !== "insert_cell" && operation !== "replace_cell" && operation !== "delete_cell") throw new Error(`unsupported notebook operation: ${operation}`);
+    const allowedOperations = ["insert_cell", "replace_cell", "delete_cell"] as const;
+    if (!allowedOperations.includes(operation as typeof allowedOperations[number])) throw new Error(`unsupported notebook operation: ${operation}; use one of: ${allowedOperations.join(", ")}`);
     if (args.cellType !== undefined && args.cellType !== "code" && args.cellType !== "markdown" && args.cellType !== "raw") {
-      throw new Error("cellType must be code, markdown, or raw");
+      throw new Error("cellType must be one of: code, markdown, raw");
     }
     if (index < 0 || index > notebook.cells.length || (operation !== "insert_cell" && index >= notebook.cells.length)) throw new Error(`cell index out of range: ${index}`);
     if (operation === "delete_cell") notebook.cells.splice(index, 1);

@@ -24,7 +24,8 @@ export const campaignCreateTool: ToolDefinition = {
     const existingRun = context.store.listCampaignRuns?.(context.rootWorkspace ?? context.workspace).find((item) => (item.rootSessionId === context.session.id || item.id === context.session.campaignRunId) && !["completed", "cancelled", "failed"].includes(item.status));
     if (existingRun) throw new Error(`session already has a campaign run: ${existingRun.id}`);
     const kind = asString(args.kind, "kind") as Campaign["kind"];
-    if (!["pentest", "bug_bounty", "ctf", "lab"].includes(kind)) throw new Error(`unsupported campaign kind: ${kind}`);
+    const allowedKinds = ["pentest", "bug_bounty", "ctf", "lab"] as const;
+    if (!allowedKinds.includes(kind as typeof allowedKinds[number])) throw new Error(`unsupported campaign kind: ${kind}; use one of: ${allowedKinds.join(", ")}`);
     const campaign = context.store.createCampaign?.({
       workspace: context.rootWorkspace ?? context.workspace,
       name: asString(args.name, "name"),

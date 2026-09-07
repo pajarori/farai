@@ -2172,13 +2172,24 @@ export class SqliteStore {
     return findingFromRow(row);
   }
 
-  updateFinding(findingId: string, patch: Partial<Pick<Finding, "status" | "evidenceIds" | "impact" | "reproduction" | "remediation" | "duplicateOf">>): Finding {
+  updateFinding(findingId: string, patch: Partial<Pick<Finding, "title" | "cvssVector" | "target" | "status" | "evidenceIds" | "impact" | "reproduction" | "remediation" | "duplicateOf">>): Finding {
     const current = this.loadFinding(findingId);
-    const next: Finding = { ...current, ...patch };
+    const scored = patch.cvssVector ? calculateCvss31(patch.cvssVector) : undefined;
+    const next: Finding = {
+      ...current,
+      ...patch,
+      ...(scored ? { cvssVector: scored.vector, cvssScore: scored.score, severity: scored.severity } : {})
+    };
     this.database().query(
-      `update findings set status = $status, evidence_ids_json = $evidence, impact = $impact,
+      `update findings set title = $title, severity = $severity, cvss_vector = $cvssVector, cvss_score = $cvssScore,
+       target = $target, status = $status, evidence_ids_json = $evidence, impact = $impact,
        reproduction = $reproduction, remediation = $remediation, duplicate_of = $duplicate where id = $id`
     ).run({
+      $title: assertPersistedText(next.title, PERSISTENCE_LIMITS.shortTextBytes, "finding title"),
+      $severity: next.severity,
+      $cvssVector: next.cvssVector ?? null,
+      $cvssScore: next.cvssScore ?? null,
+      $target: assertPersistedText(next.target, PERSISTENCE_LIMITS.shortTextBytes, "finding target"),
       $status: next.status ?? "candidate",
       $evidence: stringifyPersistedJson(next.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "finding evidence ids"),
       $impact: assertPersistedText(next.impact, PERSISTENCE_LIMITS.documentTextBytes, "finding impact"),

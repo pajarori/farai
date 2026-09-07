@@ -37,8 +37,10 @@ import type { ContextManifest } from "../agent-core/context-engine";
 import { browserContextManager, type BrowserContextActivity } from "../agent-tools/browser/context-manager";
 import { listConfiguredMcpServers, removeMcpServer, saveMcpServer, setMcpServerEnabled, type McpServerInfo, type SaveMcpServerInput } from "../agent-core/mcp-server-management";
 import { listEmailAccounts, probeEmailAccount, removeEmailAccount, saveEmailAccount } from "../agent-email/accounts";
+import { emailOAuthProvider } from "../agent-email/oauth-providers";
+import { authorizeEmailOAuthDeviceCode, authorizeEmailOAuthLoopback, type DeviceCodePrompt, type EmailOAuthClient } from "../agent-email/oauth";
 import { disposableInboxManager } from "../agent-email/tempmail";
-import type { DisposableInboxActivity, EmailAccountInfo, EmailAccountProbe, ProbeEmailAccountInput, SaveEmailAccountInput } from "../agent-email/types";
+import type { DisposableInboxActivity, EmailAccountInfo, EmailAccountProbe, EmailOAuthCredential, EmailProviderID, ProbeEmailAccountInput, SaveEmailAccountInput } from "../agent-email/types";
 
 export type TuiEvent =
   | { type: "event.appended"; sessionId: string; event: SessionEvent }
@@ -160,6 +162,15 @@ export type RemoveEmailAccountResult = {
   updatedSessions: number;
 };
 
+export type EmailOAuthAuthorizeInput = {
+  provider: EmailProviderID;
+  clientId: string;
+  clientSecret?: string;
+  loginHint?: string;
+  scopes?: string[];
+  mode: "loopback" | "device";
+};
+
 export interface TuiRuntimePort {
   listSessions(): Promise<Session[]>;
   listSessionItems(): Promise<SessionListItem[]>;
@@ -184,6 +195,7 @@ export interface TuiRuntimePort {
   loadEmailCatalog(): Promise<EmailCatalogSnapshot>;
   probeEmailAccount(input: ProbeEmailAccountInput, signal?: AbortSignal): Promise<EmailAccountProbe>;
   saveEmailAccount(input: SaveEmailAccountInput, signal?: AbortSignal): Promise<EmailCatalogSnapshot>;
+  authorizeEmailOAuth(input: EmailOAuthAuthorizeInput, onPrompt: (prompt: DeviceCodePrompt) => void, signal: AbortSignal): Promise<EmailOAuthCredential>;
   removeEmailAccount(accountID: string): Promise<RemoveEmailAccountResult>;
   refreshMcp(): Promise<void>;
   loadMcpCatalog(): Promise<McpCatalogSnapshot>;
@@ -674,6 +686,20 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     async saveEmailAccount(input, signal) {
       await saveEmailAccount(runtime.workspace, input, signal);
       return { accounts: listEmailAccounts(runtime.workspace) };
+    },
+    async authorizeEmailOAuth(input, onPrompt, signal) {
+      const provider = emailOAuthProvider(input.provider);
+      if (!provider) throw new Error("this provider does not support oauth sign-in");
+      const client: EmailOAuthClient = {
+        provider,
+        clientId: input.clientId,
+        ...(input.clientSecret ? { clientSecret: input.clientSecret } : {}),
+        scopes: input.scopes?.length ? input.scopes : provider.defaultScopes,
+        ...(input.loginHint ? { loginHint: input.loginHint } : {})
+      };
+      return input.mode === "device"
+        ? await authorizeEmailOAuthDeviceCode(client, onPrompt, signal)
+        : await authorizeEmailOAuthLoopback(client, signal);
     },
     async removeEmailAccount(emailId) {
       const removed = await removeEmailAccount(runtime.workspace, emailId);

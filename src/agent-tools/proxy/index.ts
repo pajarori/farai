@@ -242,7 +242,8 @@ export const proxyInterceptTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const action = asString(args.action, "action");
-    if (!["status", "configure", "list", "forward", "edit", "drop"].includes(action)) throw new Error(`unsupported proxy interception action: ${action}`);
+    const allowedActions = ["status", "configure", "list", "forward", "edit", "drop"] as const;
+    if (!allowedActions.includes(action as typeof allowedActions[number])) throw new Error(`unsupported proxy interception action: ${action}; use one of: ${allowedActions.join(", ")}`);
     validateInterceptArguments(action, args);
     if (action === "configure" || action === "status") {
       const raw = action === "status"

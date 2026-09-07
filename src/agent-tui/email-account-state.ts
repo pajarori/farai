@@ -1,26 +1,32 @@
 import { EMAIL_PROVIDER_PRESETS, emailProviderPreset } from "../agent-email/accounts";
-import type { EmailAccountInfo, EmailCredentialStorage, EmailProviderID, SaveEmailAccountInput } from "../agent-email/types";
+import { emailOAuthProvider } from "../agent-email/oauth-providers";
+import type { EmailAccountInfo, EmailAuthMode, EmailCredentialStorage, EmailOAuthCredential, EmailProviderID, SaveEmailAccountInput } from "../agent-email/types";
 
 export type EmailAccountWizardMode = "add" | "edit";
-export type EmailAccountWizardField = "provider" | "label" | "address" | "username" | "endpoint" | "credential" | "storage" | "review";
+export type EmailAccountWizardField = "provider" | "method" | "label" | "address" | "username" | "endpoint" | "clientId" | "clientSecret" | "connect" | "credential" | "storage" | "review";
 
 export type EmailAccountWizardState = {
   mode: EmailAccountWizardMode;
   field: EmailAccountWizardField;
   id?: string;
   provider: EmailProviderID;
+  method: EmailAuthMode;
   label: string;
   address: string;
   username: string;
   endpoint: string;
+  clientId: string;
+  clientSecret: string;
   credential: string;
   credentialStored: boolean;
   removeCredential: boolean;
+  oauthCredential?: EmailOAuthCredential | undefined;
+  devicePrompt?: { userCode: string; verificationUri: string } | undefined;
   storage: EmailCredentialStorage;
   location: "global" | "project";
   probe: import("../agent-email/types").EmailAccountProbe | undefined;
   busy: boolean;
-  busyKind?: "probe" | "save" | undefined;
+  busyKind?: "probe" | "save" | "connect" | undefined;
   error: string | undefined;
 };
 
@@ -33,10 +39,13 @@ export function createEmailAccountWizard(account?: EmailAccountInfo): EmailAccou
       mode: "add",
       field: "provider",
       provider: "gmail",
+      method: defaultAuthMethod("gmail"),
       label: "",
       address: "",
       username: "",
       endpoint: endpointValue(preset.host, preset.port, preset.secure),
+      clientId: "",
+      clientSecret: "",
       credential: "",
       credentialStored: false,
       removeCredential: false,
@@ -52,10 +61,13 @@ export function createEmailAccountWizard(account?: EmailAccountInfo): EmailAccou
     field: "provider",
     id: account.id,
     provider: account.provider,
+    method: availableAuthMethods(account.provider).includes(account.auth) ? account.auth : defaultAuthMethod(account.provider),
     label: account.label,
     address: account.address,
     username: account.username,
     endpoint: endpointValue(account.host, account.port, account.secure),
+    clientId: "",
+    clientSecret: "",
     credential: "",
     credentialStored: account.credentialConfigured,
     removeCredential: false,
@@ -65,6 +77,23 @@ export function createEmailAccountWizard(account?: EmailAccountInfo): EmailAccou
     busy: false,
     error: undefined
   };
+}
+
+export function availableAuthMethods(provider: EmailProviderID): EmailAuthMode[] {
+  const preset = emailProviderPreset(provider);
+  return preset.authMethods.filter((method) => method === "password" || Boolean(emailOAuthProvider(provider)));
+}
+
+export function defaultAuthMethod(provider: EmailProviderID): EmailAuthMode {
+  const methods = availableAuthMethods(provider);
+  const preset = emailProviderPreset(provider);
+  return methods.includes(preset.auth) ? preset.auth : methods[0] ?? "password";
+}
+
+export function emailMethodMove(state: EmailAccountWizardState, delta: number): EmailAuthMode {
+  const methods = availableAuthMethods(state.provider);
+  const index = methods.indexOf(state.method);
+  return methods[(index + delta + methods.length) % methods.length] ?? state.method;
 }
 
 export function emailProviderMove(provider: EmailProviderID, delta: number): EmailProviderID {
@@ -78,8 +107,22 @@ export function emailStorageMove(storage: EmailCredentialStorage, delta: number)
   return values[(index + delta + values.length) % values.length] ?? "system";
 }
 
-export function emailWizardFields(state: Pick<EmailAccountWizardState, "provider">): EmailAccountWizardField[] {
-  return ["provider", "label", "address", "username", ...(state.provider === "custom" ? ["endpoint" as const] : []), "credential", "storage", "review"];
+export function emailWizardFields(state: Pick<EmailAccountWizardState, "provider" | "method">): EmailAccountWizardField[] {
+  const oauth = emailOAuthProvider(state.provider);
+  const credentialFields: EmailAccountWizardField[] = state.method === "oauth"
+    ? ["clientId", ...(oauth?.needsClientSecret ? ["clientSecret" as const] : []), "connect"]
+    : ["credential"];
+  return [
+    "provider",
+    ...(availableAuthMethods(state.provider).length > 1 ? ["method" as const] : []),
+    "label",
+    "address",
+    "username",
+    ...(state.provider === "custom" ? ["endpoint" as const] : []),
+    ...credentialFields,
+    "storage",
+    "review"
+  ];
 }
 
 export function emailWizardFieldMove(state: EmailAccountWizardState, delta: -1 | 1): EmailAccountWizardField {
@@ -95,6 +138,15 @@ export function emailWizardStep(state: EmailAccountWizardState): number {
 export function emailWizardSaveInput(state: EmailAccountWizardState): SaveEmailAccountInput {
   const preset = emailProviderPreset(state.provider);
   const endpoint = state.provider === "custom" ? parseEndpoint(state.endpoint) : { host: preset.host, port: preset.port, secure: preset.secure };
+  const credentialInput: Pick<SaveEmailAccountInput, "credential" | "oauthCredential" | "credentialAction"> = state.method === "oauth"
+    ? state.oauthCredential
+      ? { oauthCredential: state.oauthCredential, credentialAction: "replace" }
+      : { credentialAction: "keep" }
+    : state.credential
+      ? { credential: state.credential, credentialAction: "replace" }
+      : state.removeCredential
+        ? { credentialAction: "remove" }
+        : { credentialAction: "keep" };
   return {
     ...(state.id ? { id: state.id } : {}),
     label: state.label.trim(),
@@ -104,8 +156,8 @@ export function emailWizardSaveInput(state: EmailAccountWizardState): SaveEmailA
     host: endpoint.host,
     port: endpoint.port,
     secure: endpoint.secure,
-    auth: preset.auth,
-    ...(state.credential ? { credential: state.credential, credentialAction: "replace" as const } : state.removeCredential ? { credentialAction: "remove" as const } : { credentialAction: "keep" as const }),
+    auth: state.method,
+    ...credentialInput,
     credentialStorage: state.storage,
     location: state.location
   };

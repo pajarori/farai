@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Session, ToolAttachment, ToolDefinition } from "../types";
 import { getTool } from "../agent-tools/registry";
+import { modelToolDescription, modelToolSchema, toolGuidanceMatchesQuery } from "../agent-tools/tool-guidance";
 import { canonicalToolName } from "../tool-names";
 import { HEURISTIC_MODEL_ID, resolveDefaultModel, resolveModel, type ConcreteResolvedModel, type ResolvedModel } from "./model-registry";
 import { lookupModelsDevPricing, resolveModelSelection } from "./model-catalog";
@@ -122,13 +123,14 @@ export class HeuristicPlanner implements PlannerProvider {
   }
 }
 
-export function buildToolsPayload(toolNames: string[], availableTools?: ToolDefinition[]): ProviderToolDef[] {
+export function buildToolsPayload(toolNames: string[], availableTools?: ToolDefinition[], options: { userText?: string } = {}): ProviderToolDef[] {
   const payload: ProviderToolDef[] = [];
   const available = availableTools ? new Map(availableTools.map((tool) => [tool.name, tool])) : undefined;
   for (const name of [...new Set(toolNames.map(canonicalToolName))].sort()) {
     const tool = available?.get(name) ?? getTool(name);
     if (!tool) continue;
-    payload.push({ name: tool.name, description: tool.description, parameters: tool.inputSchema });
+    const detailed = Boolean(options.userText && toolGuidanceMatchesQuery(tool.name, options.userText));
+    payload.push({ name: tool.name, description: modelToolDescription(tool, detailed), parameters: modelToolSchema(tool.inputSchema, detailed, tool.name) });
   }
   return payload;
 }

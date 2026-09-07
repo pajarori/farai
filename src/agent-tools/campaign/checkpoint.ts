@@ -25,7 +25,8 @@ export const campaignCheckpointTool: ToolDefinition = {
     assertObject(args, "args");
     if (!context.campaignControl) throw new Error("campaign lifecycle is unavailable");
     const status = asString(args.status, "status") as "continue" | "waiting" | "blocked" | "complete";
-    if (!["continue", "waiting", "blocked", "complete"].includes(status)) throw new Error(`unsupported campaign checkpoint status: ${status}`);
+    const allowedStatuses = ["continue", "waiting", "blocked", "complete"] as const;
+    if (!allowedStatuses.includes(status)) throw new Error(`unsupported campaign checkpoint status: ${status}; use one of: ${allowedStatuses.join(", ")}`);
     const summary = asString(args.summary, "summary").trim();
     if (!summary) throw new Error("summary must be non-empty");
     const evidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String) : undefined;

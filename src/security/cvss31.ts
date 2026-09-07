@@ -140,6 +140,6 @@ function normalizeVector(vector: string): string {
 }
 
 function valueOf<T extends string>(value: string | undefined, allowed: readonly T[], key: string): T {
-  if (!value || !allowed.includes(value as T)) throw new Error(`invalid cvss ${key} value: ${value ?? "missing"}`);
+  if (!value || !allowed.includes(value as T)) throw new Error(`invalid cvss ${key} value: ${value ?? "missing"}; use one of: ${allowed.join(", ")}`);
   return value as T;
 }

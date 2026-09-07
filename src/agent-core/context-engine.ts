@@ -16,6 +16,7 @@ import { ContextSearchIndex } from "./context-index";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import { renderKaliCommandCatalog } from "./kali-command-catalog";
 import { containerWorkspacePath } from "../agent-container/kali";
+import { CVSS31_METRIC_GUIDANCE } from "../security/cvss31-guidance";
 
 export type ContextClass = "kernel" | "instructions" | "working_set" | "retrieved" | "ephemeral" | "history" | "capabilities";
 
@@ -112,7 +113,7 @@ export class ContextEngine {
       hasOutputArtifacts,
       invokedTools: [...new Set(this.store.listToolCalls(input.session.id, 200).map((call) => canonicalToolName(call.tool)))]
     });
-    const selectedToolCatalog = buildToolsPayload(capabilities.direct.map((tool) => tool.name), input.availableTools);
+    const selectedToolCatalog = buildToolsPayload(capabilities.direct.map((tool) => tool.name), input.availableTools, { userText: query });
     const toolCatalog = mergeProviderToolCatalog(input.advertisedTools, selectedToolCatalog, input.availableTools);
     const directToolNames = toolCatalog.map((tool) => tool.name);
     const automaticBudget = autoCompactThreshold(input.contextWindow, input.maxOutputTokens);
@@ -236,6 +237,20 @@ export class ContextEngine {
       priority: 100,
       relevance: 1
     }));
+
+    if (/\b(cvss|finding|severity|vulnerability|vuln)\b/i.test(query)) {
+      candidates.push(candidate({
+        id: "cvss31-metric-guide",
+        class: "instructions",
+        title: "CVSS 3.1 Metric Guide",
+        source: "farai",
+        content: CVSS31_METRIC_GUIDANCE,
+        mandatory: false,
+        stable: true,
+        priority: 92,
+        relevance: 1
+      }));
+    }
 
     candidates.push(candidate({
       id: "kali-capability-inventory",

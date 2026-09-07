@@ -61,7 +61,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     tools: [
       "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_network_requests", "browser_network_request",
       "http_request", "http_probe", "tls_probe", "vulnerability_scan", "vulnerability_lookup", "shell_exec", "campaign_search", "campaign_test", "campaign_verify", "evidence_save",
-      "report_add_finding", "tool_output_read"
+      "report_add_finding", "report_update_finding", "tool_output_read"
     ]
   }
 ];

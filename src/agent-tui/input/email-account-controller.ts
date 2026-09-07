@@ -1,6 +1,6 @@
 import type { TuiStoreValue } from "../context/store";
 import type { TuiRuntimePort } from "../runtime-port";
-import { emailProviderMove, emailStorageMove, emailWizardFieldMove, emailWizardSaveInput } from "../email-account-state";
+import { defaultAuthMethod, emailMethodMove, emailProviderMove, emailStorageMove, emailWizardFieldMove, emailWizardSaveInput } from "../email-account-state";
 import { emailProviderPreset } from "../../agent-email/accounts";
 import { createControllerOperations } from "./controller-operation";
 import type { OverlaySelection } from "./overlay-selection";
@@ -124,39 +124,44 @@ export function createEmailAccountController(input: EmailAccountControllerInput)
     const wizard = tui.store.ui.emailAccountWizard;
     if (!wizard || wizard.busy) return;
     tui.actions.emailAccountWizardPatch({ error: undefined });
+    const advance = () => tui.actions.emailAccountWizardPatch({ field: emailWizardFieldMove(wizard, 1) });
     if (wizard.field === "provider") {
       const preset = emailProviderPreset(wizard.provider);
-      tui.actions.emailAccountWizardPatch({
-        endpoint: wizard.provider === "custom" ? wizard.endpoint : `imaps://${preset.host}:${preset.port}`,
-        field: "label"
-      });
+      tui.actions.emailAccountWizardPatch({ endpoint: wizard.provider === "custom" ? wizard.endpoint : `imaps://${preset.host}:${preset.port}` });
+      advance();
+      return;
+    }
+    if (wizard.field === "method") {
+      advance();
       return;
     }
     if (wizard.field === "label") {
       if (!wizard.label.trim()) return void tui.actions.emailAccountWizardPatch({ error: "email label is required" });
-      tui.actions.emailAccountWizardPatch({ field: "address" });
+      advance();
       return;
     }
     if (wizard.field === "address") {
       if (!wizard.address.trim()) return void tui.actions.emailAccountWizardPatch({ error: "email address is required" });
-      tui.actions.emailAccountWizardPatch({ username: wizard.username || wizard.address.trim(), field: "username" });
+      tui.actions.emailAccountWizardPatch({ username: wizard.username || wizard.address.trim() });
+      advance();
       return;
     }
     if (wizard.field === "username") {
-      tui.actions.emailAccountWizardPatch({ field: wizard.provider === "custom" ? "endpoint" : "credential" });
+      advance();
       return;
     }
     if (wizard.field === "endpoint") {
       if (!wizard.endpoint.trim()) return void tui.actions.emailAccountWizardPatch({ error: "imap endpoint is required" });
-      tui.actions.emailAccountWizardPatch({ field: "credential" });
+      advance();
       return;
     }
-    if (wizard.field === "credential") {
-      tui.actions.emailAccountWizardPatch({ field: "storage" });
+    if (wizard.field === "clientId") {
+      if (!wizard.clientId.trim()) return void tui.actions.emailAccountWizardPatch({ error: "oauth client id is required" });
+      advance();
       return;
     }
-    if (wizard.field === "storage") {
-      tui.actions.emailAccountWizardPatch({ field: "review" });
+    if (wizard.field === "clientSecret" || wizard.field === "credential" || wizard.field === "storage") {
+      advance();
       return;
     }
 
@@ -200,11 +205,11 @@ export function createEmailAccountController(input: EmailAccountControllerInput)
     const wizard = tui.store.ui.emailAccountWizard;
     if (!wizard) return;
     if (wizard.busy) {
-      if (wizard.busyKind !== "probe") return;
+      if (wizard.busyKind !== "probe" && wizard.busyKind !== "connect") return;
       operations.invalidate();
       probeController?.abort();
       probeController = undefined;
-      tui.actions.emailAccountWizardPatch({ busy: false, busyKind: undefined, error: "email test cancelled" });
+      tui.actions.emailAccountWizardPatch({ busy: false, busyKind: undefined, devicePrompt: undefined, error: wizard.busyKind === "connect" ? "sign-in cancelled" : "email test cancelled" });
       return;
     }
     if (wizard.field === "provider") {
@@ -220,7 +225,43 @@ export function createEmailAccountController(input: EmailAccountControllerInput)
     if (!wizard) return;
     const provider = emailProviderMove(wizard.provider, delta);
     const preset = emailProviderPreset(provider);
-    tui.actions.emailAccountWizardPatch({ provider, endpoint: `imaps://${preset.host}:${preset.port}`, probe: undefined });
+    tui.actions.emailAccountWizardPatch({ provider, method: defaultAuthMethod(provider), endpoint: `imaps://${preset.host}:${preset.port}`, probe: undefined, oauthCredential: undefined, devicePrompt: undefined });
+  }
+
+  function methodMove(delta: number): void {
+    const wizard = tui.store.ui.emailAccountWizard;
+    if (wizard) tui.actions.emailAccountWizardPatch({ method: emailMethodMove(wizard, delta), probe: undefined, oauthCredential: undefined, devicePrompt: undefined, error: undefined });
+  }
+
+  async function connect(mode: "loopback" | "device"): Promise<void> {
+    const wizard = tui.store.ui.emailAccountWizard;
+    if (!wizard || wizard.busy) return;
+    if (!wizard.clientId.trim()) return void tui.actions.emailAccountWizardPatch({ error: "oauth client id is required" });
+    const operation = operations.begin();
+    probeController?.abort();
+    const controller = new AbortController();
+    probeController = controller;
+    tui.actions.emailAccountWizardPatch({ busy: true, busyKind: "connect", error: undefined, devicePrompt: undefined });
+    try {
+      const credential = await port.authorizeEmailOAuth({
+        provider: wizard.provider,
+        clientId: wizard.clientId.trim(),
+        ...(wizard.clientSecret.trim() ? { clientSecret: wizard.clientSecret.trim() } : {}),
+        ...(wizard.address.trim() ? { loginHint: wizard.address.trim() } : {}),
+        mode
+      }, (prompt) => {
+        if (!operations.owns(operation) || probeController !== controller || !tui.store.ui.emailAccountWizard) return;
+        tui.actions.emailAccountWizardPatch({ devicePrompt: { userCode: prompt.userCode, verificationUri: prompt.verificationUri } });
+      }, controller.signal);
+      if (!operations.owns(operation) || probeController !== controller || controller.signal.aborted || !tui.store.ui.emailAccountWizard || input.isDisposed()) return;
+      probeController = undefined;
+      const current = tui.store.ui.emailAccountWizard;
+      tui.actions.emailAccountWizardPatch({ busy: false, busyKind: undefined, oauthCredential: credential, devicePrompt: undefined, field: emailWizardFieldMove(current, 1) });
+    } catch (error) {
+      if (!operations.owns(operation) || probeController !== controller || controller.signal.aborted || !tui.store.ui.emailAccountWizard || input.isDisposed()) return;
+      probeController = undefined;
+      tui.actions.emailAccountWizardPatch({ busy: false, busyKind: undefined, devicePrompt: undefined, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   function storageMove(delta: number): void {
@@ -230,7 +271,12 @@ export function createEmailAccountController(input: EmailAccountControllerInput)
 
   function secretBackspace(): void {
     const wizard = tui.store.ui.emailAccountWizard;
-    if (wizard?.credential) tui.actions.emailAccountWizardPatch({ credential: [...wizard.credential].slice(0, -1).join(""), removeCredential: false });
+    if (!wizard) return;
+    if (wizard.field === "clientSecret") {
+      if (wizard.clientSecret) tui.actions.emailAccountWizardPatch({ clientSecret: [...wizard.clientSecret].slice(0, -1).join("") });
+      return;
+    }
+    if (wizard.credential) tui.actions.emailAccountWizardPatch({ credential: [...wizard.credential].slice(0, -1).join(""), removeCredential: false });
   }
 
   function toggleCredentialRemoval(): void {
@@ -251,6 +297,8 @@ export function createEmailAccountController(input: EmailAccountControllerInput)
     next,
     back,
     providerMove,
+    methodMove,
+    connect,
     storageMove,
     secretBackspace,
     toggleCredentialRemoval
