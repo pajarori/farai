@@ -2594,16 +2594,17 @@ export class AgentRuntime {
   }
 
   private estimatedActiveTokens(session: Session, planner?: PlannerProvider): number {
-    const projected = this.assembleContext({
+    const manifest = this.assembleContext({
       session,
       availableTools: listToolsForSession(session),
       contextWindow: resolveContextWindow(planner?.contextWindow),
       maxOutputTokens: resolveMaxOutputTokens(planner?.maxOutputTokens),
       ...this.contextBudgetInput()
-    }).manifest.estimatedTokens;
+    }).manifest;
+    const reducible = Math.max(0, manifest.estimatedTokens - manifest.tools.schemaTokens);
     const activeHistory = this.buildConversationHistory(session);
     const durable = estimateTokens({ summary: session.summary, history: activeHistory });
-    return Math.max(projected, durable);
+    return Math.max(reducible, durable);
   }
 
   private progressSnapshot(sessionId: string, turnId: string): number {
