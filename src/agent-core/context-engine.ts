@@ -113,7 +113,7 @@ export class ContextEngine {
       hasOutputArtifacts,
       invokedTools: [...new Set(this.store.listToolCalls(input.session.id, 200).map((call) => canonicalToolName(call.tool)))]
     });
-    const selectedToolCatalog = buildToolsPayload(capabilities.direct.map((tool) => tool.name), input.availableTools, { userText: query });
+    const selectedToolCatalog = buildToolsPayload(capabilities.direct.map((tool) => tool.name), input.availableTools, { userText: query, maxDetailedTools: 2 });
     const toolCatalog = mergeProviderToolCatalog(input.advertisedTools, selectedToolCatalog, input.availableTools);
     const directToolNames = toolCatalog.map((tool) => tool.name);
     const automaticBudget = autoCompactThreshold(input.contextWindow, input.maxOutputTokens);
@@ -377,23 +377,32 @@ export function mergeProviderToolCatalog(
   availableTools: ToolDefinition[]
 ): ProviderToolDef[] {
   if (!advertised?.length) return selected;
-  const available = buildToolsPayload(availableTools.map((tool) => tool.name), availableTools);
-  const availableByName = new Map(available.map((tool) => [tool.name, tool]));
+  const availableByName = new Map(availableTools.map((tool) => [tool.name, tool]));
+  const selectedByName = new Map(selected.map((tool) => [tool.name, tool]));
   const merged: ProviderToolDef[] = [];
   const seen = new Set<string>();
   for (const prior of advertised) {
-    const current = availableByName.get(prior.name);
-    if (!current || seen.has(current.name)) continue;
-    merged.push(current);
-    seen.add(current.name);
+    const definition = availableByName.get(prior.name);
+    if (!definition || seen.has(prior.name)) continue;
+    const current = buildToolsPayload([definition.name], availableTools)[0];
+    if (!current) continue;
+    const detailed = buildToolsPayload([definition.name], availableTools, { userText: definition.name.replaceAll("_", " ") })[0];
+    const isCurrent = sameProviderTool(prior, current) || (detailed ? sameProviderTool(prior, detailed) : false);
+    merged.push(isCurrent ? prior : selectedByName.get(prior.name) ?? current);
+    seen.add(prior.name);
   }
   for (const desired of selected) {
-    const current = availableByName.get(desired.name) ?? desired;
-    if (seen.has(current.name)) continue;
-    merged.push(current);
-    seen.add(current.name);
+    if (seen.has(desired.name)) continue;
+    merged.push(desired);
+    seen.add(desired.name);
   }
   return merged;
+}
+
+function sameProviderTool(left: ProviderToolDef, right: ProviderToolDef): boolean {
+  return left.name === right.name
+    && left.description === right.description
+    && JSON.stringify(left.parameters) === JSON.stringify(right.parameters);
 }
 
 export function formatContextManifest(manifest: ContextManifest): string {

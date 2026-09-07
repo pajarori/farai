@@ -123,13 +123,16 @@ export class HeuristicPlanner implements PlannerProvider {
   }
 }
 
-export function buildToolsPayload(toolNames: string[], availableTools?: ToolDefinition[], options: { userText?: string } = {}): ProviderToolDef[] {
+export function buildToolsPayload(toolNames: string[], availableTools?: ToolDefinition[], options: { userText?: string; maxDetailedTools?: number } = {}): ProviderToolDef[] {
   const payload: ProviderToolDef[] = [];
   const available = availableTools ? new Map(availableTools.map((tool) => [tool.name, tool])) : undefined;
+  let detailedCount = 0;
   for (const name of [...new Set(toolNames.map(canonicalToolName))].sort()) {
     const tool = available?.get(name) ?? getTool(name);
     if (!tool) continue;
-    const detailed = Boolean(options.userText && toolGuidanceMatchesQuery(tool.name, options.userText));
+    const matched = Boolean(options.userText && toolGuidanceMatchesQuery(tool.name, options.userText));
+    const detailed = matched && (options.maxDetailedTools === undefined || detailedCount < options.maxDetailedTools);
+    if (detailed) detailedCount += 1;
     payload.push({ name: tool.name, description: modelToolDescription(tool, detailed), parameters: modelToolSchema(tool.inputSchema, detailed, tool.name) });
   }
   return payload;
