@@ -474,7 +474,7 @@ function isLegacyPwnoMcpDefault(entry: Record<string, unknown> | undefined): boo
 }
 
 const DEFAULT_CONFIG_TEMPLATE = `config_version = ${CURRENT_CONFIG_VERSION}
-model = "big-pickle"
+model = "mimo-v2.5-free"
 
 [proxy]
 mode = "explicit"
