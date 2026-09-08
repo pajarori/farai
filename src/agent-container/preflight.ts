@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import { FARAI_BANNER } from "../branding";
 import { loadConfig } from "../agent-core/config";
 import { faraiDockerEnvironment } from "./docker-environment";
 import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KaliContainerBackend } from "./kali";
@@ -27,6 +28,8 @@ export async function runStartupContainerPreflight(workspace: string): Promise<S
 }
 
 async function promptForImagePull(contract: string, exists: boolean): Promise<"apply" | "later" | "cancelled"> {
+  console.log("");
+  console.log(FARAI_BANNER);
   console.log("");
   console.log(exists
     ? `kali container image is outdated (needs ${contract})`
