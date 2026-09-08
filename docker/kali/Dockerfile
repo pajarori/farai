@@ -125,19 +125,20 @@ RUN apt-get update \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
-RUN GOBIN=/usr/local/bin GOFLAGS=-buildvcs=false go install \
-    github.com/lc/gau/v2/cmd/gau@latest \
-    github.com/tomnomnom/waybackurls@latest \
-    github.com/jaeles-project/gospider@latest \
-    github.com/hakluke/hakrawler@latest \
-    github.com/sensepost/gowitness@latest \
-    github.com/projectdiscovery/notify/cmd/notify@latest \
-    github.com/tomnomnom/anew@latest \
-    github.com/tomnomnom/qsreplace@latest \
-    github.com/tomnomnom/unfurl@latest \
-    github.com/zricethezav/gitleaks/v8@latest \
-    github.com/trufflesecurity/trufflehog/v3@latest \
+RUN export GOBIN=/usr/local/bin GOFLAGS=-buildvcs=false GOSUMDB=off \
+  && go install github.com/lc/gau/v2/cmd/gau@latest \
+  && go install github.com/tomnomnom/waybackurls@latest \
+  && go install github.com/jaeles-project/gospider@latest \
+  && go install github.com/hakluke/hakrawler@latest \
+  && go install github.com/sensepost/gowitness@latest \
+  && go install github.com/projectdiscovery/notify/cmd/notify@latest \
+  && go install github.com/tomnomnom/anew@latest \
+  && go install github.com/tomnomnom/qsreplace@latest \
+  && go install github.com/tomnomnom/unfurl@latest \
+  && go install github.com/zricethezav/gitleaks/v8@latest \
   && rm -rf /root/go/pkg /root/.cache/go-build
+
+RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
 
 RUN gem install --no-document -n /usr/local/bin one_gadget zsteg
 
@@ -159,15 +160,6 @@ RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
   && pip install termcolor cprint pycryptodomex requests ratelimit \
   && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
   && chmod 0755 /usr/local/bin/jwt_tool
-
-RUN git clone --depth 1 https://github.com/resurrecting-open-source-projects/outguess.git /tmp/outguess \
-  && cd /tmp/outguess \
-  && ./bootstrap \
-  && ./configure \
-  && make \
-  && make install \
-  && cd / \
-  && rm -rf /tmp/outguess
 
 RUN git clone --depth 1 https://github.com/worawit/blutter.git /opt/blutter \
   && pip install pyelftools requests \
