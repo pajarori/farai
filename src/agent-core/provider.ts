@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Session, ToolAttachment, ToolDefinition } from "../types";
 import { getTool } from "../agent-tools/registry";
-import { modelToolDescription, modelToolSchema, toolGuidanceMatchesQuery } from "../agent-tools/tool-guidance";
+import { modelToolDescription, modelToolSchema } from "../agent-tools/tool-guidance";
 import { canonicalToolName } from "../tool-names";
 import { HEURISTIC_MODEL_ID, resolveDefaultModel, resolveModel, type ConcreteResolvedModel, type ResolvedModel } from "./model-registry";
 import { lookupModelsDevPricing, resolveModelSelection } from "./model-catalog";
@@ -123,17 +123,13 @@ export class HeuristicPlanner implements PlannerProvider {
   }
 }
 
-export function buildToolsPayload(toolNames: string[], availableTools?: ToolDefinition[], options: { userText?: string; maxDetailedTools?: number } = {}): ProviderToolDef[] {
+export function buildToolsPayload(toolNames: string[], availableTools?: ToolDefinition[], _options: { userText?: string; maxDetailedTools?: number } = {}): ProviderToolDef[] {
   const payload: ProviderToolDef[] = [];
   const available = availableTools ? new Map(availableTools.map((tool) => [tool.name, tool])) : undefined;
-  let detailedCount = 0;
   for (const name of [...new Set(toolNames.map(canonicalToolName))].sort()) {
     const tool = available?.get(name) ?? getTool(name);
     if (!tool) continue;
-    const matched = Boolean(options.userText && toolGuidanceMatchesQuery(tool.name, options.userText));
-    const detailed = matched && (options.maxDetailedTools === undefined || detailedCount < options.maxDetailedTools);
-    if (detailed) detailedCount += 1;
-    payload.push({ name: tool.name, description: modelToolDescription(tool, detailed), parameters: modelToolSchema(tool.inputSchema, detailed, tool.name) });
+    payload.push({ name: tool.name, description: modelToolDescription(tool), parameters: modelToolSchema(tool.inputSchema, true, tool.name) });
   }
   return payload;
 }

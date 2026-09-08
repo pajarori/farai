@@ -386,8 +386,7 @@ export function mergeProviderToolCatalog(
     if (!definition || seen.has(prior.name)) continue;
     const current = buildToolsPayload([definition.name], availableTools)[0];
     if (!current) continue;
-    const detailed = buildToolsPayload([definition.name], availableTools, { userText: definition.name.replaceAll("_", " ") })[0];
-    const isCurrent = sameProviderTool(prior, current) || (detailed ? sameProviderTool(prior, detailed) : false);
+    const isCurrent = sameProviderTool(prior, current);
     merged.push(isCurrent ? prior : selectedByName.get(prior.name) ?? current);
     seen.add(prior.name);
   }

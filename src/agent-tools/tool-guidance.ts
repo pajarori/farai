@@ -438,42 +438,12 @@ const EXACT_GUIDANCE: Record<string, string> = {
 
 export function modelToolDescription(tool: Pick<ToolDefinition, "name" | "description">, _detailed = false): string {
   const exact = EXACT_GUIDANCE[tool.name];
-  const highValue = new Set(["report_add_finding", "cvss_calculate", "internet_search", "agent_spawn"]);
-  if (!exact || (!_detailed && !highValue.has(tool.name))) return tool.description;
+  if (!exact) return tool.description;
   return `${tool.description}\n\nmodel contract: ${exact}`;
 }
 
-export function toolGuidanceMatchesQuery(toolName: string, query: string): boolean {
-  const normalized = query.toLowerCase();
-  const terms = toolName.split("_").filter((term) => term.length >= 3);
-  const words = new Set(normalized.match(/[a-z0-9]+/g) ?? []);
-  const fileIntent = /\b(file|path|write|edit|patch|markdown|\.md|report)\b/.test(normalized);
-  const fileTools = ["fs_read", "fs_list", "fs_grep", "fs_write", "fs_edit", "patch_apply", "code_write_script", "report_add_finding", "report_update_finding"];
-  return terms.some((term) => words.has(term))
-    || (fileIntent && fileTools.includes(toolName))
-    || (normalized.includes("finding") && ["report_add_finding", "report_update_finding", "campaign_verify", "campaign_test", "cvss_calculate"].includes(toolName))
-    || (normalized.includes("email") && toolName.startsWith("email_"))
-    || (normalized.includes("browser") && toolName.startsWith("browser_"))
-    || (normalized.includes("proxy") && toolName.startsWith("proxy_"))
-    || (normalized.includes("campaign") && toolName.startsWith("campaign_"));
-}
-
-export function modelToolSchema(schema: Record<string, unknown>, detailed = false, toolName?: string): Record<string, unknown> {
-  if (!detailed && !new Set(["report_add_finding", "cvss_calculate", "internet_search", "agent_spawn"]).has(toolName ?? "")) {
-    return compactSchemaNode(schema) as Record<string, unknown>;
-  }
+export function modelToolSchema(schema: Record<string, unknown>, _detailed = false, toolName?: string): Record<string, unknown> {
   return enrichSchemaNode(schema, [], toolName) as Record<string, unknown>;
-}
-
-function compactSchemaNode(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(compactSchemaNode);
-  if (!isRecord(value)) return value;
-  const compact: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (key === "description") continue;
-    compact[key] = compactSchemaNode(child);
-  }
-  return compact;
 }
 
 function enrichSchemaNode(value: unknown, path: string[], toolName?: string): unknown {

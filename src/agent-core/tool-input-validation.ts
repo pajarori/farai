@@ -19,7 +19,8 @@ export function validateToolArgs(schema: Record<string, unknown> | undefined, ar
   }
   if (validate(args)) return undefined;
   const error = validate.errors?.[0];
-  return error ? formatValidationError(error, schema) : "arguments do not match the tool input schema";
+  if (!error) return "arguments do not match the tool input schema";
+  return `${formatValidationError(error, schema)}${compositionShapes(error, schema)}`;
 }
 
 function compiledValidator(schema: Record<string, unknown>): ValidateFunction {
@@ -80,6 +81,52 @@ function formatValidationError(error: ErrorObject, schema: Record<string, unknow
     default:
       return `${fieldName(path)} ${error.message ?? `failed ${error.keyword} validation`}`;
   }
+}
+
+function compositionShapes(error: ErrorObject, schema: Record<string, unknown>): string {
+  const compositionPath = compositionPointer(error.schemaPath);
+  const branches = compositionPath ? resolveSchemaPointer(schema, compositionPath) : undefined;
+  if (!Array.isArray(branches) || branches.length < 2) return "";
+  const shapes = branches
+    .map(describeBranch)
+    .filter((text): text is string => Boolean(text));
+  if (shapes.length < 2) return "";
+  return `; provide exactly one shape: ${shapes.map((text, index) => `${index + 1}) ${text}`).join(" or ")}`;
+}
+
+function compositionPointer(schemaPath: string): string | undefined {
+  if (typeof schemaPath !== "string") return undefined;
+  const segments = schemaPath.split("/");
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index] === "oneOf" || segments[index] === "anyOf") {
+      return segments.slice(0, index + 1).join("/");
+    }
+  }
+  return undefined;
+}
+
+function describeBranch(branch: unknown): string | undefined {
+  if (!branch || typeof branch !== "object" || Array.isArray(branch)) return undefined;
+  const record = branch as Record<string, unknown>;
+  const required = Array.isArray(record.required) ? record.required.map(String) : [];
+  if (required.length > 0) return `{ ${required.join(", ")} }`;
+  if (typeof record.type === "string") return `a ${record.type}`;
+  if (typeof record.const !== "undefined") return JSON.stringify(record.const);
+  return undefined;
+}
+
+function resolveSchemaPointer(schema: Record<string, unknown>, schemaPath: string): unknown {
+  if (typeof schemaPath !== "string") return undefined;
+  const pointer = schemaPath.startsWith("#") ? schemaPath.slice(1) : schemaPath;
+  let node: unknown = schema;
+  for (const raw of pointer.split("/")) {
+    if (!raw) continue;
+    const key = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (Array.isArray(node)) node = node[Number(key)];
+    else if (node && typeof node === "object") node = (node as Record<string, unknown>)[key];
+    else return undefined;
+  }
+  return node;
 }
 
 function unexpectedFieldError(path: string, property: string, schema: Record<string, unknown>): string {
