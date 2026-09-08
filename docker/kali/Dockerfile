@@ -135,7 +135,7 @@ RUN GOBIN=/usr/local/bin GOFLAGS=-buildvcs=false go install \
     github.com/tomnomnom/anew@latest \
     github.com/tomnomnom/qsreplace@latest \
     github.com/tomnomnom/unfurl@latest \
-    github.com/gitleaks/gitleaks/v8@latest \
+    github.com/zricethezav/gitleaks/v8@latest \
     github.com/trufflesecurity/trufflehog/v3@latest \
   && rm -rf /root/go/pkg /root/.cache/go-build
 
