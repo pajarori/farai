@@ -319,12 +319,13 @@ export function findingMarkdown(finding: Finding): string {
     ? finding.evidenceIds.map((id) => `- \`${id}\``)
     : ["_no linked evidence._"];
   const technical = [
-    finding.cvssVector ? `- cvss 3.1 vector: \`${finding.cvssVector}\`` : "",
-    finding.campaignId ? `- campaign: \`${finding.campaignId}\`` : "",
+    finding.cvssVector ? `- CVSS 3.1 : \`${finding.cvssVector}\`` : "",
+    finding.campaignId ? `- campaign : \`${finding.campaignId}\`` : "",
     finding.hypothesisId ? `- hypothesis: \`${finding.hypothesisId}\`` : "",
     finding.duplicateOf ? `- duplicate of: \`${finding.duplicateOf}\`` : ""
   ].filter(Boolean);
   return [
+    ...(technical.length > 0 ? ["## technical details", "", ...technical, ""] : []),
     "## impact",
     "",
     finding.impact.trim() || "_not recorded._",
@@ -333,14 +334,13 @@ export function findingMarkdown(finding: Finding): string {
     "",
     finding.reproduction.trim() || "_not recorded._",
     "",
-    "## evidence",
-    "",
-    ...evidence,
-    "",
     "## remediation",
     "",
     finding.remediation.trim() || "_not recorded._",
-    ...(technical.length > 0 ? ["", "## technical details", "", ...technical] : [])
+    "",
+    "## evidence",
+    "",
+    ...evidence
   ].join("\n");
 }
 

@@ -18,7 +18,6 @@ type ParsedArguments = {
 };
 
 export type SetupArguments = {
-  skipDocker: boolean;
   skipKnowledge: boolean;
   model?: string;
   baseUrl?: string;
@@ -87,7 +86,6 @@ export function parseSetupArguments(args: string[]): SetupArguments {
     "api-key-env": { type: "string" },
     "api-key": { type: "string" },
     "api-key-stdin": { type: "boolean" },
-    "no-docker": { type: "boolean" },
     "no-kb": { type: "boolean" },
     "no-knowledge": { type: "boolean" }
   });
@@ -102,7 +100,6 @@ export function parseSetupArguments(args: string[]): SetupArguments {
   if (apiKeyEnv && apiKeyStdin) throw new Error("choose one api key source: --api-key-env or --api-key-stdin");
   if (!model && (baseUrl || apiKeyEnv || apiKeyStdin)) throw new Error("--base-url and api key options require --model");
   return {
-    skipDocker: optionalBoolean(values, "no-docker"),
     skipKnowledge: aliasedBoolean(values, "no-kb", "no-knowledge"),
     ...optionalProperty("model", model),
     ...optionalProperty("baseUrl", baseUrl),

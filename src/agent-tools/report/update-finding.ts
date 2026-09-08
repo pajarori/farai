@@ -32,9 +32,9 @@ export const reportUpdateFindingTool: ToolDefinition = {
       cvssVector: { type: "string", description: "replacement complete CVSS:3.1 base vector; use cvss_calculate first and change only metrics supported by new evidence" },
       target: { type: "string", description: "replacement affected URL, endpoint, host, service, file, or asset" },
       evidenceIds: { type: "array", uniqueItems: true, items: { type: "string" }, description: "complete replacement list of evidence UUIDs supporting the current finding; include evidence for a CVSS change" },
-      impact: { type: "string", description: "updated demonstrated security impact" },
-      reproduction: { type: "string", description: "updated minimal reproducible steps and observed result" },
-      remediation: { type: "string", description: "updated specific corrective action" }
+      impact: { type: "string", description: "updated demonstrated security impact. rendered as markdown in the findings tab and reports" },
+      reproduction: { type: "string", description: "updated minimal reproducible steps and observed result. rendered as markdown, so write it well: use an ordered list for steps, fenced code blocks for requests, responses, payloads, and commands, and tables where they clarify" },
+      remediation: { type: "string", description: "updated specific corrective action. rendered as markdown in the findings tab and reports" }
     },
     additionalProperties: false,
     minProperties: 2

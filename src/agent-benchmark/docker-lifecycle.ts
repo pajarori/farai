@@ -80,11 +80,14 @@ export class BenchmarkDockerLifecycle {
 
   private async startUnlocked(): Promise<{ backend: ToolExecutionBackend; state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> {
     const processRunner: ProcessRunner = (command, args) => this.runner(command, args);
-    const image = await new KaliContainerBackend({
+    const provisioner = new KaliContainerBackend({
       workspace: this.workspace,
       image: DEFAULT_KALI_IMAGE,
       processRunner
-    }).resolveImage();
+    });
+    const ensured = await provisioner.ensureImage();
+    if (ensured.exitCode !== 0) throw new Error(ensured.stderr || `benchmark agent image is unavailable: ${DEFAULT_KALI_IMAGE}`);
+    const image = await provisioner.resolveImage();
     if (!image.exists) throw new Error(image.error ?? `benchmark agent image is missing: ${DEFAULT_KALI_IMAGE}`);
     if (image.error) throw new Error(image.error);
     const agentImageId = image.id?.trim() ?? "";

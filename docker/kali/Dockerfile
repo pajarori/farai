@@ -31,9 +31,6 @@ ARG INTERACTSH_VERSION=1.3.1
 ARG TYPESCRIPT_VERSION=5.9.3
 ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION=4.3.4
 ARG PYRIGHT_VERSION=1.1.408
-ARG KALI_CONTRACT=curated-security-runtime-2026-09
-
-LABEL org.farai.kali.contract="${KALI_CONTRACT}"
 
 COPY farai-tool-manifest.json /usr/local/share/farai/farai-tool-manifest.json
 
@@ -132,3 +129,6 @@ ENV NODE_EXTRA_CA_CERTS=/usr/local/share/farai/farai-mitmproxy-ca.pem \
     GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /workspace
+
+ARG KALI_CONTRACT=curated-security-runtime-2026-09
+LABEL org.farai.kali.contract="${KALI_CONTRACT}"

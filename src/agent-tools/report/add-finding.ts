@@ -15,9 +15,9 @@ export const reportAddFindingTool: ToolDefinition = {
       severity: { type: "string", description: "legacy compatibility only; ignored when cvssVector is present. never use this to guess severity" },
       target: { type: "string", description: "affected URL, endpoint, host, service, file, or asset" },
       evidenceIds: { type: "array", items: { type: "string" }, uniqueItems: true, description: "ids of saved evidence that directly support the finding" },
-      impact: { type: "string", description: "security impact demonstrated by the evidence" },
-      reproduction: { type: "string", description: "minimal reproducible steps and observed result" },
-      remediation: { type: "string", description: "specific corrective action" },
+      impact: { type: "string", description: "security impact demonstrated by the evidence. rendered as markdown in the findings tab and reports" },
+      reproduction: { type: "string", description: "minimal reproducible steps and observed result. rendered as markdown, so write it well: use an ordered list for steps, fenced code blocks for requests, responses, payloads, and commands, and tables where they clarify" },
+      remediation: { type: "string", description: "specific corrective action. rendered as markdown in the findings tab and reports" },
       campaignId: { type: "string", description: "campaign to attach; normally inherited from the active campaign" },
       hypothesisId: { type: "string", description: "campaign hypothesis supported by this candidate" }
     },

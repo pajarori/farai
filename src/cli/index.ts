@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 import { AgentRuntime } from "../agent-core/runtime";
-import { KALI_IMAGE_CONTRACT, KaliContainerBackend } from "../agent-container/kali";
-import { faraiDockerEnvironment } from "../agent-container/docker-environment";
+import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KaliContainerBackend } from "../agent-container/kali";
 import { resolveDefaultModel } from "../agent-core/model-registry";
 import { buildModelCatalog, resolveDefaultCatalogModel } from "../agent-core/model-catalog";
 import { addModelProfile, loadModelProfiles, modelProfilePaths, type ModelProfileLocation } from "../agent-core/model-profiles";
@@ -114,13 +113,17 @@ async function doctor(): Promise<void> {
   console.log(`config paths: ${modelProfilePaths(process.cwd()).join(", ")}`);
   const backend = new KaliContainerBackend({ workspace: process.cwd() });
   const image = await backend.resolveImage();
-  console.log(`kali image: ${backend.image} (${image.exists ? "exists" : "missing"})`);
-  console.log(`kali contract: ${image.contract ?? "missing"}`);
-  console.log(`kali capabilities: ${image.contract === KALI_IMAGE_CONTRACT ? "ready" : "rebuild required"}`);
+  const capabilities = !image.exists
+    ? "not installed (pulled on first run)"
+    : image.contract === KALI_IMAGE_CONTRACT
+      ? "ready"
+      : "update available (pulled on first run)";
+  console.log(`kali image: ${backend.image} (${image.exists ? "installed" : "missing"})`);
+  console.log(`kali contract: ${image.contract ?? "missing"} (expected ${KALI_IMAGE_CONTRACT})`);
+  console.log(`kali capabilities: ${capabilities}`);
   const { contentStatus } = await import("../agent-content/updater");
   const content = contentStatus();
   console.log(`content: ${content.active?.version ?? "local fallback"}`);
-  console.log(`setup command: farai setup`);
 }
 
 async function setup(args: string[]): Promise<void> {
@@ -144,17 +147,7 @@ async function setup(args: string[]): Promise<void> {
     await addModel(addArgs);
   }
 
-  if (!parsed.skipDocker) {
-    console.log("[*] building Farai Kali image");
-    const code = await buildContainer();
-    if (code !== 0) {
-      process.exitCode = code;
-      console.error("[!] docker image build failed; rerun `farai setup --no-kb` after fixing Docker");
-      return;
-    }
-  } else {
-    console.log("[*] skipping Docker image build");
-  }
+  console.log(`[*] kali image: ${DEFAULT_KALI_IMAGE} (pulled on first run)`);
 
   if (!parsed.skipKnowledge) {
     const contentInstalled = await syncContentForSetup(process.cwd());
@@ -266,8 +259,13 @@ async function initLab(args: string[]): Promise<void> {
 async function launchTui(workspace: string, sessionId: string | undefined): Promise<void> {
   ensureDefaultUserConfig();
   const { runStartupContentPreflight } = await import("../agent-content/preflight");
+  const { runStartupContainerPreflight } = await import("../agent-container/preflight");
   const effectiveWorkspace = sessionId ? resolveSessionLocation(sessionId)?.workspace ?? workspace : workspace;
   if (await runStartupContentPreflight(effectiveWorkspace) === "cancelled") {
+    process.exitCode = 130;
+    return;
+  }
+  if (await runStartupContainerPreflight(effectiveWorkspace) === "cancelled") {
     process.exitCode = 130;
     return;
   }
@@ -340,15 +338,6 @@ async function benchmark(args: string[]): Promise<void> {
   }
 }
 
-async function buildContainer(): Promise<number> {
-  const backend = new KaliContainerBackend({ workspace: process.cwd() });
-  console.log(backend.buildImageCommand().join(" "));
-  const proc = Bun.spawn(backend.buildImageCommand(), { stdout: "inherit", stderr: "inherit", env: faraiDockerEnvironment() });
-  const code = await proc.exited;
-  process.exitCode = code;
-  return code;
-}
-
 function wantsHelp(args: string[]): boolean {
   return args.includes("--help") || args.includes("-h") || args[0] === "help";
 }
@@ -365,7 +354,6 @@ Options:
   --base-url <url>              OpenAI-compatible provider URL
   --api-key-env <ENV>           Environment variable containing the API key
   --api-key-stdin               Read the API key from stdin
-  --no-docker                   Skip Farai Kali image build
   --no-kb, --no-knowledge       Skip knowledge base content sync
 
 Examples:
@@ -436,7 +424,7 @@ Usage:
   farai
   farai resume [session-name-or-id]
   farai run <prompt> [--session <id>] [--json]
-  farai setup [--model provider:model] [--base-url url] [--api-key-env ENV | --api-key-stdin] [--no-docker] [--no-kb]
+  farai setup [--model provider:model] [--base-url url] [--api-key-env ENV | --api-key-stdin] [--no-kb]
   farai init [--target <ip-or-host>] [--name <name>] [--model provider:model]
   farai doctor
   farai model

@@ -68,6 +68,7 @@ export type KaliBackendOptions = {
   workspace: string;
   timeoutMs?: number;
   processRunner?: ProcessRunner;
+  pullRunner?: ProcessRunner;
   signal?: AbortSignal;
   onOutputChunk?: OutputChunkListener;
   rootSessionId?: string;
@@ -168,8 +169,10 @@ function withGlobalContainerStartLock<T>(fn: () => Promise<T>): Promise<T> {
 
 export const CONTAINER_PREFIX = FARAI_CONTAINER_NAME_PREFIX;
 export const KALI_IMAGE_CONTRACT = KALI_TOOL_MANIFEST.contract;
-export const DEFAULT_KALI_IMAGE = "farai-kali:latest";
+export const KALI_IMAGE_REPO = "ghcr.io/pajarori/farai-kali";
+export const DEFAULT_KALI_IMAGE = `${KALI_IMAGE_REPO}:${KALI_IMAGE_CONTRACT}`;
 export const KALI_IMAGE_CONTRACT_LABEL = "org.farai.kali.contract";
+export const KALI_IMAGE_PULL_TIMEOUT_MS = 30 * 60 * 1_000;
 
 type ResolvedImage = {
   exists: boolean;
@@ -201,6 +204,7 @@ export class KaliContainerBackend implements ExecutionBackend {
   readonly workspacePath: string;
   readonly timeoutMs: number;
   private readonly processRunner: ProcessRunner;
+  private readonly pullRunner: ProcessRunner;
   private readonly signal: AbortSignal | undefined;
   private readonly onOutputChunk: OutputChunkListener | undefined;
   private readonly lifecycle: ContainerLifecyclePort | undefined;
@@ -214,6 +218,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     this.workspacePath = containerWorkspacePath(this.rootWorkspace, this.workspace);
     this.timeoutMs = options.timeoutMs ?? 120_000;
     this.processRunner = options.processRunner ?? ((command, args) => runProcess(command, args, Math.min(this.timeoutMs, 15_000)));
+    this.pullRunner = options.pullRunner ?? options.processRunner ?? ((command, args) => runProcess(command, args, KALI_IMAGE_PULL_TIMEOUT_MS));
     this.signal = options.signal;
     this.onOutputChunk = options.onOutputChunk;
     this.lifecycle = options.lifecycle;
@@ -225,17 +230,33 @@ export class KaliContainerBackend implements ExecutionBackend {
     } : undefined;
   }
 
-  buildImageCommand(): string[] {
-    const contextDir = join(import.meta.dir, "..", "..", "docker", "kali");
-    return [
-      "docker",
-      "build",
-      "-t",
-      this.image,
-      "-f",
-      join(contextDir, "Dockerfile"),
-      contextDir
-    ];
+  pullImageCommand(): string[] {
+    return ["docker", "pull", this.image];
+  }
+
+  async ensureImage(): Promise<ContainerExecResult> {
+    const current = await this.resolveImage();
+    if (current.exists && current.contract === KALI_IMAGE_CONTRACT) {
+      return { exitCode: 0, stdout: "image ready", stderr: "", durationMs: 0, timedOut: false };
+    }
+    const started = Date.now();
+    const pulled = await this.pullRunner("docker", ["pull", this.image]);
+    if (pulled.exitCode !== 0) {
+      return {
+        ...pulled,
+        stderr: dockerFailure(pulled, `could not pull kali image ${this.image}; check network access to ${KALI_IMAGE_REPO}`),
+        durationMs: Date.now() - started,
+        timedOut: false
+      };
+    }
+    const resolved = await this.resolveImage();
+    if (!resolved.exists) {
+      return { exitCode: 1, stdout: "", stderr: resolved.error ?? `kali image ${this.image} is still missing after pull`, durationMs: Date.now() - started, timedOut: false };
+    }
+    if (resolved.contract !== KALI_IMAGE_CONTRACT) {
+      return { exitCode: 1, stdout: "", stderr: `pulled kali image ${this.image} does not satisfy the farai capability contract (${resolved.contract ?? "missing"})`, durationMs: Date.now() - started, timedOut: false };
+    }
+    return { exitCode: 0, stdout: pulled.stdout || "image pulled", stderr: "", durationMs: Date.now() - started, timedOut: false };
   }
 
   async status(): Promise<ContainerStatus> {
@@ -349,17 +370,12 @@ export class KaliContainerBackend implements ExecutionBackend {
 
   private async startPersistentBody(): Promise<ContainerExecResult> {
     try {
-      const status = await this.status();
-      if (!status.imageExists) {
+      const ensured = await this.ensureImage();
+      if (ensured.exitCode !== 0) {
         if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
-        return {
-          exitCode: 1,
-          stdout: "",
-          stderr: status.dockerError ?? `kali image ${this.image} is missing; run \`farai setup --no-kb\``,
-          durationMs: 0,
-          timedOut: false
-        };
+        return ensured;
       }
+      const status = await this.status();
       if (status.dockerError) {
         if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
         return {
@@ -376,16 +392,6 @@ export class KaliContainerBackend implements ExecutionBackend {
           exitCode: 1,
           stdout: "",
           stderr: `refusing to use container ${this.containerName}: ownership labels do not match this Farai session`,
-          durationMs: 0,
-          timedOut: false
-        };
-      }
-      if (!status.imageContractCurrent) {
-        if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
-        return {
-          exitCode: 1,
-          stdout: "",
-          stderr: `kali image ${this.image} does not satisfy the farai kali capability contract; run \`farai setup --no-kb\``,
           durationMs: 0,
           timedOut: false
         };
