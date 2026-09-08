@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { AgentRuntime } from "../agent-core/runtime";
-import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KaliContainerBackend } from "../agent-container/kali";
+import { DEFAULT_KALI_IMAGE, KaliContainerBackend } from "../agent-container/kali";
 import { resolveDefaultModel } from "../agent-core/model-registry";
 import { buildModelCatalog, resolveDefaultCatalogModel } from "../agent-core/model-catalog";
 import { addModelProfile, loadModelProfiles, modelProfilePaths, type ModelProfileLocation } from "../agent-core/model-profiles";
@@ -112,15 +112,16 @@ async function doctor(): Promise<void> {
   console.log("secrets: system keyring");
   console.log(`config paths: ${modelProfilePaths(process.cwd()).join(", ")}`);
   const backend = new KaliContainerBackend({ workspace: process.cwd() });
-  const image = await backend.resolveImage();
-  const capabilities = !image.exists
-    ? "not installed (pulled on first run)"
-    : image.contract === KALI_IMAGE_CONTRACT
-      ? "ready"
-      : "update available (pulled on first run)";
-  console.log(`kali image: ${backend.image} (${image.exists ? "installed" : "missing"})`);
-  console.log(`kali contract: ${image.contract ?? "missing"} (expected ${KALI_IMAGE_CONTRACT})`);
-  console.log(`kali capabilities: ${capabilities}`);
+  const update = await backend.checkForImageUpdate().catch(() => undefined);
+  const status = !update
+    ? "unknown (docker unavailable)"
+    : !update.exists
+      ? "not installed (pulled on first run)"
+      : update.upToDate
+        ? "up to date"
+        : "update available (pulled on first run)";
+  console.log(`kali image: ${backend.image}`);
+  console.log(`kali image status: ${status}`);
   const { contentStatus } = await import("../agent-content/updater");
   const content = contentStatus();
   console.log(`content: ${content.active?.version ?? "local fallback"}`);

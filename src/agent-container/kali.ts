@@ -20,7 +20,7 @@ import { runCapturedProcess } from "../agent-tools/backends/captured-process";
 import { BoundedOutputBuffer, INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
 import { isolatedProcessGroup, terminateProcessTree } from "../agent-tools/backends/process-tree";
 import { id } from "../utils";
-import { KALI_TOOL_MANIFEST } from "./kali-tool-manifest";
+import { KALI_IMAGE_CONTRACT } from "./kali-tool-manifest";
 import {
   managedContainerLabels,
   managedContainerBelongsTo,
@@ -168,9 +168,10 @@ function withGlobalContainerStartLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 export const CONTAINER_PREFIX = FARAI_CONTAINER_NAME_PREFIX;
-export const KALI_IMAGE_CONTRACT = KALI_TOOL_MANIFEST.contract;
+export { KALI_IMAGE_CONTRACT };
 export const KALI_IMAGE_REPO = "ghcr.io/pajarori/farai-kali";
-export const DEFAULT_KALI_IMAGE = `${KALI_IMAGE_REPO}:${KALI_IMAGE_CONTRACT}`;
+export const KALI_IMAGE_TAG = "latest";
+export const DEFAULT_KALI_IMAGE = `${KALI_IMAGE_REPO}:${KALI_IMAGE_TAG}`;
 export const KALI_IMAGE_CONTRACT_LABEL = "org.farai.kali.contract";
 export const KALI_IMAGE_PULL_TIMEOUT_MS = 30 * 60 * 1_000;
 
@@ -178,6 +179,7 @@ type ResolvedImage = {
   exists: boolean;
   id?: string;
   contract?: string;
+  repoDigest?: string;
   error?: string;
 };
 
@@ -234,14 +236,34 @@ export class KaliContainerBackend implements ExecutionBackend {
     return ["docker", "pull", this.image];
   }
 
+  async remoteImageDigest(): Promise<string | undefined> {
+    const inspect = await this.processRunner("docker", ["buildx", "imagetools", "inspect", this.image, "--format", "{{.Manifest.Digest}}"]);
+    if (inspect.exitCode !== 0) return undefined;
+    return digestOf(inspect.stdout.trim());
+  }
+
+  async checkForImageUpdate(): Promise<{ exists: boolean; upToDate: boolean; error?: string }> {
+    const local = await this.resolveImage();
+    if (!local.exists) return { exists: false, upToDate: false, ...(local.error ? { error: local.error } : {}) };
+    const remote = await this.remoteImageDigest();
+    if (!remote || !local.repoDigest) return { exists: true, upToDate: true };
+    return { exists: true, upToDate: local.repoDigest === remote };
+  }
+
   async ensureImage(): Promise<ContainerExecResult> {
-    const current = await this.resolveImage();
-    if (current.exists && current.contract === KALI_IMAGE_CONTRACT) {
-      return { exitCode: 0, stdout: "image ready", stderr: "", durationMs: 0, timedOut: false };
+    const local = await this.resolveImage();
+    if (local.exists) {
+      const remote = await this.remoteImageDigest();
+      if (!remote || (local.repoDigest !== undefined && local.repoDigest === remote)) {
+        return { exitCode: 0, stdout: "image ready", stderr: "", durationMs: 0, timedOut: false };
+      }
     }
     const started = Date.now();
     const pulled = await this.pullRunner("docker", ["pull", this.image]);
     if (pulled.exitCode !== 0) {
+      if (local.exists) {
+        return { exitCode: 0, stdout: pulled.stdout || "using local kali image", stderr: "", durationMs: Date.now() - started, timedOut: false };
+      }
       return {
         ...pulled,
         stderr: dockerFailure(pulled, `could not pull kali image ${this.image}; check network access to ${KALI_IMAGE_REPO}`),
@@ -252,9 +274,6 @@ export class KaliContainerBackend implements ExecutionBackend {
     const resolved = await this.resolveImage();
     if (!resolved.exists) {
       return { exitCode: 1, stdout: "", stderr: resolved.error ?? `kali image ${this.image} is still missing after pull`, durationMs: Date.now() - started, timedOut: false };
-    }
-    if (resolved.contract !== KALI_IMAGE_CONTRACT) {
-      return { exitCode: 1, stdout: "", stderr: `pulled kali image ${this.image} does not satisfy the farai capability contract (${resolved.contract ?? "missing"})`, durationMs: Date.now() - started, timedOut: false };
     }
     return { exitCode: 0, stdout: pulled.stdout || "image pulled", stderr: "", durationMs: Date.now() - started, timedOut: false };
   }
@@ -751,19 +770,28 @@ function parseImageInspect(raw: string): ResolvedImage {
   try {
     const parsed = JSON.parse(raw) as Array<{
       Id?: string;
+      RepoDigests?: string[] | null;
       Config?: { Labels?: Record<string, string> | null };
     }>;
     const image = parsed[0];
     if (!image) return { exists: true };
     const contract = image.Config?.Labels?.[KALI_IMAGE_CONTRACT_LABEL];
+    const repoDigest = digestOf((image.RepoDigests ?? []).find((entry) => entry.includes("@sha256:")));
     return {
       exists: true,
       ...(image.Id ? { id: image.Id } : {}),
-      ...(contract ? { contract } : {})
+      ...(contract ? { contract } : {}),
+      ...(repoDigest ? { repoDigest } : {})
     };
   } catch {
     return { exists: true };
   }
+}
+
+function digestOf(reference: string | undefined): string | undefined {
+  if (!reference) return undefined;
+  const match = reference.match(/sha256:[a-f0-9]{64}/i);
+  return match ? match[0].toLowerCase() : undefined;
 }
 
 function dockerFailure(result: ContainerExecResult, fallback: string): string {

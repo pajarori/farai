@@ -113,12 +113,76 @@ RUN useradd --system --create-home --home-dir /home/mitm --shell /usr/sbin/nolog
   && certutil -d sql:/root/.pki/nssdb -N --empty-password \
   && certutil -d sql:/root/.pki/nssdb -A -n farai-mitmproxy -t "C,," -i /usr/local/share/farai/farai-mitmproxy-ca.pem
 
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    apktool jadx dex2jar adb aapt apksigner \
+    fcrackzip stegseek hashid python3-pwntools proxychains4 \
+    ruby ruby-dev \
+    cmake ninja-build pkg-config libicu-dev libcapstone-dev libunicorn-dev \
+    clang automake autoconf libtool libgmp-dev libmpc-dev libmpfr-dev libssl-dev libffi-dev \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN GOBIN=/usr/local/bin GOFLAGS=-buildvcs=false go install \
+    github.com/lc/gau/v2/cmd/gau@latest \
+    github.com/tomnomnom/waybackurls@latest \
+    github.com/jaeles-project/gospider@latest \
+    github.com/hakluke/hakrawler@latest \
+    github.com/sensepost/gowitness@latest \
+    github.com/projectdiscovery/notify/cmd/notify@latest \
+    github.com/tomnomnom/anew@latest \
+    github.com/tomnomnom/qsreplace@latest \
+    github.com/tomnomnom/unfurl@latest \
+    github.com/gitleaks/gitleaks/v8@latest \
+    github.com/trufflesecurity/trufflehog/v3@latest \
+  && rm -rf /root/go/pkg /root/.cache/go-build
+
+RUN gem install --no-document -n /usr/local/bin one_gadget zsteg
+
+ENV PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
+
+RUN pipx install ROPgadget \
+  && pipx install apkleaks \
+  && pipx install git-dumper \
+  && chmod -R a+rX /opt/pipx
+
+RUN pipx install git+https://github.com/RsaCtfTool/RsaCtfTool.git \
+  && chmod -R a+rX /opt/pipx \
+  || echo "[warn] RsaCtfTool install skipped"
+
+RUN git clone --depth 1 https://github.com/hugsy/gef.git /opt/gef \
+  && echo "source /opt/gef/gef.py" >> /root/.gdbinit
+
+RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
+  && pip install termcolor cprint pycryptodomex requests ratelimit \
+  && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
+  && chmod 0755 /usr/local/bin/jwt_tool
+
+RUN git clone --depth 1 https://github.com/resurrecting-open-source-projects/outguess.git /tmp/outguess \
+  && cd /tmp/outguess \
+  && ./bootstrap \
+  && ./configure \
+  && make \
+  && make install \
+  && cd / \
+  && rm -rf /tmp/outguess
+
+RUN git clone --depth 1 https://github.com/worawit/blutter.git /opt/blutter \
+  && pip install pyelftools requests \
+  && printf '#!/bin/sh\nexec python3 /opt/blutter/blutter.py "$@"\n' > /usr/local/bin/blutter \
+  && chmod 0755 /usr/local/bin/blutter
+
+RUN git clone --depth 1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists
+
 COPY redsocks.conf.tmpl /usr/local/share/farai/redsocks.conf.tmpl
 COPY farai-proxy-init.sh /usr/local/bin/farai-proxy-init
 COPY farai-proxy-teardown.sh /usr/local/bin/farai-proxy-teardown
 COPY farai-mitmproxy-mcp.sh /usr/local/bin/mitmproxy-mcp
 COPY farai_mitmproxy_mcp.py /usr/local/share/farai/farai_mitmproxy_mcp.py
 COPY farai-image-doctor.py /usr/local/bin/farai-image-doctor
+COPY farai-image-contract /usr/local/share/farai/farai-image-contract
 RUN chmod 0755 /usr/local/bin/farai-proxy-init /usr/local/bin/farai-proxy-teardown /usr/local/bin/mitmproxy-mcp /usr/local/bin/farai-image-doctor \
   && farai-image-doctor --write /usr/local/share/farai/kali-capabilities.json
 
@@ -130,5 +194,5 @@ ENV NODE_EXTRA_CA_CERTS=/usr/local/share/farai/farai-mitmproxy-ca.pem \
 
 WORKDIR /workspace
 
-ARG KALI_CONTRACT=curated-security-runtime-2026-09
+ARG KALI_CONTRACT=curated-security-runtime-2026-10
 LABEL org.farai.kali.contract="${KALI_CONTRACT}"

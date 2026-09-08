@@ -14,9 +14,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Read image contract from manifest
+      - name: Read image contract
         id: contract
-        run: echo "contract=$(jq -r .contract docker/kali/farai-tool-manifest.json)" >> "$GITHUB_OUTPUT"
+        run: echo "contract=$(cat docker/kali/farai-image-contract)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -41,7 +41,6 @@ jobs:
           build-args: |
             KALI_CONTRACT=${{ steps.contract.outputs.contract }}
           tags: |
-            ghcr.io/pajarori/farai-kali:${{ steps.contract.outputs.contract }}
             ghcr.io/pajarori/farai-kali:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

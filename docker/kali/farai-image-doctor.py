@@ -19,9 +19,22 @@ def resolve_manifest_path():
     raise FileNotFoundError("farai tool manifest not found")
 
 
+def resolve_contract():
+    env = os.environ.get("KALI_CONTRACT")
+    if env and env.strip():
+        return env.strip()
+    for candidate in (
+        Path("/usr/local/share/farai/farai-image-contract"),
+        Path(__file__).with_name("farai-image-contract"),
+    ):
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8").strip()
+    raise FileNotFoundError("kali image contract not found")
+
+
 MANIFEST_PATH = resolve_manifest_path()
 MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-CONTRACT = MANIFEST["contract"]
+CONTRACT = resolve_contract()
 APT_PACKAGES = tuple(MANIFEST["aptPackages"])
 WORKFLOWS = MANIFEST["workflows"]
 PINNED_TOOLS = MANIFEST["pinnedTools"]

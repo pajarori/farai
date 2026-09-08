@@ -2,7 +2,6 @@ import { join } from "node:path";
 import { readBoundedFileTextSync } from "../file-read";
 
 export type KaliToolManifest = {
-  contract: string;
   aptPackages: string[];
   pinnedTools: Record<string, { version: string; sha256: Record<"amd64" | "arm64", string> }>;
   pinnedAssets: Record<string, { version: string; path: string; sha256: string }>;
@@ -10,12 +9,15 @@ export type KaliToolManifest = {
 };
 
 export const KALI_TOOL_MANIFEST_PATH = join(import.meta.dir, "..", "..", "docker", "kali", "farai-tool-manifest.json");
+export const KALI_IMAGE_CONTRACT_PATH = join(import.meta.dir, "..", "..", "docker", "kali", "farai-image-contract");
 export const KALI_TOOL_MANIFEST = parseManifest(JSON.parse(readBoundedFileTextSync(KALI_TOOL_MANIFEST_PATH, 1024 * 1024, "kali tool manifest")));
+export const KALI_IMAGE_CONTRACT = readBoundedFileTextSync(KALI_IMAGE_CONTRACT_PATH, 1024, "kali image contract").trim();
+if (!KALI_IMAGE_CONTRACT) throw new Error("empty kali image contract");
 
 function parseManifest(value: unknown): KaliToolManifest {
   if (!value || typeof value !== "object") throw new Error("invalid farai tool manifest");
   const candidate = value as Record<string, unknown>;
-  if (typeof candidate.contract !== "string" || !candidate.contract || !Array.isArray(candidate.aptPackages) || !candidate.pinnedTools || typeof candidate.pinnedTools !== "object" || !candidate.pinnedAssets || typeof candidate.pinnedAssets !== "object" || !candidate.workflows || typeof candidate.workflows !== "object") {
+  if (!Array.isArray(candidate.aptPackages) || !candidate.pinnedTools || typeof candidate.pinnedTools !== "object" || !candidate.pinnedAssets || typeof candidate.pinnedAssets !== "object" || !candidate.workflows || typeof candidate.workflows !== "object") {
     throw new Error("invalid farai tool manifest");
   }
   const aptPackages = candidate.aptPackages.filter((item): item is string => typeof item === "string" && Boolean(item));
@@ -44,7 +46,7 @@ function parseManifest(value: unknown): KaliToolManifest {
     return [name, { version: asset.version, path: asset.path, sha256: asset.sha256 }];
   }));
   if (!Object.keys(pinnedAssets).length) throw new Error("empty pinned asset manifest");
-  return { contract: candidate.contract, aptPackages, pinnedTools, pinnedAssets, workflows };
+  return { aptPackages, pinnedTools, pinnedAssets, workflows };
 }
 
 function isSha256(value: unknown): value is string {
