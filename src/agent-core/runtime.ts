@@ -28,7 +28,7 @@ import { defaultModelSelection } from "./model-catalog";
 import { sessionManager } from "../agent-tools/shared/session-manager";
 import { oastEvidenceForSession, parseOastEvents } from "../agent-tools/callback/oast-parser";
 import { activeBackgroundJobs, processIdFromArgs, renderBackgroundJobs, stableValue, type ActiveBackgroundJob } from "./loop/background";
-import { isDefaultSessionTitle, sessionDisplayName, titleFromPrompt } from "../session-title";
+import { DEFAULT_SESSION_TITLE, isDefaultSessionTitle, sessionDisplayName, titleFromPrompt, titleFromModelText, SESSION_TITLE_PROMPT } from "../session-title";
 import { nonEmpty } from "./loop/history";
 import { AUTO_COMPACT_MAX_FAILURES, MANUAL_COMPACT_MIN_TOKENS, autoCompactThreshold, estimateTokens, runModelCompaction } from "./loop/compaction";
 import { loadHooks, runHooks, type HookRunner } from "./hooks/host";
@@ -240,6 +240,7 @@ export type AgentRuntimeOptions = {
   enableHooks?: boolean;
   enableMcp?: boolean;
   enableProjectInstructions?: boolean;
+  enableSessionTitles?: boolean;
   executionBackend?: ToolExecutionBackend;
   registerSessionCatalog?: boolean;
   containerBackendFactory?: (workspace: string, sessionId: string, timeoutMs?: number) => RuntimeContainerBackend;
@@ -300,6 +301,7 @@ export class AgentRuntime {
   private readonly containerLifecycle: ContainerLifecyclePort | undefined;
   private readonly containerBackendFactory: (workspace: string, sessionId: string, timeoutMs?: number) => RuntimeContainerBackend;
   private readonly registerSessionCatalog: boolean;
+  private readonly sessionTitlesEnabled: boolean;
   private knowledgeStore: KnowledgeStore | null | undefined;
   private recovered = false;
   private recoveryPromise: Promise<void> | undefined;
@@ -346,6 +348,7 @@ export class AgentRuntime {
     this.maxTurnMs = resolveMaxTurnMs(options.maxTurnSeconds ?? config.maxTurnSeconds);
     this.maxCostUsd = positiveFinite(options.maxCostUsd ?? config.maxCostUsd);
     this.maxInputTokens = positiveFinite(options.maxInputTokens);
+    this.sessionTitlesEnabled = options.enableSessionTitles === true;
     this.mailbox = new SessionMailbox(this.store, this.runtimeId);
     this.inputQueue = new SessionInputQueue(this.mailbox, (sessionId, type, payload) => this.event(sessionId, type, payload));
     this.userInputs = new SessionUserInputCoordinator({
@@ -1516,12 +1519,14 @@ export class AgentRuntime {
       ? this.campaignSupervisor.prepare(session.id, input)
       : undefined;
     if (activeCampaignRun) session = this.store.loadSession(session.id);
+    let autoTitleBaseline: string | undefined;
     if (source === "user" && isDefaultSessionTitle(session.title)) {
       const title = titleFromPrompt(input);
       if (!isDefaultSessionTitle(title)) {
         session = this.store.updateSession(session.id, { title });
         this.recordSession(session);
       }
+      autoTitleBaseline = session.title ?? DEFAULT_SESSION_TITLE;
     }
     if (source === "user" && (trimmed === "/compact" || trimmed.startsWith("/compact "))) {
       const cursor = this.store.latestEventSequence(session.id);
@@ -1588,12 +1593,47 @@ export class AgentRuntime {
       void this.mailboxDispatcher.wakeQueuedInputs(session.id);
     }
 
+    if (autoTitleBaseline !== undefined && this.sessionTitlesEnabled && !trimmed.startsWith("/") && !trimmed.startsWith("!") && this.store.loadTurn(turn.id).status === "completed") {
+      void this.generateSessionTitle(session.id, input, response, autoTitleBaseline).catch(() => undefined);
+    }
+
     const cursor = startedEvents.at(-1)?.sequence ?? 0;
     return {
       session,
       response,
       events: this.store.listEventsAfter(session.id, cursor, 10_000)
     };
+  }
+
+  private async generateSessionTitle(sessionId: string, userText: string, assistantText: string, baseline: string): Promise<void> {
+    let session = this.store.loadSession(sessionId);
+    if (session.title !== baseline) return;
+    let planner: PlannerProvider;
+    if (this.planner) planner = this.planner;
+    else planner = new ChatProviderPlanner(this.chatProviderOverride ?? await createChatProviderForSession(session, this.workspace));
+    if (planner.compactionMode !== "model") return;
+    const history: ConversationEntry[] = [{ role: "user", text: userText.slice(0, 4_000) }];
+    const reply = sanitizeVisibleResponse(assistantText).trim();
+    if (reply) history.push({ role: "assistant", text: reply.slice(0, 4_000) });
+    const actions = await planner.plan({
+      session,
+      userText: "title",
+      systemInstruction: SESSION_TITLE_PROMPT,
+      history,
+      tools: [],
+      toolCatalog: [],
+      toolChoice: "none"
+    });
+    const text = actions
+      .filter((action): action is Extract<PlannerAction, { kind: "respond" }> => action.kind === "respond")
+      .map((action) => action.text)
+      .join(" ");
+    const title = titleFromModelText(text, "");
+    if (!title) return;
+    session = this.store.loadSession(sessionId);
+    if (session.title !== baseline) return;
+    session = this.store.updateSession(sessionId, { title });
+    this.recordSession(session);
   }
 
   private async runAgentLoop(

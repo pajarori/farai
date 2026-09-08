@@ -236,7 +236,7 @@ export async function launchOpenTui(workspace: string, sessionId: string | undef
   const located = sessionId ? resolveSessionLocation(sessionId) : undefined;
   const effectiveWorkspace = located?.workspace ?? workspace;
   const effectiveSessionId = located?.id ?? sessionId;
-  const runtime = new AgentRuntime(effectiveWorkspace);
+  const runtime = new AgentRuntime(effectiveWorkspace, undefined, { enableSessionTitles: true });
   let port: TuiRuntimePort | undefined;
   try {
     await runtime.recover();

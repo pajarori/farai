@@ -10,16 +10,24 @@ export function isDefaultSessionTitle(value: string | undefined): boolean {
   return !value?.trim() || DEFAULT_TITLES.has(value.trim().toLowerCase());
 }
 
+const TITLE_MAX_WORDS = 6;
+const TITLE_MAX_CHARS = 48;
+
 export function normalizeSessionTitle(value: string, fallback = DEFAULT_SESSION_TITLE): string {
   const clean = value
     .replace(/<[^>]+>/g, " ")
+    .replace(/[`*_#>~|]+/g, " ")
+    .replace(/["'“”‘’()\[\]{}]/g, " ")
     .replace(/^\s*(?:[-*#>]+|\d+[.)])\s*/, "")
+    .replace(/[^\p{L}\p{N}\s.\/&+-]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/[.!?,;:]+$/, "")
-    .trim();
+    .replace(/[.!?,;:\/&+-]+$/, "")
+    .trim()
+    .toLowerCase();
   if (!clean) return fallback;
-  return clean.length > 72 ? `${clean.slice(0, 69).trimEnd()}...` : clean;
+  const byWords = clean.split(" ").slice(0, TITLE_MAX_WORDS).join(" ");
+  return byWords.length > TITLE_MAX_CHARS ? byWords.slice(0, TITLE_MAX_CHARS).trimEnd() : byWords;
 }
 
 export function titleFromPrompt(prompt: string, fallback = DEFAULT_SESSION_TITLE): string {
@@ -29,6 +37,23 @@ export function titleFromPrompt(prompt: string, fallback = DEFAULT_SESSION_TITLE
     .find(Boolean) ?? "";
   if (!first || first.startsWith("/") || LOW_INFORMATION.test(first)) return fallback;
   return normalizeSessionTitle(first.replace(LEADING_FILLER, ""), fallback);
+}
+
+export const SESSION_TITLE_PROMPT = `Write a short title for this session, describing the user's overall task.
+Rules: 3 to 6 words, at most 48 characters, lowercase, plain text only.
+No quotes, no markdown, no emoji, no trailing punctuation, no prefixes like "title:".
+Be general about the whole task, not a single step. Respond with the title only.`;
+
+export function titleFromModelText(text: string, fallback = DEFAULT_SESSION_TITLE): string {
+  const stripped = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/^\s*title\s*[:\-]\s*/i, "");
+  const first = stripped
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean) ?? "";
+  return normalizeSessionTitle(first, fallback);
 }
 
 export function sessionDisplayName(session: Pick<Session, "title"> | undefined): string {

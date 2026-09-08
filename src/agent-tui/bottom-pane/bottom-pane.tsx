@@ -31,7 +31,9 @@ export function BottomPane(): JSX.Element {
   const dims = useTuiDimensions();
   const commandRegistryRevision = useCommandRegistryRevision();
   const [elapsed, setElapsed] = createSignal(0);
+  const [spinner, setSpinner] = createSignal(0);
   let tick: ReturnType<typeof setInterval> | undefined;
+  let spinTick: ReturnType<typeof setInterval> | undefined;
   const frame = () => tui.store.ui.overlayStack.at(-1);
   const listFrame = () => {
     const top = frame();
@@ -109,20 +111,23 @@ export function BottomPane(): JSX.Element {
   createEffect(() => {
     const started = tui.store.ui.runningSince;
     if (tick) { clearInterval(tick); tick = undefined; }
+    if (spinTick) { clearInterval(spinTick); spinTick = undefined; }
     if (!started) {
       setElapsed(0);
+      setSpinner(0);
       return;
     }
     setElapsed(Math.max(0, Math.floor((Date.now() - started) / 1000)));
     tick = setInterval(() => setElapsed(Math.max(0, Math.floor((Date.now() - started) / 1000))), 1000);
+    spinTick = setInterval(() => setSpinner((value) => value + 1), 120);
   });
 
-  onCleanup(() => { if (tick) clearInterval(tick); });
+  onCleanup(() => { if (tick) clearInterval(tick); if (spinTick) clearInterval(spinTick); });
 
   return (
     <box id="bottom-pane" style={{ flexShrink: 0, flexDirection: "column" }}>
       <Show when={statusVisible()}>
-        <StatusIndicator elapsed={elapsed()} activity={statusActivity()} />
+        <StatusIndicator elapsed={elapsed()} spinnerFrame={spinner()} activity={statusActivity()} />
       </Show>
       <Show when={statusVisible() && (previewRendered() || questionNoticeVisible())}>
         <box style={{ height: 1, flexShrink: 0 }} />
