@@ -1,5 +1,4 @@
 import { createInterface } from "node:readline";
-import { FARAI_BANNER } from "../branding";
 import { loadConfig } from "../agent-core/config";
 import { faraiDockerEnvironment } from "./docker-environment";
 import { DEFAULT_KALI_IMAGE, KaliContainerBackend } from "./kali";
@@ -28,8 +27,6 @@ export async function runStartupContainerPreflight(workspace: string): Promise<S
 }
 
 async function promptForImagePull(exists: boolean): Promise<"apply" | "later" | "cancelled"> {
-  console.log("");
-  console.log(FARAI_BANNER);
   console.log("");
   console.log(exists
     ? "a newer kali container image is available"

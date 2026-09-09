@@ -259,6 +259,7 @@ async function initLab(args: string[]): Promise<void> {
 
 async function launchTui(workspace: string, sessionId: string | undefined): Promise<void> {
   ensureDefaultUserConfig();
+  console.log(FARAI_BANNER);
   const { runStartupContentPreflight } = await import("../agent-content/preflight");
   const { runStartupContainerPreflight } = await import("../agent-container/preflight");
   const effectiveWorkspace = sessionId ? resolveSessionLocation(sessionId)?.workspace ?? workspace : workspace;
