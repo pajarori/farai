@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, DEFAULT_MODEL_PROVIDER_ID, DEFAULT_MODEL_PUBLIC_API_KEY } from "./default-model";
+import { DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_PROVIDER_ID } from "./default-model";
 import { globalDataDir, loadGlobalConfig } from "./global-config";
 import { loadConfig, updateConfig } from "./config";
 import { fetchAvailableModelIds, HEURISTIC_MODEL_ID, resolveModel, type ConcreteResolvedModel, type ResolvedModel } from "./model-registry";
 import { loadModelProfiles, resolveProfile, resolveProfileApiKeyAsync, resolveProfileAsync, type ModelProfile } from "./model-profiles";
+import { isDefaultMode, DEFAULT_SOURCE_BASE_URL, DEFAULT_SOURCE_CONTEXT_WINDOW, DEFAULT_SOURCE_MODEL, defaultSourceKey } from "./default-source";
 import type { ModelPricingSnapshot } from "../types";
 import { discardResponseBody, readBoundedResponseJson } from "../http-response";
 import { readBoundedFileTextSyncNoFollow } from "../file-read";
@@ -45,9 +46,7 @@ export type ModelCatalog = {
 };
 
 const DEFAULT_PROVIDER_ID = "default";
-const OPENCODE_PROVIDER_ID = DEFAULT_MODEL_PROVIDER_ID;
-const OPENCODE_DEFAULT_MODEL_ID = DEFAULT_MODEL_ID;
-const OPENCODE_PUBLIC_API_KEY = DEFAULT_MODEL_PUBLIC_API_KEY;
+const DEFAULT_SOURCE_PROVIDER_ID = DEFAULT_MODEL_PROVIDER_ID;
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MODELS_DEV_STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -137,6 +136,15 @@ export async function resolveModelSelection(workspace: string, selection?: strin
 
 export async function resolveDefaultCatalogModel(workspace: string): Promise<ConcreteResolvedModel> {
   const config = loadGlobalConfig();
+  if (isDefaultMode()) {
+    return {
+      baseUrl: DEFAULT_SOURCE_BASE_URL,
+      model: DEFAULT_SOURCE_MODEL,
+      apiKey: defaultSourceKey(),
+      contextWindow: DEFAULT_SOURCE_CONTEXT_WINDOW,
+      name: "default"
+    };
+  }
   const catalog = await buildModelCatalog(workspace);
   const recent = readRecentModelSelections();
   for (const selection of recent) {
@@ -145,9 +153,6 @@ export async function resolveDefaultCatalogModel(workspace: string): Promise<Con
   }
 
   if (config.model) return resolveModelSelection(workspace, config.model);
-
-  const openCodeDefault = catalog.models.find((model) => model.providerID === DEFAULT_PROVIDER_ID && model.modelID === OPENCODE_DEFAULT_MODEL_ID);
-  if (openCodeDefault) return withSavedModelLimits(modelChoiceToResolved(openCodeDefault), openCodeDefault.id, workspace);
 
   const first = sortModelChoices(catalog.models).find((model) => model.verified) ?? sortModelChoices(catalog.models)[0];
   if (first) return withSavedModelLimits(modelChoiceToResolved(first), first.id, workspace);
@@ -198,7 +203,7 @@ export async function rememberModelSelection(selection: string, hint: {
 
 function normalizeModelsDevProviderHint(providerID: string | undefined, profile: ResolvedModel | undefined): string | undefined {
   if (providerID !== DEFAULT_PROVIDER_ID) return providerID;
-  if (!profile && resolveModel().baseUrl === DEFAULT_MODEL_BASE_URL) return OPENCODE_PROVIDER_ID;
+  if (!profile && resolveModel().baseUrl === DEFAULT_MODEL_BASE_URL) return DEFAULT_SOURCE_PROVIDER_ID;
   return undefined;
 }
 
@@ -213,8 +218,11 @@ export function defaultModelSelection(): string | undefined {
 export function displayModelSelection(workspace: string, selection?: string): string {
   if (selection) {
     const profile = loadModelProfiles(workspace).find((candidate) => candidate.name === selection);
-    return profile?.model ?? selection;
+    if (profile) return profile.model ?? selection;
+    if (isDefaultMode() && selection === DEFAULT_SOURCE_MODEL) return "default";
+    return selection;
   }
+  if (isDefaultMode()) return "default";
   return defaultModelSelection() ?? "auto";
 }
 
@@ -256,29 +264,16 @@ async function providerDefinitions(workspace: string, profiles: ModelProfile[]):
   }
   const profileDefinitions = await Promise.all(profiles.map((profile) => profileToProvider(profile, defaultModel, modelsDev)));
   for (const definition of profileDefinitions) if (definition) definitions.push(definition);
-  const openCode = modelsDev?.[OPENCODE_PROVIDER_ID];
-  const configuredOpenCode = definitions.some((provider) => provider.id === DEFAULT_PROVIDER_ID);
-  if (openCode && !configuredOpenCode) {
-    const hasApiKey = openCode.env.some((name) => Boolean(process.env[name]));
-    const freeModels = Object.values(openCode.models).filter((model) => hasApiKey || isFreeModel(model));
-    if (freeModels.length) {
-      definitions.push({
-        id: DEFAULT_PROVIDER_ID,
-        name: openCode.name,
-        baseUrl: openCode.api,
-        ...(openCode.env[0] ? { apiKeyEnv: openCode.env[0] } : {}),
-        apiKey: openCode.env.map((name) => process.env[name]).find(Boolean) ?? OPENCODE_PUBLIC_API_KEY,
-        source: "models.dev",
-        catalogModels: freeModels.map((model) => ({
-          id: model.id,
-          ...(model.name ? { name: model.name } : {}),
-          free: isFreeModel(model),
-          ...(model.limit?.context ? { contextWindow: model.limit.context } : {}),
-          ...(model.limit?.output ? { maxOutputTokens: model.limit.output } : {}),
-          ...(model.release_date ? { releaseDate: model.release_date } : {})
-        }))
-      });
-    }
+  const configuredDefaultSource = definitions.some((provider) => provider.id === DEFAULT_PROVIDER_ID);
+  if (isDefaultMode() && !configuredDefaultSource) {
+    definitions.push({
+      id: DEFAULT_PROVIDER_ID,
+      name: "default",
+      baseUrl: DEFAULT_SOURCE_BASE_URL,
+      apiKey: defaultSourceKey(),
+      source: "models.dev",
+      catalogModels: [{ id: DEFAULT_SOURCE_MODEL, name: "default", free: true, contextWindow: DEFAULT_SOURCE_CONTEXT_WINDOW }]
+    });
   }
   return definitions;
 }

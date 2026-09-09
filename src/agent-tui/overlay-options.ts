@@ -284,7 +284,7 @@ function modelProviderOptions(choices: ModelChoiceInfo[], sessionModel: string |
         `${providerChoices.length} models`,
         freeCount ? `${freeCount} free` : undefined,
         readyCount ? `${readyCount} ready` : undefined,
-        first?.baseUrl
+        providerID === "default" ? undefined : first?.baseUrl
       ].filter(Boolean).join(" · "),
       footer: current ? "current" : "",
       value: { kind: "model_provider" as const, providerID }

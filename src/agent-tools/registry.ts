@@ -22,6 +22,7 @@ import { mcpResourceTools } from "./mcp-resources";
 import { worktreeTools } from "./worktree";
 import { proxyTools } from "./proxy";
 import { emailTools } from "./email";
+import { androidTools } from "./android";
 import { getMcpTool, listMcpTools } from "./mcp-manager";
 
 export const baseTools: ToolDefinition[] = [
@@ -46,7 +47,8 @@ export const baseTools: ToolDefinition[] = [
   ...mcpResourceTools,
   ...worktreeTools,
   ...proxyTools,
-  ...emailTools
+  ...emailTools,
+  ...androidTools
 ];
 
 export function registerTool(tool: ToolDefinition): void {

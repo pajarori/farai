@@ -1,5 +1,6 @@
 import { loadGlobalConfig } from "./global-config";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_STEPS, DEFAULT_MAX_TURN_SECONDS, DEFAULT_MODEL_BASE_URL, DEFAULT_MODEL_ID, DEFAULT_MODEL_PUBLIC_API_KEY } from "./default-model";
+import { defaultSourceKey } from "./default-source";
 import type { ModelPricingSnapshot } from "../types";
 import { discardResponseBody, readBoundedResponseJson } from "../http-response";
 
@@ -28,8 +29,11 @@ export function resolveDefaultModel(): ResolvedModel {
 export function resolveModel(input: { baseUrl?: string; model?: string; apiKey?: string } = {}): ResolvedModel {
   const config = loadGlobalConfig();
   const baseUrl = input.baseUrl ?? config.baseUrl ?? DEFAULT_MODEL_BASE_URL;
-  const model = input.model ?? config.model ?? DEFAULT_MODEL_ID;
-  const apiKey = input.apiKey ?? (config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined) ?? (baseUrl === DEFAULT_MODEL_BASE_URL ? DEFAULT_MODEL_PUBLIC_API_KEY : undefined);
+  const isDefault = baseUrl === DEFAULT_MODEL_BASE_URL && !config.baseUrl;
+  const model = input.model ?? config.model ?? (DEFAULT_MODEL_ID || undefined);
+  const apiKey = input.apiKey
+    ?? (config.apiKeyEnv ? process.env[config.apiKeyEnv] : undefined)
+    ?? (isDefault ? defaultSourceKey() : DEFAULT_MODEL_PUBLIC_API_KEY || undefined);
   return { baseUrl, ...(model ? { model } : {}), ...(apiKey ? { apiKey } : {}) };
 }
 
