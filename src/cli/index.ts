@@ -6,7 +6,7 @@ import { buildModelCatalog, resolveDefaultCatalogModel } from "../agent-core/mod
 import { addModelProfile, loadModelProfiles, modelProfilePaths, type ModelProfileLocation } from "../agent-core/model-profiles";
 import { ensureDefaultUserConfig, globalConfigPath, loadGlobalConfig } from "../agent-core/global-config";
 import { loadConfig, updateConfig } from "../agent-core/config";
-import { FARAI_BANNER } from "../branding";
+import { FARAI_BANNER, clearBannerIfShown } from "../branding";
 import { FARAI_VERSION } from "../version";
 import { resolveSessionLocation } from "../session-catalog";
 import {
@@ -259,7 +259,6 @@ async function initLab(args: string[]): Promise<void> {
 
 async function launchTui(workspace: string, sessionId: string | undefined): Promise<void> {
   ensureDefaultUserConfig();
-  console.log(FARAI_BANNER);
   const { runStartupContentPreflight } = await import("../agent-content/preflight");
   const { runStartupContainerPreflight } = await import("../agent-container/preflight");
   const effectiveWorkspace = sessionId ? resolveSessionLocation(sessionId)?.workspace ?? workspace : workspace;
@@ -271,6 +270,7 @@ async function launchTui(workspace: string, sessionId: string | undefined): Prom
     process.exitCode = 130;
     return;
   }
+  clearBannerIfShown();
   if (import.meta.path.endsWith(".ts")) {
     const sourceTuiPreload = "@opentui/solid/preload";
     await import(sourceTuiPreload);

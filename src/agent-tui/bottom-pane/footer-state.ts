@@ -117,7 +117,7 @@ export function footerRightItems(
 ): FooterItem[] {
   const items: FooterItem[] = [];
   if (updateNotice) {
-    items.push({ id: "update", kind: "update", text: `update ${updateNotice.latestVersion}` });
+    items.push({ id: "update", kind: "update", text: `update available ${updateNotice.latestVersion}` });
   }
   if (contextUsage && contextUsage.tokens >= 0) {
     items.push({

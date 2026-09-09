@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import { printBannerOnce } from "../branding";
 import { loadConfig } from "../agent-core/config";
 import { applyContentUpdate, checkContentUpdate, dismissContentVersion, isContentVersionDismissed, type ContentDownloadProgress } from "./updater";
 
@@ -31,6 +32,7 @@ export async function runStartupContentPreflight(workspace: string): Promise<Sta
 
 async function promptForUpdate(version: string, knowledge: boolean, skills: boolean): Promise<"apply" | "later" | "dismiss" | "cancelled"> {
   const contents = [knowledge ? "knowledge" : undefined, skills ? "skills" : undefined].filter(Boolean).join(" + ");
+  printBannerOnce();
   console.log("");
   console.log(`farai content ${version} is available${contents ? ` (${contents})` : ""}`);
   const interfaceHandle = createInterface({ input: process.stdin, output: process.stdout });

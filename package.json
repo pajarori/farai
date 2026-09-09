@@ -1,6 +1,6 @@
 {
   "name": "farai",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": false,
   "type": "module",
   "description": "AI Harness for Security Assessments",
