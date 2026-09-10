@@ -46,7 +46,6 @@ export type ModelCatalog = {
 };
 
 const DEFAULT_PROVIDER_ID = "default";
-const DEFAULT_SOURCE_PROVIDER_ID = DEFAULT_MODEL_PROVIDER_ID;
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const MODELS_DEV_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MODELS_DEV_STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -203,7 +202,7 @@ export async function rememberModelSelection(selection: string, hint: {
 
 function normalizeModelsDevProviderHint(providerID: string | undefined, profile: ResolvedModel | undefined): string | undefined {
   if (providerID !== DEFAULT_PROVIDER_ID) return providerID;
-  if (!profile && resolveModel().baseUrl === DEFAULT_MODEL_BASE_URL) return DEFAULT_SOURCE_PROVIDER_ID;
+  if (!profile && resolveModel().baseUrl === DEFAULT_MODEL_BASE_URL) return DEFAULT_MODEL_PROVIDER_ID;
   return undefined;
 }
 

@@ -1,7 +1,7 @@
 import type { ToolContext, ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { adbPrefix, adbUnavailable, resolveDevice, runAdb, shellQuote } from "./shared";
+import { adbPrefix, resolveDevice, runAdb, runAdbChecked, shellQuote } from "./shared";
 
 const SERIAL_PROP = { type: "string", description: "device serial from android_devices; omit when exactly one device is connected" };
 
@@ -53,8 +53,7 @@ export function findUiNode(nodes: UiNode[], selector: { resourceId?: string; tex
 
 async function dumpHierarchy(context: ToolContext, serial: string): Promise<string> {
   const remote = "/sdcard/farai_uidump.xml";
-  const dump = await runAdb(context, `${adbPrefix(serial)} shell uiautomator dump ${remote}`, 30_000);
-  if (adbUnavailable(dump)) throw new Error("adb is not available in the container");
+  const dump = await runAdbChecked(context, `${adbPrefix(serial)} shell uiautomator dump ${remote}`, 30_000);
   const read = await runAdb(context, `${adbPrefix(serial)} shell cat ${remote}`, 20_000, 8_000_000);
   const xml = read.stdout.trim();
   if (!xml.includes("<hierarchy") && !xml.includes("<node")) {
@@ -93,7 +92,7 @@ export const androidUiDumpTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const xml = await dumpHierarchy(context, serial);
     const all = parseUiNodes(xml);
     const clickableOnly = args.clickableOnly !== false;
@@ -123,7 +122,7 @@ export const androidUiHierarchyTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const xml = await dumpHierarchy(context, serial);
     return { ok: true, summary: `captured ui hierarchy (${xml.length} bytes)`, output: xml, metadata: { serial } };
   }
@@ -144,12 +143,11 @@ export const androidScreenshotTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const remote = "/sdcard/farai_screen.png";
     const local = `android/screenshots/${Date.now()}.png`;
     await runAdb(context, `mkdir -p android/screenshots`, 10_000);
-    const cap = await runAdb(context, `${adbPrefix(serial)} shell screencap -p ${remote}`, 30_000);
-    if (adbUnavailable(cap)) throw new Error("adb is not available in the container");
+    const cap = await runAdbChecked(context, `${adbPrefix(serial)} shell screencap -p ${remote}`, 30_000);
     const pull = await runAdb(context, `${adbPrefix(serial)} pull ${remote} ${shellQuote(local)}`, 40_000);
     const ok = pull.exitCode === 0;
     return {
@@ -184,9 +182,8 @@ export const androidUiTapTool: ToolDefinition = {
     const x = Number(args.x);
     const y = Number(args.y);
     if (!Number.isInteger(x) || !Number.isInteger(y)) throw new Error("x and y must be integers");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
-    const result = await runAdb(context, `${adbPrefix(serial)} shell input tap ${x} ${y}`, 20_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const serial = await resolveDevice(context, args.serial);
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell input tap ${x} ${y}`, 20_000);
     return { ok: result.exitCode === 0, summary: `tapped ${x},${y}`, output: result.stdout.trim() || "tapped", metadata: { serial, x, y } };
   }
 };
@@ -217,7 +214,7 @@ export const androidUiTapElementTool: ToolDefinition = {
       ...(typeof args.contentDesc === "string" ? { contentDesc: args.contentDesc } : {})
     };
     if (!selector.resourceId && !selector.text && !selector.contentDesc) throw new Error("provide at least one of resourceId, text, or contentDesc");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const xml = await dumpHierarchy(context, serial);
     const node = findUiNode(parseUiNodes(xml), selector);
     if (!node) return { ok: false, summary: "no element matched the selector", output: "element not found on the current screen", metadata: { serial, selector } };
@@ -247,10 +244,9 @@ export const androidUiTypeTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const text = asString(args.text, "text");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const escaped = text.replace(/(["\\$`])/g, "\\$1").replace(/ /g, "%s");
-    const result = await runAdb(context, `${adbPrefix(serial)} shell input text ${shellQuote(escaped)}`, 20_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell input text ${shellQuote(escaped)}`, 20_000);
     return { ok: result.exitCode === 0, summary: `typed ${text.length} char(s)`, output: result.stdout.trim() || "typed", metadata: { serial } };
   }
 };
@@ -281,10 +277,9 @@ export const androidUiSwipeTool: ToolDefinition = {
     const coords = ["x1", "y1", "x2", "y2"].map((key) => Number((args as Record<string, unknown>)[key]));
     if (coords.some((value) => !Number.isInteger(value))) throw new Error("x1, y1, x2, y2 must be integers");
     const duration = typeof args.durationMs === "number" && Number.isInteger(args.durationMs) ? Math.max(50, Math.min(10_000, args.durationMs)) : 300;
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const [x1, y1, x2, y2] = coords;
-    const result = await runAdb(context, `${adbPrefix(serial)} shell input swipe ${x1} ${y1} ${x2} ${y2} ${duration}`, 20_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell input swipe ${x1} ${y1} ${x2} ${y2} ${duration}`, 20_000);
     return { ok: result.exitCode === 0, summary: `swiped ${x1},${y1} -> ${x2},${y2}`, output: result.stdout.trim() || "swiped", metadata: { serial } };
   }
 };
@@ -316,9 +311,8 @@ export const androidUiKeyTool: ToolDefinition = {
     const key = asString(args.key, "key").trim().toLowerCase();
     const code = KEYEVENTS[key] ?? (/^\d+$/.test(key) ? Number(key) : undefined);
     if (code === undefined) throw new Error(`unknown key "${key}"; use a named key or a numeric keycode`);
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
-    const result = await runAdb(context, `${adbPrefix(serial)} shell input keyevent ${code}`, 20_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const serial = await resolveDevice(context, args.serial);
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell input keyevent ${code}`, 20_000);
     return { ok: result.exitCode === 0, summary: `sent key ${key} (${code})`, output: result.stdout.trim() || "sent", metadata: { serial, key, code } };
   }
 };
@@ -338,9 +332,8 @@ export const androidUiWindowSizeTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
-    const result = await runAdb(context, `${adbPrefix(serial)} shell wm size`, 20_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const serial = await resolveDevice(context, args.serial);
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell wm size`, 20_000);
     const size = /(\d+)x(\d+)/.exec(result.stdout);
     return {
       ok: result.exitCode === 0,
@@ -379,7 +372,7 @@ export const androidUiWaitForTool: ToolDefinition = {
     };
     if (!selector.resourceId && !selector.text && !selector.contentDesc) throw new Error("provide at least one of resourceId, text, or contentDesc");
     const timeoutSeconds = typeof args.timeoutSeconds === "number" && Number.isInteger(args.timeoutSeconds) ? Math.max(1, Math.min(120, args.timeoutSeconds)) : 15;
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const deadline = Date.now() + timeoutSeconds * 1_000;
     let attempts = 0;
     while (Date.now() < deadline) {

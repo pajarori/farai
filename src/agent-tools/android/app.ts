@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { adbPrefix, adbUnavailable, compactError, resolveDevice, runAdb, shellQuote } from "./shared";
+import { adbPrefix, compactError, resolveDevice, runAdb, runAdbChecked, shellQuote } from "./shared";
 
 const SERIAL_PROP = { type: "string", description: "device serial from android_devices; omit when exactly one device is connected" };
 
@@ -31,9 +31,8 @@ export const androidApkPullTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const pkg = sanitizePackage(asString(args.package, "package"));
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
-    const pathResult = await runAdb(context, `${adbPrefix(serial)} shell pm path ${shellQuote(pkg)}`, 30_000);
-    if (adbUnavailable(pathResult)) throw new Error("adb is not available in the container");
+    const serial = await resolveDevice(context, args.serial);
+    const pathResult = await runAdbChecked(context, `${adbPrefix(serial)} shell pm path ${shellQuote(pkg)}`, 30_000);
     const remotes = pathResult.stdout.split("\n").map((line) => line.replace(/^package:/, "").trim()).filter(Boolean);
     if (remotes.length === 0) throw new Error(`package not found on device: ${pkg}`);
     const destDir = `android/${pkg}`;
@@ -75,9 +74,8 @@ export const androidInstallTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const apkPath = asString(args.apkPath, "apkPath").trim();
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
-    const result = await runAdb(context, `${adbPrefix(serial)} install -r ${shellQuote(apkPath)}`, 120_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const serial = await resolveDevice(context, args.serial);
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} install -r ${shellQuote(apkPath)}`, 120_000);
     const text = `${result.stdout}${result.stderr}`.trim();
     const ok = /success/i.test(text);
     return {
@@ -112,12 +110,11 @@ function appLifecycleTool(name: string, verb: "start" | "stop"): ToolDefinition 
     run: async (args, context) => {
       assertObject(args, "args");
       const pkg = sanitizePackage(asString(args.package, "package"));
-      const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+      const serial = await resolveDevice(context, args.serial);
       const shell = verb === "start"
         ? `monkey -p ${shellQuote(pkg)} -c android.intent.category.LAUNCHER 1`
         : `am force-stop ${shellQuote(pkg)}`;
-      const result = await runAdb(context, `${adbPrefix(serial)} shell ${shellQuote(shell)}`, 30_000);
-      if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+      const result = await runAdbChecked(context, `${adbPrefix(serial)} shell ${shellQuote(shell)}`, 30_000);
       const output = `${result.stdout}${result.stderr ? `\n${result.stderr}` : ""}`.trim();
       const ok = result.exitCode === 0 && !/error|no activities found/i.test(output);
       return {
@@ -155,10 +152,9 @@ export const androidDeeplinkTool: ToolDefinition = {
     assertObject(args, "args");
     const uri = asString(args.uri, "uri").trim();
     const pkg = typeof args.package === "string" && args.package.trim() ? sanitizePackage(args.package) : "";
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const shell = `am start -a android.intent.action.VIEW -d ${shellQuote(uri)}${pkg ? ` ${shellQuote(pkg)}` : ""}`;
-    const result = await runAdb(context, `${adbPrefix(serial)} shell ${shellQuote(shell)}`, 30_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell ${shellQuote(shell)}`, 30_000);
     const output = `${result.stdout}${result.stderr ? `\n${result.stderr}` : ""}`.trim();
     const ok = result.exitCode === 0 && !/error|exception/i.test(output);
     return {
@@ -192,10 +188,9 @@ export const androidPullFileTool: ToolDefinition = {
     assertObject(args, "args");
     const path = asString(args.path, "path").trim();
     const pkg = typeof args.package === "string" && args.package.trim() ? sanitizePackage(args.package) : "";
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const shell = pkg ? `run-as ${shellQuote(pkg)} cat ${shellQuote(path)}` : `cat ${shellQuote(path)}`;
-    const result = await runAdb(context, `${adbPrefix(serial)} shell ${shellQuote(shell)}`, 30_000, 4_000_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell ${shellQuote(shell)}`, 30_000, 4_000_000);
     const ok = result.exitCode === 0 && !/no such file|permission denied|not debuggable|run-as:/i.test(result.stderr);
     return {
       ok,

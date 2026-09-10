@@ -83,12 +83,22 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 
 RUN UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/opt/uv/bin uv tool install --with 'mcp>=1.25.0,<2' mitmproxy-mcp==0.6.1 \
   && chmod -R a+rX /opt/uv \
-  && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g \
-    @playwright/mcp@latest \
+  && npm install -g \
     typescript@${TYPESCRIPT_VERSION} \
     typescript-language-server@${TYPESCRIPT_LANGUAGE_SERVER_VERSION} \
     pyright@${PYRIGHT_VERSION} \
   && uv cache clean \
+  && npm cache clean --force
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+RUN mkdir -p /opt/playwright-mcp \
+  && printf '%s' '{"name":"farai-playwright-mcp","private":true,"dependencies":{"@playwright/mcp":"latest","patchright":"latest"},"overrides":{"playwright":"npm:patchright@latest","playwright-core":"npm:patchright-core@latest"}}' > /opt/playwright-mcp/package.json \
+  && cd /opt/playwright-mcp \
+  && npm install --omit=dev --no-audit --no-fund \
+  && if [ -e node_modules/.bin/mcp-server-playwright ]; then ln -sf /opt/playwright-mcp/node_modules/.bin/mcp-server-playwright /usr/local/bin/playwright-mcp; else ln -sf /opt/playwright-mcp/node_modules/@playwright/mcp/cli.js /usr/local/bin/playwright-mcp; fi \
+  && node_modules/.bin/patchright install --with-deps chromium \
+  && chmod -R a+rX /opt/ms-playwright /opt/playwright-mcp \
   && npm cache clean --force
 
 COPY --from=lsp-builder /out/gopls /usr/local/bin/gopls

@@ -4,7 +4,7 @@ import { backend } from "../shared/backend";
 import { backgroundToolResult } from "../shared/background-result";
 import { clampYieldMs, sessionManager } from "../shared/session-manager";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { adbEnvPrefix, adbPrefix, adbUnavailable, compactError, resolveDevice, runAdb, shellQuote } from "./shared";
+import { adbEnvPrefix, adbPrefix, compactError, resolveDevice, runAdb, runAdbChecked, shellQuote } from "./shared";
 
 const SERIAL_PROP = { type: "string", description: "device serial from android_devices; omit when exactly one device is connected" };
 const DEVICE_SERVER_PATH = "/data/local/tmp/frida-server";
@@ -229,7 +229,7 @@ export const androidFridaStatusTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const version = await backend(context).exec("frida --version 2>/dev/null || true", 15_000, context.signal);
     const fridaTools = version.stdout.trim();
     const binary = await runAdb(context, `${adbPrefix(serial)} shell ls ${DEVICE_SERVER_PATH} 2>/dev/null`, 15_000);
@@ -276,7 +276,7 @@ export const androidFridaSetupTool: ToolDefinition = {
     assertObject(args, "args");
     const requested = typeof args.version === "string" && args.version.trim() ? args.version.trim() : "";
     if (requested && !/^\d+(\.\d+){1,3}$/.test(requested)) throw new Error("version must look like 16.5.9");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const steps: string[] = [];
     let version = (await backend(context).exec("frida --version 2>/dev/null", 15_000, context.signal)).stdout.trim();
     if (requested || !version) {
@@ -287,8 +287,7 @@ export const androidFridaSetupTool: ToolDefinition = {
       steps.push(`frida-tools already present: ${version}`);
     }
     if (!version) return { ok: false, summary: "frida-tools install failed", output: steps.join("\n"), metadata: { serial } };
-    const abiResult = await runAdb(context, `${adbPrefix(serial)} shell getprop ro.product.cpu.abi`, 15_000);
-    if (adbUnavailable(abiResult)) throw new Error("adb is not available in the container");
+    const abiResult = await runAdbChecked(context, `${adbPrefix(serial)} shell getprop ro.product.cpu.abi`, 15_000);
     const abi = abiResult.stdout.trim().replace(/\r/g, "");
     const arch = ABI_MAP[abi];
     if (!arch) throw new Error(`unsupported device abi: ${abi || "unknown"} (supported: ${Object.keys(ABI_MAP).join(", ")})`);
@@ -329,7 +328,7 @@ export const androidFridaPsTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const listFlag = args.applicationsOnly === true ? "-ai" : "-a";
     const deviceFlag = `-D ${shellQuote(serial)}`;
     const result = await backend(context).exec(`${adbEnvPrefix()}frida-ps ${listFlag} ${deviceFlag} 2>&1`, 40_000, context.signal);
@@ -370,7 +369,7 @@ export const androidFridaRunTool: ToolDefinition = {
     const target = asString(args.target, "target").trim();
     const mode = args.mode === "spawn" ? "spawn" : "attach";
     const durationSeconds = typeof args.durationSeconds === "number" && Number.isInteger(args.durationSeconds) ? Math.max(1, Math.min(600, args.durationSeconds)) : 15;
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     await writeAsset(context, RUNNER_PATH, FRIDA_RUNNER);
     const command = fridaRunCommand(serial, mode, target, scriptPath, durationSeconds);
     if (args.background === true) {
@@ -417,7 +416,7 @@ export const androidFridaBypassTool: ToolDefinition = {
     if (!script) throw new Error(`unknown bypass type: ${type}; use ssl or root`);
     const pkg = asString(args.package, "package").trim();
     const durationSeconds = typeof args.durationSeconds === "number" && Number.isInteger(args.durationSeconds) ? Math.max(1, Math.min(600, args.durationSeconds)) : 30;
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const scriptPath = `${ASSET_DIR}/scripts/bypass_${type}.js`;
     await writeAsset(context, RUNNER_PATH, FRIDA_RUNNER);
     await writeAsset(context, scriptPath, script);

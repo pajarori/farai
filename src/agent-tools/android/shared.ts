@@ -19,6 +19,12 @@ export async function runAdb(context: ToolContext, argline: string, timeoutMs: n
   return backend(context).exec(argline, timeoutMs, context.signal, maxBytes);
 }
 
+export async function runAdbChecked(context: ToolContext, argline: string, timeoutMs: number, maxBytes = 2_000_000): Promise<BackendExecResult> {
+  const result = await runAdb(context, argline, timeoutMs, maxBytes);
+  if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+  return result;
+}
+
 const ADB_SERVER_ENV = ["ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_ADDRESS", "ANDROID_ADB_SERVER_PORT"] as const;
 
 export function adbEnvPrefix(): string {
@@ -54,11 +60,10 @@ export function parseDevices(stdout: string): AdbDevice[] {
   return devices;
 }
 
-export async function resolveDevice(context: ToolContext, serial: string | undefined, timeoutMs = 15_000): Promise<string> {
-  const provided = serial?.trim();
+export async function resolveDevice(context: ToolContext, serial: unknown, timeoutMs = 15_000): Promise<string> {
+  const provided = typeof serial === "string" ? serial.trim() : "";
   if (provided) return provided;
-  const result = await runAdb(context, `${adbBase()} devices -l`, timeoutMs);
-  if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+  const result = await runAdbChecked(context, `${adbBase()} devices -l`, timeoutMs);
   const online = parseDevices(result.stdout).filter((device) => device.state === "device");
   if (online.length === 0) throw new Error("no android device is connected; use android_connect to attach one over tcp/ip");
   if (online.length > 1) throw new Error(`multiple devices connected (${online.map((device) => device.serial).join(", ")}); pass the serial argument`);

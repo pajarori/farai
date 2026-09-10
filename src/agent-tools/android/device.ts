@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { adbBase, adbPrefix, adbUnavailable, parseDevices, resolveDevice, runAdb, shellQuote } from "./shared";
+import { adbBase, adbPrefix, parseDevices, resolveDevice, runAdbChecked, shellQuote } from "./shared";
 
 const SERIAL_PROP = { type: "string", description: "device serial from android_devices; omit when exactly one device is connected" };
 
@@ -25,8 +25,7 @@ export const androidConnectTool: ToolDefinition = {
     assertObject(args, "args");
     const raw = asString(args.address, "address").trim();
     const address = /:\d+$/.test(raw) ? raw : `${raw}:5555`;
-    const result = await runAdb(context, `${adbBase()} connect ${shellQuote(address)}`, 30_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbBase()} connect ${shellQuote(address)}`, 30_000);
     const text = `${result.stdout}${result.stderr}`.trim();
     const ok = /connected to/i.test(text) && !/cannot|failed|unable|refused/i.test(text);
     return {
@@ -49,8 +48,7 @@ export const androidDevicesTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const result = await runAdb(context, `${adbBase()} devices -l`, 15_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbBase()} devices -l`, 15_000);
     const devices = parseDevices(result.stdout);
     const online = devices.filter((device) => device.state === "device");
     const output = devices.length
@@ -85,9 +83,8 @@ export const androidShellTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const command = asString(args.command, "command");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
-    const result = await runAdb(context, `${adbPrefix(serial)} shell ${shellQuote(command)}`, 60_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const serial = await resolveDevice(context, args.serial);
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell ${shellQuote(command)}`, 60_000);
     const output = `${result.stdout}${result.stderr ? `\n${result.stderr}` : ""}`.trim();
     return {
       ok: result.exitCode === 0,
@@ -117,10 +114,9 @@ export const androidPackagesTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const thirdParty = args.thirdPartyOnly === true;
-    const result = await runAdb(context, `${adbPrefix(serial)} shell pm list packages${thirdParty ? " -3" : ""}`, 30_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} shell pm list packages${thirdParty ? " -3" : ""}`, 30_000);
     const filter = typeof args.filter === "string" ? args.filter.trim().toLowerCase() : "";
     let packages = result.stdout.split("\n").map((line) => line.replace(/^package:/, "").trim()).filter(Boolean);
     if (filter) packages = packages.filter((name) => name.toLowerCase().includes(filter));
@@ -149,7 +145,7 @@ export const androidDeviceInfoTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const props = [
       "ro.build.version.release",
       "ro.build.version.sdk",
@@ -159,8 +155,7 @@ export const androidDeviceInfoTool: ToolDefinition = {
       "ro.build.type"
     ];
     const command = `${adbPrefix(serial)} shell ${shellQuote(`for p in ${props.join(" ")}; do echo "$p=$(getprop $p)"; done; echo su=$(command -v su || echo none)`)}`;
-    const result = await runAdb(context, command, 30_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, command, 30_000);
     const info: Record<string, string> = {};
     for (const line of result.stdout.split("\n")) {
       const eq = line.indexOf("=");
@@ -194,12 +189,11 @@ export const androidLogcatTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const serial = await resolveDevice(context, typeof args.serial === "string" ? args.serial : undefined);
+    const serial = await resolveDevice(context, args.serial);
     const lines = typeof args.lines === "number" && Number.isInteger(args.lines) ? Math.max(1, Math.min(5_000, args.lines)) : 200;
     const tag = typeof args.tag === "string" && args.tag.trim() ? args.tag.trim() : "";
     const filter = tag ? ` -s ${shellQuote(tag)}` : "";
-    const result = await runAdb(context, `${adbPrefix(serial)} logcat -d -t ${lines}${filter}`, 30_000);
-    if (adbUnavailable(result)) throw new Error("adb is not available in the container");
+    const result = await runAdbChecked(context, `${adbPrefix(serial)} logcat -d -t ${lines}${filter}`, 30_000);
     const output = result.stdout.trim();
     return {
       ok: result.exitCode === 0,
