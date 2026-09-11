@@ -457,7 +457,7 @@ export function ensureDefaultConfig(): string {
     const servers = { ...(current.mcpServers ?? {}) };
     for (const id of missingBackbone) servers[id] = defaults[id]!;
     if (needsMigration && isLegacyPwnoMcpDefault(servers["pwno-mcp"])) delete servers["pwno-mcp"];
-    if (needsMigration && isLegacyChromiumPlaywrightDefault(servers["playwright"])) servers["playwright"] = defaults["playwright"]!;
+    if (needsMigration && isLegacyDefaultPlaywright(servers["playwright"])) servers["playwright"] = defaults["playwright"]!;
     writeConfig({ ...current, configVersion: CURRENT_CONFIG_VERSION, mcpServers: servers });
   }
   return path;
@@ -467,16 +467,22 @@ export function defaultMcpServers(): Record<string, Record<string, unknown>> {
   return normalizeConfig(Bun.TOML.parse(DEFAULT_CONFIG_TEMPLATE)).mcpServers ?? {};
 }
 
-const CURRENT_CONFIG_VERSION = 5;
+const CURRENT_CONFIG_VERSION = 6;
 
 function isLegacyPwnoMcpDefault(entry: Record<string, unknown> | undefined): boolean {
   if (!entry || entry.command !== "docker" || !Array.isArray(entry.args)) return false;
   return entry.args.includes("ghcr.io/pwno-io/pwno-mcp:v0.2.1") && entry.args.includes("--stdio");
 }
 
-function isLegacyChromiumPlaywrightDefault(entry: Record<string, unknown> | undefined): boolean {
+const LEGACY_PLAYWRIGHT_DEFAULT_ARGS = [
+  ["--headless", "--browser", "chromium", "--executable-path", "/usr/bin/chromium", "--no-sandbox", "--ignore-https-errors", "--isolated"],
+  ["--headless", "--browser", "chromium", "--no-sandbox", "--ignore-https-errors", "--isolated"]
+];
+
+function isLegacyDefaultPlaywright(entry: Record<string, unknown> | undefined): boolean {
   if (!entry || entry.command !== "playwright-mcp" || !Array.isArray(entry.args)) return false;
-  return entry.args.includes("--executable-path") && entry.args.includes("/usr/bin/chromium");
+  const serialized = JSON.stringify(entry.args);
+  return LEGACY_PLAYWRIGHT_DEFAULT_ARGS.some((args) => JSON.stringify(args) === serialized);
 }
 
 const DEFAULT_CONFIG_TEMPLATE = `config_version = ${CURRENT_CONFIG_VERSION}
@@ -503,8 +509,8 @@ autoStartProxy = true
 port = 31337
 
 [mcp_servers.playwright]
-command = "playwright-mcp"
-args = ["--headless", "--browser", "chromium", "--no-sandbox", "--ignore-https-errors", "--isolated"]
+command = "xvfb-run"
+args = ["-a", "playwright-mcp", "--browser", "chromium", "--no-sandbox", "--ignore-https-errors", "--isolated"]
 run_in_container = true
 enabled = true
 required = false

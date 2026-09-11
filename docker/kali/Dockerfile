@@ -178,6 +178,11 @@ RUN git clone --depth 1 https://github.com/worawit/blutter.git /opt/blutter \
 
 RUN git clone --depth 1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends xvfb xauth \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY redsocks.conf.tmpl /usr/local/share/farai/redsocks.conf.tmpl
 COPY farai-proxy-init.sh /usr/local/bin/farai-proxy-init
 COPY farai-proxy-teardown.sh /usr/local/bin/farai-proxy-teardown
