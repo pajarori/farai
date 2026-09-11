@@ -467,22 +467,20 @@ export function defaultMcpServers(): Record<string, Record<string, unknown>> {
   return normalizeConfig(Bun.TOML.parse(DEFAULT_CONFIG_TEMPLATE)).mcpServers ?? {};
 }
 
-const CURRENT_CONFIG_VERSION = 6;
+const CURRENT_CONFIG_VERSION = 7;
 
 function isLegacyPwnoMcpDefault(entry: Record<string, unknown> | undefined): boolean {
   if (!entry || entry.command !== "docker" || !Array.isArray(entry.args)) return false;
   return entry.args.includes("ghcr.io/pwno-io/pwno-mcp:v0.2.1") && entry.args.includes("--stdio");
 }
 
-const LEGACY_PLAYWRIGHT_DEFAULT_ARGS = [
-  ["--headless", "--browser", "chromium", "--executable-path", "/usr/bin/chromium", "--no-sandbox", "--ignore-https-errors", "--isolated"],
-  ["--headless", "--browser", "chromium", "--no-sandbox", "--ignore-https-errors", "--isolated"]
-];
-
 function isLegacyDefaultPlaywright(entry: Record<string, unknown> | undefined): boolean {
   if (!entry || entry.command !== "playwright-mcp" || !Array.isArray(entry.args)) return false;
-  const serialized = JSON.stringify(entry.args);
-  return LEGACY_PLAYWRIGHT_DEFAULT_ARGS.some((args) => JSON.stringify(args) === serialized);
+  const args = entry.args.map(String);
+  if (!args.includes("--headless")) return false;
+  const execIndex = args.indexOf("--executable-path");
+  if (execIndex >= 0 && args[execIndex + 1] && args[execIndex + 1] !== "/usr/bin/chromium") return false;
+  return true;
 }
 
 const DEFAULT_CONFIG_TEMPLATE = `config_version = ${CURRENT_CONFIG_VERSION}
