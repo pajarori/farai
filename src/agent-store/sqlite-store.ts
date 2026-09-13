@@ -354,11 +354,14 @@ export class SqliteStore {
   }
 
   updateCampaign(campaignId: string, patch: Partial<Pick<Campaign, "name" | "status">>): Campaign {
-    const current = this.loadCampaign(campaignId);
-    const next: Campaign = { ...current, ...patch, updatedAt: nowIso() };
-    this.database().query("update campaigns set name = $name, status = $status, updated_at = $updated where id = $id")
-      .run({ $name: assertPersistedText(next.name, PERSISTENCE_LIMITS.shortTextBytes, "campaign name"), $status: next.status, $updated: next.updatedAt, $id: campaignId });
-    return next;
+    const db = this.database();
+    return db.transaction(() => {
+      const current = this.loadCampaign(campaignId);
+      const next: Campaign = { ...current, ...patch, updatedAt: nowIso() };
+      db.query("update campaigns set name = $name, status = $status, updated_at = $updated where id = $id")
+        .run({ $name: assertPersistedText(next.name, PERSISTENCE_LIMITS.shortTextBytes, "campaign name"), $status: next.status, $updated: next.updatedAt, $id: campaignId });
+      return campaignFromRow(db.query("select * from campaigns where id = $id").get({ $id: campaignId }) as Row);
+    }).immediate();
   }
 
   createCampaignRun(input: Omit<CampaignRun, "id" | "createdAt" | "updatedAt">): CampaignRun {
@@ -431,26 +434,29 @@ export class SqliteStore {
   }
 
   upsertCampaignRequirement(input: Omit<CampaignRequirement, "id" | "createdAt" | "updatedAt">): CampaignRequirement {
-    const existing = this.database().query("select * from campaign_requirements where run_id = $run and key = $key").get({ $run: input.runId, $key: input.key }) as Row | null;
-    const now = nowIso();
-    const requirement: CampaignRequirement = existing
-      ? { ...campaignRequirementFromRow(existing), ...input, id: String(existing.id), createdAt: String(existing.created_at), updatedAt: now }
-      : { id: id(), ...input, createdAt: now, updatedAt: now };
-    this.database().query(
-      `insert into campaign_requirements (id, run_id, key, description, status, evidence_ids_json, created_at, updated_at)
-       values ($id, $run, $key, $description, $status, $evidence, $created, $updated)
-       on conflict(run_id, key) do update set description = excluded.description, status = excluded.status, evidence_ids_json = excluded.evidence_ids_json, updated_at = excluded.updated_at`
-    ).run({
-      $id: requirement.id,
-      $run: requirement.runId,
-      $key: assertPersistedText(requirement.key, PERSISTENCE_LIMITS.shortTextBytes, "campaign requirement key"),
-      $description: assertPersistedText(requirement.description, PERSISTENCE_LIMITS.documentTextBytes, "campaign requirement description"),
-      $status: requirement.status,
-      $evidence: stringifyPersistedJson(requirement.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign requirement evidence ids"),
-      $created: requirement.createdAt,
-      $updated: requirement.updatedAt
-    });
-    return requirement;
+    const db = this.database();
+    return db.transaction(() => {
+      const existing = db.query("select * from campaign_requirements where run_id = $run and key = $key").get({ $run: input.runId, $key: input.key }) as Row | null;
+      const now = nowIso();
+      const requirement: CampaignRequirement = existing
+        ? { ...campaignRequirementFromRow(existing), ...input, id: String(existing.id), createdAt: String(existing.created_at), updatedAt: now }
+        : { id: id(), ...input, createdAt: now, updatedAt: now };
+      db.query(
+        `insert into campaign_requirements (id, run_id, key, description, status, evidence_ids_json, created_at, updated_at)
+         values ($id, $run, $key, $description, $status, $evidence, $created, $updated)
+         on conflict(run_id, key) do update set description = excluded.description, status = excluded.status, evidence_ids_json = excluded.evidence_ids_json, updated_at = excluded.updated_at`
+      ).run({
+        $id: requirement.id,
+        $run: requirement.runId,
+        $key: assertPersistedText(requirement.key, PERSISTENCE_LIMITS.shortTextBytes, "campaign requirement key"),
+        $description: assertPersistedText(requirement.description, PERSISTENCE_LIMITS.documentTextBytes, "campaign requirement description"),
+        $status: requirement.status,
+        $evidence: stringifyPersistedJson(requirement.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign requirement evidence ids"),
+        $created: requirement.createdAt,
+        $updated: requirement.updatedAt
+      });
+      return campaignRequirementFromRow(db.query("select * from campaign_requirements where run_id = $run and key = $key").get({ $run: input.runId, $key: input.key }) as Row);
+    }).immediate();
   }
 
   listCampaignRequirements(runId: string): CampaignRequirement[] {
@@ -658,31 +664,34 @@ export class SqliteStore {
   }
 
   upsertAsset(input: Omit<CampaignAsset, "id" | "firstSeen" | "lastSeen">): CampaignAsset {
-    const existing = this.database().query("select * from campaign_assets where campaign_id = $campaign and canonical = $canonical")
-      .get({ $campaign: input.campaignId, $canonical: input.canonical }) as Row | null;
-    const now = nowIso();
-    const asset: CampaignAsset = existing
-      ? { ...campaignAssetFromRow(existing), ...input, id: String(existing.id), firstSeen: String(existing.first_seen), lastSeen: now }
-      : { id: id(), ...input, firstSeen: now, lastSeen: now };
-    this.database().query(
-      `insert into campaign_assets (id, campaign_id, canonical, kind, parent_id, technologies_json, metadata_json, confidence, first_seen, last_seen)
-       values ($id, $campaign, $canonical, $kind, $parent, $technologies, $metadata, $confidence, $first, $last)
-       on conflict(campaign_id, canonical) do update set kind = excluded.kind, parent_id = excluded.parent_id,
-         technologies_json = excluded.technologies_json, metadata_json = excluded.metadata_json,
-         confidence = excluded.confidence, last_seen = excluded.last_seen`
-    ).run({
-      $id: asset.id,
-      $campaign: asset.campaignId,
-      $canonical: assertPersistedText(asset.canonical, PERSISTENCE_LIMITS.shortTextBytes, "campaign asset canonical value"),
-      $kind: asset.kind,
-      $parent: asset.parentId ?? null,
-      $technologies: stringifyPersistedJson(asset.technologies, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign asset technologies"),
-      $metadata: stringifyPersistedJson(asset.metadata, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign asset metadata"),
-      $confidence: asset.confidence,
-      $first: asset.firstSeen,
-      $last: asset.lastSeen
-    });
-    return asset;
+    const db = this.database();
+    return db.transaction(() => {
+      const existing = db.query("select * from campaign_assets where campaign_id = $campaign and canonical = $canonical")
+        .get({ $campaign: input.campaignId, $canonical: input.canonical }) as Row | null;
+      const now = nowIso();
+      const asset: CampaignAsset = existing
+        ? { ...campaignAssetFromRow(existing), ...input, id: String(existing.id), firstSeen: String(existing.first_seen), lastSeen: now }
+        : { id: id(), ...input, firstSeen: now, lastSeen: now };
+      db.query(
+        `insert into campaign_assets (id, campaign_id, canonical, kind, parent_id, technologies_json, metadata_json, confidence, first_seen, last_seen)
+         values ($id, $campaign, $canonical, $kind, $parent, $technologies, $metadata, $confidence, $first, $last)
+         on conflict(campaign_id, canonical) do update set kind = excluded.kind, parent_id = excluded.parent_id,
+           technologies_json = excluded.technologies_json, metadata_json = excluded.metadata_json,
+           confidence = excluded.confidence, last_seen = excluded.last_seen`
+      ).run({
+        $id: asset.id,
+        $campaign: asset.campaignId,
+        $canonical: assertPersistedText(asset.canonical, PERSISTENCE_LIMITS.shortTextBytes, "campaign asset canonical value"),
+        $kind: asset.kind,
+        $parent: asset.parentId ?? null,
+        $technologies: stringifyPersistedJson(asset.technologies, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign asset technologies"),
+        $metadata: stringifyPersistedJson(asset.metadata, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign asset metadata"),
+        $confidence: asset.confidence,
+        $first: asset.firstSeen,
+        $last: asset.lastSeen
+      });
+      return campaignAssetFromRow(db.query("select * from campaign_assets where campaign_id = $campaign and canonical = $canonical").get({ $campaign: input.campaignId, $canonical: input.canonical }) as Row);
+    }).immediate();
   }
 
   listAssets(campaignId: string): CampaignAsset[] {
@@ -721,33 +730,36 @@ export class SqliteStore {
   }
 
   upsertHypothesis(input: Omit<CampaignHypothesis, "id" | "createdAt" | "updatedAt">): CampaignHypothesis {
-    const existing = this.database().query("select * from campaign_hypotheses where campaign_id = $campaign and title = $title and ifnull(asset_id, '') = ifnull($asset, '')")
-      .get({ $campaign: input.campaignId, $title: input.title, $asset: input.assetId ?? null }) as Row | null;
-    const now = nowIso();
-    const hypothesis: CampaignHypothesis = existing
-      ? { ...campaignHypothesisFromRow(existing), ...input, id: String(existing.id), createdAt: String(existing.created_at), updatedAt: now }
-      : { id: id(), ...input, createdAt: now, updatedAt: now };
-    this.database().query(
-      `insert into campaign_hypotheses (id, campaign_id, asset_id, title, category, status, rationale, next_test, confidence, evidence_ids_json, created_at, updated_at)
-       values ($id, $campaign, $asset, $title, $category, $status, $rationale, $next_test, $confidence, $evidence, $created, $updated)
-       on conflict(id) do update set asset_id = excluded.asset_id, category = excluded.category, status = excluded.status,
-         rationale = excluded.rationale, next_test = excluded.next_test, confidence = excluded.confidence,
-         evidence_ids_json = excluded.evidence_ids_json, updated_at = excluded.updated_at`
-    ).run({
-      $id: hypothesis.id,
-      $campaign: hypothesis.campaignId,
-      $asset: hypothesis.assetId ?? null,
-      $title: assertPersistedText(hypothesis.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign hypothesis title"),
-      $category: assertPersistedText(hypothesis.category, PERSISTENCE_LIMITS.shortTextBytes, "campaign hypothesis category"),
-      $status: hypothesis.status,
-      $rationale: assertPersistedText(hypothesis.rationale, PERSISTENCE_LIMITS.documentTextBytes, "campaign hypothesis rationale"),
-      $next_test: assertPersistedText(hypothesis.nextTest, PERSISTENCE_LIMITS.documentTextBytes, "campaign hypothesis next test"),
-      $confidence: hypothesis.confidence,
-      $evidence: stringifyPersistedJson(hypothesis.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign hypothesis evidence ids"),
-      $created: hypothesis.createdAt,
-      $updated: hypothesis.updatedAt
-    });
-    return hypothesis;
+    const db = this.database();
+    return db.transaction(() => {
+      const existing = db.query("select * from campaign_hypotheses where campaign_id = $campaign and title = $title and ifnull(asset_id, '') = ifnull($asset, '')")
+        .get({ $campaign: input.campaignId, $title: input.title, $asset: input.assetId ?? null }) as Row | null;
+      const now = nowIso();
+      const hypothesis: CampaignHypothesis = existing
+        ? { ...campaignHypothesisFromRow(existing), ...input, id: String(existing.id), createdAt: String(existing.created_at), updatedAt: now }
+        : { id: id(), ...input, createdAt: now, updatedAt: now };
+      db.query(
+        `insert into campaign_hypotheses (id, campaign_id, asset_id, title, category, status, rationale, next_test, confidence, evidence_ids_json, created_at, updated_at)
+         values ($id, $campaign, $asset, $title, $category, $status, $rationale, $next_test, $confidence, $evidence, $created, $updated)
+         on conflict(id) do update set asset_id = excluded.asset_id, category = excluded.category, status = excluded.status,
+           rationale = excluded.rationale, next_test = excluded.next_test, confidence = excluded.confidence,
+           evidence_ids_json = excluded.evidence_ids_json, updated_at = excluded.updated_at`
+      ).run({
+        $id: hypothesis.id,
+        $campaign: hypothesis.campaignId,
+        $asset: hypothesis.assetId ?? null,
+        $title: assertPersistedText(hypothesis.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign hypothesis title"),
+        $category: assertPersistedText(hypothesis.category, PERSISTENCE_LIMITS.shortTextBytes, "campaign hypothesis category"),
+        $status: hypothesis.status,
+        $rationale: assertPersistedText(hypothesis.rationale, PERSISTENCE_LIMITS.documentTextBytes, "campaign hypothesis rationale"),
+        $next_test: assertPersistedText(hypothesis.nextTest, PERSISTENCE_LIMITS.documentTextBytes, "campaign hypothesis next test"),
+        $confidence: hypothesis.confidence,
+        $evidence: stringifyPersistedJson(hypothesis.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign hypothesis evidence ids"),
+        $created: hypothesis.createdAt,
+        $updated: hypothesis.updatedAt
+      });
+      return campaignHypothesisFromRow(db.query("select * from campaign_hypotheses where campaign_id = $campaign and title = $title and ifnull(asset_id, '') = ifnull($asset, '')").get({ $campaign: input.campaignId, $title: input.title, $asset: input.assetId ?? null }) as Row);
+    }).immediate();
   }
 
   listHypotheses(campaignId: string, status?: CampaignHypothesis["status"]): CampaignHypothesis[] {
@@ -799,19 +811,22 @@ export class SqliteStore {
   }
 
   updateTestAttempt(attemptId: string, patch: Partial<Pick<TestAttempt, "status" | "observed" | "evidenceLevel" | "evidenceIds">>): TestAttempt {
-    const current = this.loadTestAttempt(attemptId);
-    const next: TestAttempt = { ...current, ...patch, updatedAt: nowIso() };
-    this.database().query(
-      `update campaign_test_attempts set observed_json = $observed, status = $status, evidence_level = $level, evidence_ids_json = $evidence, updated_at = $updated where id = $id`
-    ).run({
-      $observed: next.observed === undefined ? null : stringifyPersistedJson(next.observed, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test observation"),
-      $status: next.status,
-      $level: next.evidenceLevel,
-      $evidence: stringifyPersistedJson(next.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test evidence ids"),
-      $updated: next.updatedAt,
-      $id: attemptId
-    });
-    return next;
+    const db = this.database();
+    return db.transaction(() => {
+      const current = this.loadTestAttempt(attemptId);
+      const next: TestAttempt = { ...current, ...patch, updatedAt: nowIso() };
+      db.query(
+        `update campaign_test_attempts set observed_json = $observed, status = $status, evidence_level = $level, evidence_ids_json = $evidence, updated_at = $updated where id = $id`
+      ).run({
+        $observed: next.observed === undefined ? null : stringifyPersistedJson(next.observed, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test observation"),
+        $status: next.status,
+        $level: next.evidenceLevel,
+        $evidence: stringifyPersistedJson(next.evidenceIds, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign test evidence ids"),
+        $updated: next.updatedAt,
+        $id: attemptId
+      });
+      return testAttemptFromRow(db.query("select * from campaign_test_attempts where id = $id").get({ $id: attemptId }) as Row);
+    }).immediate();
   }
 
   searchCampaign(campaignId: string, query: string, limit = 20): CampaignSearchResult[] {
