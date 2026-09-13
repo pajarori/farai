@@ -202,48 +202,8 @@ export class SqliteStore {
   }
 
   upsertSession(session: Session): void {
-    this.database()
-      .query(
-        `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, campaign_run_id, provider, model, email_primary_id, email_secondary_id, summary, summary_updated_at, tool_scope_json, archived_at, created_at, updated_at)
-         values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $campaignRun, $provider, $model, $emailPrimaryId, $emailSecondaryId, $summary, $summaryUpdated, $toolScope, $archived, $created, $updated)
-         on conflict(id) do update set
-           workspace = excluded.workspace,
-           mode = excluded.mode,
-           phase = excluded.phase,
-           title = excluded.title,
-           parent_id = excluded.parent_id,
-           campaign_id = excluded.campaign_id,
-           campaign_run_id = excluded.campaign_run_id,
-           provider = excluded.provider,
-           model = excluded.model,
-           email_primary_id = excluded.email_primary_id,
-           email_secondary_id = excluded.email_secondary_id,
-           summary = excluded.summary,
-           summary_updated_at = excluded.summary_updated_at,
-           tool_scope_json = excluded.tool_scope_json,
-           archived_at = excluded.archived_at,
-           updated_at = excluded.updated_at`
-      )
-      .run({
-        $id: session.id,
-        $workspace: session.workspace,
-        $mode: session.mode,
-        $phase: session.phase,
-        $title: session.title ? assertPersistedText(session.title, PERSISTENCE_LIMITS.shortTextBytes, "session title") : null,
-        $parent: session.parentId ?? null,
-        $campaign: session.campaignId ?? null,
-        $campaignRun: session.campaignRunId ?? null,
-        $provider: session.provider ?? null,
-        $model: session.model ?? null,
-        $emailPrimaryId: session.emailPrimaryId ?? null,
-        $emailSecondaryId: session.emailSecondaryId ?? null,
-        $summary: session.summary ? assertPersistedText(session.summary, PERSISTENCE_LIMITS.summaryBytes, "session summary") : null,
-        $summaryUpdated: session.summaryUpdatedAt ?? null,
-        $toolScope: session.toolScope ? stringifyPersistedJson(session.toolScope.map(canonicalToolName), PERSISTENCE_LIMITS.structuredJsonBytes, "session tool scope") : null,
-        $archived: session.archivedAt ?? null,
-        $created: session.createdAt,
-        $updated: session.updatedAt
-      });
+    const db = this.database();
+    db.transaction(() => writeSessionRow(db, session)).immediate();
     this.emit({ kind: "session", sessionId: session.id, session });
   }
 
@@ -302,25 +262,32 @@ export class SqliteStore {
   }
 
   updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "campaignRunId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">> & { emailPrimaryId?: string | null; emailSecondaryId?: string | null }): Session {
-    const current = this.loadSession(sessionId);
-    const next: Session = {
-      ...current,
-      ...(patch.campaignId !== undefined ? { campaignId: patch.campaignId } : {}),
-      ...(patch.campaignRunId !== undefined ? { campaignRunId: patch.campaignRunId } : {}),
-      ...(patch.title !== undefined ? { title: patch.title } : {}),
-      ...(patch.phase !== undefined ? { phase: patch.phase } : {}),
-      ...(patch.provider !== undefined ? { provider: patch.provider } : {}),
-      ...(patch.model !== undefined ? { model: patch.model } : {}),
-      ...(patch.toolScope !== undefined ? { toolScope: patch.toolScope.map(canonicalToolName) } : {}),
-      ...(patch.workspace !== undefined ? { workspace: patch.workspace } : {}),
-      updatedAt: nowIso()
-    };
-    if (patch.emailPrimaryId === null) delete next.emailPrimaryId;
-    else if (patch.emailPrimaryId !== undefined) next.emailPrimaryId = patch.emailPrimaryId;
-    if (patch.emailSecondaryId === null) delete next.emailSecondaryId;
-    else if (patch.emailSecondaryId !== undefined) next.emailSecondaryId = patch.emailSecondaryId;
-    this.upsertSession(next);
-    return next;
+    const db = this.database();
+    const updated = db.transaction(() => {
+      const row = db.query("select * from sessions where id = $id").get({ $id: sessionId }) as Row | null;
+      if (!row) throw new Error(`Session not found: ${sessionId}`);
+      const current = sessionFromRow(row);
+      const next: Session = {
+        ...current,
+        ...(patch.campaignId !== undefined ? { campaignId: patch.campaignId } : {}),
+        ...(patch.campaignRunId !== undefined ? { campaignRunId: patch.campaignRunId } : {}),
+        ...(patch.title !== undefined ? { title: patch.title } : {}),
+        ...(patch.phase !== undefined ? { phase: patch.phase } : {}),
+        ...(patch.provider !== undefined ? { provider: patch.provider } : {}),
+        ...(patch.model !== undefined ? { model: patch.model } : {}),
+        ...(patch.toolScope !== undefined ? { toolScope: patch.toolScope.map(canonicalToolName) } : {}),
+        ...(patch.workspace !== undefined ? { workspace: patch.workspace } : {}),
+        updatedAt: nowIso()
+      };
+      if (patch.emailPrimaryId === null) delete next.emailPrimaryId;
+      else if (patch.emailPrimaryId !== undefined) next.emailPrimaryId = patch.emailPrimaryId;
+      if (patch.emailSecondaryId === null) delete next.emailSecondaryId;
+      else if (patch.emailSecondaryId !== undefined) next.emailSecondaryId = patch.emailSecondaryId;
+      writeSessionRow(db, next);
+      return sessionFromRow(db.query("select * from sessions where id = $id").get({ $id: sessionId }) as Row);
+    }).immediate();
+    this.emit({ kind: "session", sessionId: updated.id, session: updated });
+    return updated;
   }
 
   createCampaign(input: Omit<Campaign, "id" | "createdAt" | "updatedAt">): Campaign {
@@ -3042,6 +3009,49 @@ function dropColumnIfPresent(db: Database, table: string, column: string): void 
   const rows = db.query(`pragma table_info(${table})`).all() as Array<{ name?: string }>;
   if (!rows.some((row) => row.name === column)) return;
   db.exec(`alter table ${table} drop column ${column}`);
+}
+
+function writeSessionRow(db: Database, session: Session): void {
+  db.query(
+    `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, campaign_run_id, provider, model, email_primary_id, email_secondary_id, summary, summary_updated_at, tool_scope_json, archived_at, created_at, updated_at)
+     values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $campaignRun, $provider, $model, $emailPrimaryId, $emailSecondaryId, $summary, $summaryUpdated, $toolScope, $archived, $created, $updated)
+     on conflict(id) do update set
+       workspace = excluded.workspace,
+       mode = excluded.mode,
+       phase = excluded.phase,
+       title = excluded.title,
+       parent_id = excluded.parent_id,
+       campaign_id = excluded.campaign_id,
+       campaign_run_id = excluded.campaign_run_id,
+       provider = excluded.provider,
+       model = excluded.model,
+       email_primary_id = excluded.email_primary_id,
+       email_secondary_id = excluded.email_secondary_id,
+       summary = excluded.summary,
+       summary_updated_at = excluded.summary_updated_at,
+       tool_scope_json = excluded.tool_scope_json,
+       archived_at = excluded.archived_at,
+       updated_at = excluded.updated_at`
+  ).run({
+    $id: session.id,
+    $workspace: session.workspace,
+    $mode: session.mode,
+    $phase: session.phase,
+    $title: session.title ? assertPersistedText(session.title, PERSISTENCE_LIMITS.shortTextBytes, "session title") : null,
+    $parent: session.parentId ?? null,
+    $campaign: session.campaignId ?? null,
+    $campaignRun: session.campaignRunId ?? null,
+    $provider: session.provider ?? null,
+    $model: session.model ?? null,
+    $emailPrimaryId: session.emailPrimaryId ?? null,
+    $emailSecondaryId: session.emailSecondaryId ?? null,
+    $summary: session.summary ? assertPersistedText(session.summary, PERSISTENCE_LIMITS.summaryBytes, "session summary") : null,
+    $summaryUpdated: session.summaryUpdatedAt ?? null,
+    $toolScope: session.toolScope ? stringifyPersistedJson(session.toolScope.map(canonicalToolName), PERSISTENCE_LIMITS.structuredJsonBytes, "session tool scope") : null,
+    $archived: session.archivedAt ?? null,
+    $created: session.createdAt,
+    $updated: session.updatedAt
+  });
 }
 
 function writeJobRow(db: Database, job: BackgroundJob): void {
