@@ -25,16 +25,22 @@ export function normalizeBenchmarkManifest(value: unknown): BenchmarkManifest {
   const toolScope = stringArray(raw.toolScope ?? raw.tool_scope, "toolScope");
   const oracle = normalizeOracle(raw.oracle);
   const antiCheat = normalizeAntiCheat(raw.antiCheat ?? raw.anti_cheat);
+  const targetCompose = normalizeTargetCompose(challenge.targetCompose ?? challenge.target_compose);
+  const hasPinnedImage = Boolean(optionalString(challenge.targetImage ?? challenge.target_image));
+  if (targetCompose && hasPinnedImage) throw new Error("challenge cannot set both targetCompose and targetImage");
   const temperature = optionalFiniteNumber(model.temperature, "model.temperature", 0);
   const seed = optionalInteger(model.seed, "model.seed", 0);
   const backend = enumValue(isolation.backend, ["host", "docker"] as const, "isolation.backend");
   const network = enumValue(isolation.network, ["host", "none", "target_only"] as const, "isolation.network");
   const internet = enumValue(isolation.internet, ["enabled", "disabled"] as const, "isolation.internet");
   if (backend === "host" && (network !== "host" || internet !== "enabled")) throw new Error("host benchmark backend only supports network=host and internet=enabled");
-  for (const key of ["projectInstructions", "mcp", "knowledge", "skills", "hooks"] as const) {
+  for (const key of ["projectInstructions", "hooks"] as const) {
     const snake = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
     if ((isolation[key] ?? isolation[snake]) !== false) throw new Error(`isolation.${key} must be false`);
   }
+  const mcp = booleanIsolation(isolation.mcp, "isolation.mcp");
+  const knowledge = booleanIsolation(isolation.knowledge, "isolation.knowledge");
+  const skills = booleanIsolation(isolation.skills, "isolation.skills");
   return {
     schemaVersion: 1,
     suite: {
@@ -51,7 +57,8 @@ export function normalizeBenchmarkManifest(value: unknown): BenchmarkManifest {
       ...(optionalString(challenge.source) ? { source: optionalString(challenge.source)! } : {}),
       ...(optionalString(challenge.targetImage ?? challenge.target_image) ? { targetImage: optionalString(challenge.targetImage ?? challenge.target_image)! } : {}),
       ...(optionalString(challenge.targetImageDigest ?? challenge.target_image_digest) ? { targetImageDigest: optionalString(challenge.targetImageDigest ?? challenge.target_image_digest)! } : {}),
-      ...(challenge.targetCommand ?? challenge.target_command ? { targetCommand: stringArray(challenge.targetCommand ?? challenge.target_command, "challenge.targetCommand") } : {})
+      ...(challenge.targetCommand ?? challenge.target_command ? { targetCommand: stringArray(challenge.targetCommand ?? challenge.target_command, "challenge.targetCommand") } : {}),
+      ...(targetCompose ? { targetCompose } : {})
     },
     model: {
       selection: requiredString(model.selection, "model.selection"),
@@ -77,9 +84,9 @@ export function normalizeBenchmarkManifest(value: unknown): BenchmarkManifest {
       network,
       internet,
       projectInstructions: false,
-      mcp: false,
-      knowledge: false,
-      skills: false,
+      mcp,
+      knowledge,
+      skills,
       hooks: false,
       ...(resources ? { resources: normalizeResources(resources) } : {})
     },
@@ -113,6 +120,30 @@ export function normalizeBenchmarkSuiteManifest(value: unknown): BenchmarkSuiteM
     ids.add(run.challenge.id);
   }
   return { schemaVersion: 1, id, version, source, ...(sourceDigest ? { sourceDigest } : {}), repetitions, concurrency, runs };
+}
+
+export function booleanIsolation(value: unknown, name: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
+  return value;
+}
+
+export function normalizeComposeSpec(raw: Record<string, unknown>, prefix: string): { composeFile: string; service: string; buildArgs?: Record<string, string> } {
+  const composeFile = requiredString(raw.composeFile ?? raw.compose_file, `${prefix}.composeFile`);
+  const service = requiredString(raw.service, `${prefix}.service`);
+  const buildArgsRaw = raw.buildArgs ?? raw.build_args;
+  let buildArgs: Record<string, string> | undefined;
+  if (buildArgsRaw !== undefined) {
+    const entries = object(buildArgsRaw, `${prefix}.buildArgs`);
+    if (Object.values(entries).some((item) => typeof item !== "string")) throw new Error(`${prefix}.buildArgs values must be strings`);
+    buildArgs = entries as Record<string, string>;
+  }
+  return { composeFile, service, ...(buildArgs ? { buildArgs } : {}) };
+}
+
+function normalizeTargetCompose(value: unknown): NonNullable<BenchmarkManifest["challenge"]>["targetCompose"] {
+  if (value === undefined) return undefined;
+  return normalizeComposeSpec(object(value, "challenge.targetCompose"), "challenge.targetCompose");
 }
 
 function normalizeFiles(value: unknown): BenchmarkManifest["files"] {

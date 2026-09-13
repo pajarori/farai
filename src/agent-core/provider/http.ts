@@ -10,7 +10,6 @@ import {
   type ProviderResponseLimits
 } from "./stream-bounds";
 
-export const PLANNER_REQUEST_TIMEOUT_MS = 180_000;
 const PROVIDER_DEBUG_LOG_MAX_BYTES = 8 * 1024 * 1024;
 const PROVIDER_DEBUG_LOG_BACKUPS = 3;
 const PROVIDER_DEBUG_ENTRY_MAX_BYTES = 256 * 1024;
@@ -19,11 +18,6 @@ const PROVIDER_DEBUG_MAX_DEPTH = 12;
 const PROVIDER_DEBUG_MAX_NODES = 4_000;
 const PROVIDER_DEBUG_MAX_ITEMS = 200;
 
-export function planRequestSignal(caller?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(PLANNER_REQUEST_TIMEOUT_MS);
-  if (!caller) return timeout;
-  return AbortSignal.any([caller, timeout]);
-}
 
 export function parseRetryAfterMs(headers: Headers): number | undefined {
   const ms = headers.get("retry-after-ms");

@@ -1,6 +1,6 @@
 import { resolveRequestMaxOutputTokens } from "../model-registry";
 import { estimateChatRequestInputTokens, type ChatProvider, type ChatRequest, type ProviderMessage, type ProviderStreamEvent, type ProviderToolDef } from "./protocol";
-import { createProviderDebugCapture, iterateSseData, logDebugEntry, parseRetryAfterMs, planRequestSignal, providerHttpError, readResponseTextPreview } from "./http";
+import { createProviderDebugCapture, iterateSseData, logDebugEntry, parseRetryAfterMs, providerHttpError, readResponseTextPreview } from "./http";
 import { BoundedTextAccumulator, PROVIDER_ERROR_BODY_MAX_BYTES, providerResponseLimits, type ProviderResponseLimits } from "./stream-bounds";
 import { canonicalToolName } from "../../tool-names";
 import type { ModelPricingSnapshot } from "../../types";
@@ -77,8 +77,9 @@ export class AnthropicMessagesProvider implements ChatProvider {
         ...(this.options.apiKey ? { "x-api-key": this.options.apiKey } : {})
       },
       body: requestJson,
-      signal: planRequestSignal(request.signal)
-    });
+      signal: request.signal ?? null,
+      timeout: false
+    } as RequestInit);
     if (!response.ok) {
       const responseText = await readResponseTextPreview(response, PROVIDER_ERROR_BODY_MAX_BYTES);
       logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText });

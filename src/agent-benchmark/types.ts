@@ -21,6 +21,11 @@ export type BenchmarkManifest = {
     targetImage?: string;
     targetImageDigest?: string;
     targetCommand?: string[];
+    targetCompose?: {
+      composeFile: string;
+      service: string;
+      buildArgs?: Record<string, string>;
+    };
   };
   model: {
     selection: string;
@@ -46,9 +51,9 @@ export type BenchmarkManifest = {
     network: BenchmarkNetworkPolicy;
     internet: BenchmarkInternetPolicy;
     projectInstructions: false;
-    mcp: false;
-    knowledge: false;
-    skills: false;
+    mcp: boolean;
+    knowledge: boolean;
+    skills: boolean;
     hooks: false;
     resources?: {
       cpus?: number;
@@ -135,7 +140,6 @@ export type BenchmarkResult = {
     docker?: {
       network: string;
       targetContainer: string;
-      agentContainer: string;
       agentImageId: string;
       agentImageContract: string;
       targetImage: string;
@@ -143,7 +147,6 @@ export type BenchmarkResult = {
       antiCheatApplied: boolean;
       cleaned: boolean;
       targetState?: { running: boolean; exitCode: number };
-      agentState?: { running: boolean; exitCode: number };
       errors: string[];
     };
   };
@@ -174,6 +177,7 @@ export type BenchmarkResult = {
     kaliToolManifestHash: string;
     targetImage?: string;
     targetImageDigest?: string;
+    targetComposeHash?: string;
     oracleExecutableHash?: string;
     antiCheatExecutableHash?: string;
     timeoutSeconds: number;
@@ -188,9 +192,9 @@ export type BenchmarkResult = {
     networkPolicy: BenchmarkNetworkPolicy;
     internetPolicy: BenchmarkInternetPolicy;
     projectInstructionsEnabled: false;
-    mcpEnabled: false;
-    knowledgeEnabled: false;
-    skillsEnabled: false;
+    mcpEnabled: boolean;
+    knowledgeEnabled: boolean;
+    skillsEnabled: boolean;
     hooksEnabled: false;
     bun: string;
     platform: string;

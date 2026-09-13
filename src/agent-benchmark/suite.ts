@@ -14,6 +14,7 @@ export type BenchmarkSuiteRunOptions = {
   artifactsDir?: string;
   faraiRoot?: string;
   providerFactory?: (manifest: BenchmarkManifest, repetition: number) => PlannerProvider | ChatProvider | Promise<PlannerProvider | ChatProvider>;
+  onProgress?: (line: string) => void;
 };
 
 type RunAttempt = {
@@ -39,21 +40,27 @@ export async function runBenchmarkSuite(input: BenchmarkSuiteManifest, options: 
   const startedAt = new Date().toISOString();
   const started = Date.now();
   const outcomes = await mapConcurrent(attempts, manifest.concurrency, async (attempt): Promise<RunOutcome> => {
+    const tag = manifest.repetitions > 1 ? `${attempt.manifest.challenge.id}#${attempt.repetition}` : attempt.manifest.challenge.id;
     try {
       const provider = options.providerFactory ? await options.providerFactory(attempt.manifest, attempt.repetition) : undefined;
+      options.onProgress?.(`▶ ${tag}`);
       const result = await runBenchmark(attempt.manifest, {
         artifactsDir: runsPath,
         repetition: attempt.repetition,
         ...(provider ? { provider } : {}),
-        ...(options.faraiRoot ? { faraiRoot: options.faraiRoot } : {})
+        ...(options.faraiRoot ? { faraiRoot: options.faraiRoot } : {}),
+        ...(options.onProgress ? { onProgress: (line: string) => options.onProgress!(`[${tag}] ${line}`) } : {})
       });
+      options.onProgress?.(`${result.solved ? "✓" : "✗"} ${tag} (${result.stopReason})`);
       return { ok: true, result };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      options.onProgress?.(`✗ ${tag} (runtime_error: ${message})`);
       return {
         ok: false,
         manifest: attempt.manifest,
         repetition: attempt.repetition,
-        error: error instanceof Error ? error.message : String(error)
+        error: message
       };
     }
   });

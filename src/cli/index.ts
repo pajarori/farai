@@ -320,11 +320,20 @@ async function benchmark(args: string[]): Promise<void> {
     console.log(JSON.stringify({ output: parsed.output, challenges: suite.runs.length, repetitions: suite.repetitions, runs: suite.runs.length * suite.repetitions }, null, 2));
     return;
   }
+  if (parsed.kind === "generate") {
+    const { loadCsiCampaignConfig } = await import("../agent-benchmark/csi-suite");
+    const { generateBenchmarkSuite, writeBenchmarkSuite } = await import("../agent-benchmark/bench-suite");
+    const suite = await generateBenchmarkSuite(await loadCsiCampaignConfig(parsed.configPath), parsed.materialRoot);
+    writeBenchmarkSuite(suite, parsed.output);
+    console.log(JSON.stringify({ output: parsed.output, suite: suite.id, challenges: suite.runs.length, repetitions: suite.repetitions, runs: suite.runs.length * suite.repetitions }, null, 2));
+    return;
+  }
   if (parsed.kind === "run") {
     const { loadBenchmarkManifest, runBenchmark, writeBenchmarkResult } = await import("../agent-benchmark/runner");
     const result = await runBenchmark(await loadBenchmarkManifest(parsed.manifestPath), {
       ...(parsed.workspace ? { workspace: parsed.workspace } : {}),
-      ...(parsed.artifactsDir ? { artifactsDir: parsed.artifactsDir } : {})
+      ...(parsed.artifactsDir ? { artifactsDir: parsed.artifactsDir } : {}),
+      ...(parsed.stream ? { onProgress: (line: string) => process.stderr.write(`${line}\n`) } : {})
     });
     if (parsed.output) writeBenchmarkResult(result, parsed.output);
     console.log(JSON.stringify(result, null, 2));
@@ -333,7 +342,10 @@ async function benchmark(args: string[]): Promise<void> {
   }
   if (parsed.kind === "suite") {
     const { loadBenchmarkSuiteManifest, runBenchmarkSuite } = await import("../agent-benchmark/suite");
-    const result = await runBenchmarkSuite(await loadBenchmarkSuiteManifest(parsed.manifestPath), { ...(parsed.artifactsDir ? { artifactsDir: parsed.artifactsDir } : {}) });
+    const result = await runBenchmarkSuite(await loadBenchmarkSuiteManifest(parsed.manifestPath), {
+      ...(parsed.artifactsDir ? { artifactsDir: parsed.artifactsDir } : {}),
+      ...(parsed.stream ? { onProgress: (line: string) => process.stderr.write(`${line}\n`) } : {})
+    });
     console.log(JSON.stringify(result, null, 2));
     if (result.solvedChallenges === 0) process.exitCode = 2;
     return;
@@ -404,8 +416,9 @@ Options for model add:
     bench: `Farai bench
 
 Usage:
-  farai bench run <manifest.json> [--output result.json] [--workspace scratch-dir] [--artifacts dir]
-  farai bench suite <suite.json> [--artifacts dir]
+  farai bench run <manifest.json> [--output result.json] [--workspace scratch-dir] [--artifacts dir] [--stream]
+  farai bench suite <suite.json> [--artifacts dir] [--stream]
+  farai bench generate <campaign.json> --materials <dir with catalog.json> --output <suite.json>
   farai bench csi generate <campaign.json> --materials <dir> --output <suite.json>`,
     config: `Farai config
 
@@ -431,8 +444,8 @@ Usage:
   farai doctor
   farai model
   farai model add <provider[/model]> --base-url <url> [--api-key-env ENV] [--set-default] [--project]
-  farai bench run <manifest.json> [--output result.json] [--workspace scratch-dir] [--artifacts dir]
-  farai bench suite <suite.json> [--artifacts dir]
+  farai bench run <manifest.json> [--output result.json] [--workspace scratch-dir] [--artifacts dir] [--stream]
+  farai bench suite <suite.json> [--artifacts dir] [--stream]
   farai config
   farai update [status|check|apply|rollback]
 

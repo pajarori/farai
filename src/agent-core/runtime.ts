@@ -1305,7 +1305,7 @@ export class AgentRuntime {
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not start Kali container");
   }
 
-  async refreshMcp(session: Session, options: { force?: boolean } = {}): Promise<void> {
+  async refreshMcp(session: Session, options: { force?: boolean; background?: boolean } = {}): Promise<void> {
     if (!this.mcpEnabled) return;
     const rootSessionId = this.rootSessionId(session);
     await refreshMcpTools({
@@ -1316,7 +1316,7 @@ export class AgentRuntime {
       rootWorkspace: this.workspace,
       ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
       ...this.mcpCallbacks(session),
-      background: true,
+      background: options.background ?? true,
       includeResources: false,
       ...(options.force ? { force: true } : {}),
       onStartupEvent: (event) => this.event(session.id, event.type, event)
@@ -3798,7 +3798,7 @@ export class AgentRuntime {
         rootSessionId,
         rootWorkspace: this.workspace,
         ...(this.containerLifecycle ? { containerLifecycle: this.containerLifecycle } : {}),
-        ...this.mcpCallbacks(session),
+          ...this.mcpCallbacks(session),
         background: true,
         force: true,
         includeResources: false,

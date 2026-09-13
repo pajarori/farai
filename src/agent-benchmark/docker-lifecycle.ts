@@ -4,18 +4,19 @@ import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, KaliContainerBackend, type Con
 import { faraiDockerEnvironment } from "../agent-container/docker-environment";
 import { runCapturedProcess } from "../agent-tools/backends/captured-process";
 import { INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
-import type { ToolExecutionBackend } from "../agent-tools/shared/backend";
 import { hashPath } from "./hash";
 import type { BenchmarkManifest } from "./types";
 
 export type BenchmarkProcessRunner = (command: string, args: string[], options?: { env?: Record<string, string> }) => Promise<ContainerExecResult>;
 
+export type BenchmarkDockerTargetStep = { args: string[]; env?: Record<string, string> };
+
 export type BenchmarkDockerPlan = {
-  names: { network: string; target: string; agent: string };
+  names: { network: string; target: string };
   targetImage: string;
   networkCreate: string[];
-  targetStart: string[];
-  agentStart: string[];
+  targetStart: BenchmarkDockerTargetStep;
+  composeConnect?: { network: string; project: string; composeFile: string; service: string };
   antiCheat?: { command: string; args: string[]; env: Record<string, string> };
   cleanup: string[][];
 };
@@ -23,7 +24,6 @@ export type BenchmarkDockerPlan = {
 export type BenchmarkDockerState = {
   network: string;
   targetContainer: string;
-  agentContainer: string;
   agentImageId: string;
   agentImageContract: string;
   targetImage: string;
@@ -31,16 +31,19 @@ export type BenchmarkDockerState = {
   antiCheatApplied: boolean;
   cleaned: boolean;
   targetState?: { running: boolean; exitCode: number };
-  agentState?: { running: boolean; exitCode: number };
   errors: string[];
 };
 
 const BENCHMARK_DOCKER_COMMAND_TIMEOUT_MS = 300_000;
+const BENCHMARK_TARGET_READY_TIMEOUT_MS = 120_000;
+const BENCHMARK_TARGET_SETTLE_MS = 1_500;
+const BENCHMARK_NETWORK_RM_ATTEMPTS = 8;
+const BENCHMARK_NETWORK_RM_BACKOFF_MS = 750;
 
 export class BenchmarkDockerLifecycle {
   private planValue: BenchmarkDockerPlan | undefined;
   private stateValue: BenchmarkDockerState | undefined;
-  private startPromise: Promise<{ backend: ToolExecutionBackend; state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> | undefined;
+  private startPromise: Promise<{ state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> | undefined;
   private stopPromise: Promise<BenchmarkDockerState | undefined> | undefined;
 
   constructor(
@@ -50,21 +53,12 @@ export class BenchmarkDockerLifecycle {
     private readonly runner: BenchmarkProcessRunner = runProcess
   ) {}
 
-  async start(): Promise<{ backend: ToolExecutionBackend; state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> {
+  async start(): Promise<{ state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> {
     if (this.startPromise) return this.startPromise;
     const waitedForStop = Boolean(this.stopPromise);
     if (this.stopPromise) await this.stopPromise;
     if (!waitedForStop && this.stateValue?.started && !this.stateValue.cleaned && this.planValue) {
-      return {
-        backend: new KaliContainerBackend({
-          workspace: this.workspace,
-          image: DEFAULT_KALI_IMAGE,
-          containerName: this.planValue.names.agent,
-          processRunner: (command, args) => this.runner(command, args)
-        }),
-        state: this.stateValue,
-        plan: this.planValue
-      };
+      return { state: this.stateValue, plan: this.planValue };
     }
     if (this.stateValue && !this.stateValue.cleaned) {
       const previous = await this.stopUnlocked();
@@ -78,7 +72,7 @@ export class BenchmarkDockerLifecycle {
     }
   }
 
-  private async startUnlocked(): Promise<{ backend: ToolExecutionBackend; state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> {
+  private async startUnlocked(): Promise<{ state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> {
     const processRunner: ProcessRunner = (command, args) => this.runner(command, args);
     const provisioner = new KaliContainerBackend({
       workspace: this.workspace,
@@ -94,16 +88,15 @@ export class BenchmarkDockerLifecycle {
     if (!/^sha256:[a-f0-9]{64}$/i.test(agentImageId)) throw new Error(`docker returned an unpinned agent image id: ${agentImageId || "empty"}`);
     const agentImageContract = image.contract?.trim() ?? "";
     if (agentImageContract !== KALI_IMAGE_CONTRACT) throw new Error(`benchmark agent image does not satisfy the current capability contract: ${agentImageContract || "missing"}`);
-    const targetImage = await resolveTargetImage(this.manifest, this.runner);
+    const targetImage = this.manifest.challenge.targetCompose ? undefined : await resolveTargetImage(this.manifest, this.runner);
     const plan = buildBenchmarkDockerPlan(this.manifest, this.workspace, this.runId, agentImageId, targetImage);
     this.planValue = plan;
     const state: BenchmarkDockerState = {
       network: plan.names.network,
       targetContainer: plan.names.target,
-      agentContainer: plan.names.agent,
       agentImageId,
       agentImageContract,
-      targetImage,
+      targetImage: plan.targetImage,
       started: false,
       antiCheatApplied: false,
       cleaned: false,
@@ -112,28 +105,35 @@ export class BenchmarkDockerLifecycle {
     this.stateValue = state;
     try {
       await this.requiredDocker(plan.networkCreate, "create benchmark network");
-      await this.requiredDocker(plan.targetStart, "start benchmark target");
+      await this.requiredDocker(plan.targetStart.args, "start benchmark target", plan.targetStart.env);
+      if (plan.composeConnect) {
+        const resolved = await this.runner("docker", ["compose", "-p", plan.composeConnect.project, "-f", plan.composeConnect.composeFile, "ps", "-q", plan.composeConnect.service]);
+        const containerId = resolved.stdout.trim().split(/\s+/).filter(Boolean)[0];
+        if (resolved.exitCode !== 0 || !containerId) throw new Error(resolved.stderr || `failed to resolve compose target service: ${plan.composeConnect.service}`);
+        state.targetContainer = containerId;
+        await this.requiredDocker(["network", "connect", "--alias", "target", plan.composeConnect.network, containerId], "connect compose target to benchmark network");
+      }
+      await this.waitForTargetReady(state.targetContainer);
       if (plan.antiCheat) {
-        const result = await this.runner(plan.antiCheat.command, plan.antiCheat.args, { env: plan.antiCheat.env });
+        const result = await this.runner(plan.antiCheat.command, plan.antiCheat.args, { env: { ...plan.antiCheat.env, FARAI_TARGET_CONTAINER: state.targetContainer } });
         if (result.exitCode !== 0) throw new Error(result.stderr || "anti-cheat hook failed");
         state.antiCheatApplied = true;
       }
-      await this.requiredDocker(plan.agentStart, "start benchmark agent");
       state.started = true;
-      return {
-        backend: new KaliContainerBackend({
-          workspace: this.workspace,
-          image: DEFAULT_KALI_IMAGE,
-          containerName: plan.names.agent,
-          processRunner
-        }),
-        state,
-        plan
-      };
+      return { state, plan };
     } catch (error) {
       state.errors.push(error instanceof Error ? error.message : String(error));
       await this.stopUnlocked();
       throw error;
+    }
+  }
+
+  async connectAgent(containerName: string): Promise<void> {
+    const network = this.planValue?.names.network;
+    if (!network) return;
+    const result = await this.runner("docker", ["network", "connect", network, containerName]);
+    if (result.exitCode !== 0 && !/already exists|already in network|endpoint with name/i.test(result.stderr)) {
+      throw new Error(result.stderr || `failed to connect agent to benchmark network ${network}`);
     }
   }
 
@@ -152,31 +152,60 @@ export class BenchmarkDockerLifecycle {
     const state = this.stateValue;
     const plan = this.planValue;
     if (!state || !plan || state.cleaned) return state;
-    const [agentState, targetState] = await Promise.all([
-      this.inspectState(plan.names.agent),
-      this.inspectState(plan.names.target)
-    ]);
-    if (agentState) state.agentState = agentState;
+    const targetState = await this.inspectState(state.targetContainer);
     if (targetState) state.targetState = targetState;
     let cleaned = true;
     for (const args of plan.cleanup) {
-      try {
-        const result = await this.runner("docker", args);
-        if (result.exitCode !== 0 && !resourceDoesNotExist(result)) {
-          cleaned = false;
-          if (result.stderr.trim()) state.errors.push(result.stderr.trim().slice(0, 500));
+      const isNetworkRm = args[0] === "network" && args[1] === "rm";
+      const attempts = isNetworkRm ? BENCHMARK_NETWORK_RM_ATTEMPTS : 1;
+      let ok = false;
+      let lastError = "";
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+          const result = await this.runner("docker", args);
+          if (result.exitCode === 0 || resourceDoesNotExist(result)) {
+            ok = true;
+            break;
+          }
+          lastError = result.stderr.trim();
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
         }
-      } catch (error) {
+        if (attempt < attempts) await sleep(BENCHMARK_NETWORK_RM_BACKOFF_MS);
+      }
+      if (!ok) {
         cleaned = false;
-        state.errors.push(error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500));
+        if (lastError) state.errors.push(lastError.slice(0, 500));
       }
     }
     state.cleaned = cleaned;
     return state;
   }
 
-  private async requiredDocker(args: string[], operation: string): Promise<void> {
-    const result = await this.runner("docker", args);
+  private async waitForTargetReady(container: string): Promise<void> {
+    const deadline = Date.now() + BENCHMARK_TARGET_READY_TIMEOUT_MS;
+    for (;;) {
+      const result = await this.runner("docker", ["inspect", "--format", "{{json .State}}", container]);
+      if (result.exitCode === 0) {
+        try {
+          const parsed = JSON.parse(result.stdout) as { Running?: boolean; Health?: { Status?: string } };
+          const health = parsed.Health?.Status;
+          if (health === "healthy") return;
+          if (!health && parsed.Running) {
+            await sleep(BENCHMARK_TARGET_SETTLE_MS);
+            return;
+          }
+        } catch {
+          return;
+        }
+      }
+      if (Date.now() >= deadline) return;
+      await sleep(500);
+    }
+  }
+
+  private async requiredDocker(args: string[], operation: string, env?: Record<string, string>): Promise<void> {
+    const result = await this.runner("docker", args, env ? { env } : undefined);
     if (result.exitCode !== 0) throw new Error(result.stderr || `failed to ${operation}`);
   }
 
@@ -198,16 +227,18 @@ export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace:
   if (manifest.isolation.network !== "target_only" || manifest.isolation.internet !== "disabled") {
     throw new Error("docker benchmark isolation requires network=target_only and internet=disabled");
   }
-  if (!manifest.challenge.targetImage || !manifest.challenge.targetImageDigest) throw new Error("docker benchmark requires a pinned target image");
+  const compose = manifest.challenge.targetCompose;
+  if (!compose && (!manifest.challenge.targetImage || !manifest.challenge.targetImageDigest)) throw new Error("docker benchmark requires a pinned target image or a targetCompose definition");
+  if (compose && !existsSync(compose.composeFile)) throw new Error(`target compose file is missing: ${compose.composeFile}`);
   if (!manifest.antiCheat) throw new Error("docker benchmark requires an external anti-cheat hook");
   if (!existsSync(manifest.antiCheat.executable)) throw new Error("anti-cheat executable is missing");
   if (hashPath(manifest.antiCheat.executable) !== manifest.antiCheat.executableSha256) throw new Error("anti-cheat executable hash mismatch");
   if (!/^sha256:[a-f0-9]{64}$/i.test(agentImageId)) throw new Error("benchmark agent image must be pinned by image id");
   const suffix = safeName(runId).slice(-40);
+  const composeProject = `farai-bench-${suffix}`;
   const names = {
     network: `farai-bench-${suffix}`,
-    target: `farai-bench-target-${suffix}`,
-    agent: `farai-bench-agent-${suffix}`
+    target: compose ? `${composeProject}-${compose.service}` : `farai-bench-target-${suffix}`
   };
   const resources = manifest.isolation.resources;
   if (resources?.diskMb) throw new Error("docker benchmark diskMb is not enforceable for a bind-mounted scratch workspace");
@@ -216,56 +247,42 @@ export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace:
     ...(resources?.cpus ? ["--cpus", String(resources.cpus)] : []),
     ...(resources?.memoryMb ? ["--memory", `${resources.memoryMb}m`] : [])
   ];
-  const targetImage = targetImageOverride ?? pinnedImage(manifest.challenge.targetImage, manifest.challenge.targetImageDigest);
-  const targetStart = [
-    "run", "-d", "--name", names.target,
-    "--network", names.network,
-    "--network-alias", "target",
-    "--cap-drop", "ALL",
-    "--cap-add", "NET_BIND_SERVICE",
-    ...common,
-    ...resourceArgs,
-    targetImage,
-    ...(manifest.challenge.targetCommand ?? [])
-  ];
-  const resolvedWorkspace = resolve(workspace);
-  const agentStart = [
-    "run", "-d", "--name", names.agent,
-    "--network", names.network,
-    "--workdir", "/workspace",
-    "--volume", `${resolvedWorkspace}:/workspace:rw`,
-    "--volume", "/workspace/.farai",
-    "--read-only",
-    "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
-    "--tmpfs", "/root:rw,nosuid,nodev,size=256m",
-    "--tmpfs", "/run:rw,nosuid,nodev,size=64m",
-    "--cap-drop", "ALL",
-    "--cap-add", "NET_ADMIN",
-    "--cap-add", "NET_RAW",
-    ...common,
-    ...resourceArgs,
-    agentImageId,
-    "sleep", "infinity"
-  ];
+  const targetImage = compose ? `compose:${compose.service}` : (targetImageOverride ?? pinnedImage(manifest.challenge.targetImage!, manifest.challenge.targetImageDigest!));
+  const composeEnv = compose?.buildArgs && Object.keys(compose.buildArgs).length ? compose.buildArgs : undefined;
+  const targetStart: BenchmarkDockerTargetStep = compose
+    ? { args: ["compose", "-p", composeProject, "-f", compose.composeFile, "up", "-d", "--build"], ...(composeEnv ? { env: composeEnv } : {}) }
+    : {
+        args: [
+          "run", "-d", "--name", names.target,
+          "--network", names.network,
+          "--network-alias", "target",
+          "--cap-drop", "ALL",
+          "--cap-add", "NET_BIND_SERVICE",
+          ...common,
+          ...resourceArgs,
+          targetImage,
+          ...(manifest.challenge.targetCommand ?? [])
+        ]
+      };
+  const targetCleanup: string[][] = compose
+    ? [["compose", "-p", composeProject, "-f", compose.composeFile, "down", "-v", "--remove-orphans"]]
+    : [["rm", "-f", "-v", names.target]];
   return {
     names,
     targetImage,
     networkCreate: ["network", "create", "--internal", "--label", "org.farai.benchmark=true", names.network],
     targetStart,
-    agentStart,
+    ...(compose ? { composeConnect: { network: names.network, project: composeProject, composeFile: compose.composeFile, service: compose.service } } : {}),
     antiCheat: {
       command: manifest.antiCheat.executable,
       args: manifest.antiCheat.args ?? [],
       env: {
-        FARAI_TARGET_CONTAINER: names.target,
-        FARAI_AGENT_CONTAINER: names.agent,
         FARAI_BENCHMARK_NETWORK: names.network,
         FARAI_CHALLENGE_ID: manifest.challenge.id
       }
     },
     cleanup: [
-      ["rm", "-f", "-v", names.agent],
-      ["rm", "-f", "-v", names.target],
+      ...targetCleanup,
       ["network", "rm", names.network]
     ]
   };
@@ -326,6 +343,10 @@ function pinnedImage(image: string, digest: string): string {
   if (!/^sha256:[a-f0-9]{64}$/i.test(normalizedDigest)) throw new Error("target image digest must be sha256");
   const base = image.split("@")[0]!;
   return `${base}@${normalizedDigest}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function safeName(value: string): string {

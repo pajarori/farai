@@ -1,7 +1,7 @@
 import { resolveRequestMaxOutputTokens } from "../model-registry";
 import { estimateChatRequestInputTokens, type ChatProvider, type ChatRequest, type ProviderMessage, type ProviderStreamEvent, type ProviderToolDef } from "./protocol";
 import { assertCanonicalToolName, canonicalToolName } from "../../tool-names";
-import { createProviderDebugCapture, iterateSseData, logDebugEntry, parseRetryAfterMs, planRequestSignal, providerHttpError, readResponseTextBounded, readResponseTextPreview } from "./http";
+import { createProviderDebugCapture, iterateSseData, logDebugEntry, parseRetryAfterMs, providerHttpError, readResponseTextBounded, readResponseTextPreview } from "./http";
 import { BoundedTextAccumulator, PROVIDER_ERROR_BODY_MAX_BYTES, providerResponseLimits, type ProviderResponseLimits } from "./stream-bounds";
 import type { ModelPricingSnapshot } from "../../types";
 import { materializeToolAttachment } from "../../tool-attachment";
@@ -75,8 +75,9 @@ export class OpenAiChatProvider implements ChatProvider {
         ...(this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {})
       },
       body: requestJson,
-      signal: planRequestSignal(request.signal)
-    });
+      signal: request.signal ?? null,
+      timeout: false
+    } as RequestInit);
     if (!response.ok) {
       const responseText = await readResponseTextPreview(response, PROVIDER_ERROR_BODY_MAX_BYTES);
       logDebugEntry({ baseUrl: this.options.baseUrl, model: this.options.model, requestBody, responseStatus: response.status, responseText });

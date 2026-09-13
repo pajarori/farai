@@ -382,7 +382,7 @@ export class McpServerManager {
       ...(previous ?? {}),
       ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
       ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
-      ...(input.containerLifecycle ? { containerLifecycle: input.containerLifecycle } : {})
+      ...(input.containerLifecycle ? { containerLifecycle: input.containerLifecycle } : {}),
     };
     if (Object.keys(binding).length) this.containerBindings.set(scope, binding);
     return { ...input, ...binding };

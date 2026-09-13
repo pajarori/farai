@@ -1,4 +1,4 @@
-export const MODEL_RETRY_MAX_ATTEMPTS = 5;
+export const MODEL_RETRY_MAX_ATTEMPTS = 3;
 
 const MAX_RETRY_AFTER_MS = 30_000;
 const MAX_BACKOFF_MS = 8_000;
@@ -13,7 +13,9 @@ const NETWORK_CODES = new Set([
   "ENETDOWN",
   "ENETUNREACH",
   "ENOTFOUND",
+  "EHOSTUNREACH",
   "EPIPE",
+  "ERR_STREAM_PREMATURE_CLOSE",
   "ESOCKETTIMEDOUT",
   "ETIMEDOUT",
   "UND_ERR_BODY_TIMEOUT",
@@ -28,8 +30,9 @@ const RETRYABLE_MESSAGE_PATTERNS = [
   /fetch failed|failed to fetch|network[-_\s]?error|upstream connect/i,
   /connection (?:error|refused|lost|reset|terminated|closed)|socket (?:connection was closed|hang up)|reset before headers/i,
   /getaddrinfo|dns lookup|enotfound|eai_again|econnrefused|econnreset|etimedout/i,
-  /(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)|^timeout$/i,
+  /(?:request|response|connection|network|stream|read|operation|idle) (?:timeout|timed out|time out)|^timeout$/i,
   /stream (?:disconnected|ended unexpectedly)|premature close|terminated/i,
+  /returned an empty (?:event stream body|body)|empty (?:response|stream)|malformed sse json|returned invalid json|unexpected end of json/i,
   /try (?:your request )?again|temporarily at capacity/i
 ];
 const CONTEXT_OVERFLOW_PATTERNS = [
@@ -63,7 +66,10 @@ export function classifyModelRetry(error: unknown): ModelRetryDecision {
   if (code && NETWORK_CODES.has(code.toUpperCase())) {
     return { retryable: true, reason: code.toUpperCase().includes("TIMEOUT") ? "timeout" : "network", ...(status !== undefined ? { status } : {}) };
   }
-  if (/(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)|^timeout$/i.test(text)) {
+  if (firstString(chain, ["name"]) === "TimeoutError") {
+    return { retryable: true, reason: "timeout", ...(status !== undefined ? { status } : {}) };
+  }
+  if (/(?:request|response|connection|network|stream|read|operation|idle) (?:timeout|timed out|time out)|^timeout$/i.test(text)) {
     return { retryable: true, reason: "timeout", ...(status !== undefined ? { status } : {}) };
   }
   if (RETRYABLE_MESSAGE_PATTERNS.some((pattern) => pattern.test(text))) {

@@ -1,12 +1,13 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, rmdirSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, rmdirSync } from "node:fs";
 import { arch, platform, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AgentRuntime } from "../agent-core/runtime";
+import { ensurePrivateDirectory } from "../agent-core/private-path";
 import { buildSystemPrompt } from "../agent-core/provider/system-prompt";
 import { buildToolsPayload, createChatProviderForSession, type PlannerProvider } from "../agent-core/provider";
 import type { ChatProvider } from "../agent-core/provider/protocol";
-import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT } from "../agent-container/kali";
+import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, containerNameForSession } from "../agent-container/kali";
 import { KALI_TOOL_MANIFEST_PATH } from "../agent-container/kali-tool-manifest";
 import { HostProcessBackend } from "../agent-tools/backends/host-process";
 import { runCapturedProcess } from "../agent-tools/backends/captured-process";
@@ -31,6 +32,7 @@ export type BenchmarkRunOptions = {
   stopContainersOnTimeout?: boolean;
   repetition?: number;
   dockerProcessRunner?: BenchmarkProcessRunner;
+  onProgress?: (line: string) => void;
 };
 
 type PromptState = "pending" | "completed" | "failed";
@@ -57,19 +59,20 @@ export async function runBenchmark(input: BenchmarkManifest, options: BenchmarkR
   let runtime: AgentRuntime | undefined;
   let shutdown = false;
   try {
+    if (dockerLifecycle) ensurePrivateDirectory(join(workspace, ".farai"), "benchmark state root");
     const docker = dockerLifecycle ? await dockerLifecycle.start() : undefined;
     dockerState = docker?.state;
-    const executionBackend = docker?.backend ?? (manifest.isolation.backend === "host" ? new BenchmarkHostBackend(workspace) : undefined);
+    const executionBackend = manifest.isolation.backend === "host" ? new BenchmarkHostBackend(workspace) : undefined;
     runtime = new AgentRuntime(workspace, provider, {
       maxSteps: manifest.limits.maxSteps,
       maxTurnSeconds: manifest.limits.timeoutSeconds,
       ...(manifest.limits.maxCostUsd !== undefined ? { maxCostUsd: manifest.limits.maxCostUsd } : {}),
       ...(manifest.limits.maxConcurrentSubagents !== undefined ? { maxConcurrentSubagents: manifest.limits.maxConcurrentSubagents } : {}),
-      inheritConfig: false,
-      enableKnowledge: false,
-      enableSkills: false,
+      inheritConfig: true,
+      enableKnowledge: manifest.isolation.knowledge,
+      enableSkills: manifest.isolation.skills,
       enableHooks: false,
-      enableMcp: false,
+      enableMcp: manifest.isolation.mcp,
       enableProjectInstructions: false,
       registerSessionCatalog: false,
       ...(executionBackend ? { executionBackend } : {})
@@ -84,6 +87,15 @@ export async function runBenchmark(input: BenchmarkManifest, options: BenchmarkR
     session = runtime.updateSession(session.id, { toolScope: activeTools.map((tool) => tool.name) });
     const faraiRoot = options.faraiRoot ?? resolve(import.meta.dir, "..", "..");
     const frozen = await freezeRun(manifest, session, activeTools, faraiRoot, provider, dockerState?.agentImageId);
+    if (dockerLifecycle) {
+      chmodSync(workspace, 0o755);
+      chmodSync(join(workspace, ".farai"), 0o755);
+      await runtime.startContainer(session.id);
+      await dockerLifecycle.connectAgent(containerNameForSession(session.id));
+    }
+    if (manifest.isolation.mcp) {
+      await runtime.refreshMcp(session, { force: true, background: false }).catch(() => undefined);
+    }
     const promptPromise = runtime.prompt(session, manifest.challenge.prompt)
       .then((result) => {
         response = result.response;
@@ -93,13 +105,15 @@ export async function runBenchmark(input: BenchmarkManifest, options: BenchmarkR
         runError = error instanceof Error ? error.message : String(error);
         promptState = "failed";
       });
-    const externalStop = await driveRun(runtime, session.id, manifest, started, () => promptState);
+    const progress = options.onProgress ? makeProgressPump(runtime, session.id, options.onProgress) : undefined;
+    const externalStop = await driveRun(runtime, session.id, manifest, started, () => promptState, progress);
     if (externalStop) {
       await runtime.abortSessionTree(session.id, externalStop, { stopContainers: manifest.isolation.backend !== "docker" && options.stopContainersOnTimeout !== false });
       await Promise.race([promptPromise, delay(1_000)]);
     } else {
       await promptPromise;
     }
+    progress?.(true);
     const bundleData = collectRunData(runtime, session.id);
     const usage = runtime.store.usageSummaryTree(session.id);
     response = latestAssistantText(bundleData.messages.filter((message) => message.sessionId === session.id)) ?? response;
@@ -178,12 +192,13 @@ function assertExecutableIsolation(manifest: BenchmarkManifest): void {
     throw new Error("temperature and seed are not currently enforceable by the provider adapters; omit them instead of recording false reproducibility");
   }
   if (manifest.isolation.backend === "host" && manifest.isolation.resources) throw new Error("resource limits require the docker benchmark backend");
-  if (manifest.isolation.backend === "host" && (manifest.challenge.targetImage || manifest.challenge.targetImageDigest || manifest.challenge.targetCommand?.length)) {
+  if (manifest.isolation.backend === "host" && (manifest.challenge.targetImage || manifest.challenge.targetImageDigest || manifest.challenge.targetCommand?.length || manifest.challenge.targetCompose)) {
     throw new Error("host benchmark backend cannot provision target images or target commands");
   }
   if (manifest.isolation.backend === "docker") {
     if (manifest.isolation.network !== "target_only" || manifest.isolation.internet !== "disabled") throw new Error("docker benchmark isolation requires network=target_only and internet=disabled");
-    if (!manifest.challenge.targetImage || !manifest.challenge.targetImageDigest) throw new Error("docker benchmark requires a pinned target image");
+    const hasPinnedImage = Boolean(manifest.challenge.targetImage && manifest.challenge.targetImageDigest);
+    if (!hasPinnedImage && !manifest.challenge.targetCompose) throw new Error("docker benchmark requires a pinned target image or a targetCompose definition");
     if (!manifest.antiCheat) throw new Error("docker benchmark requires an external anti-cheat hook");
     if (manifest.isolation.resources?.diskMb) throw new Error("docker benchmark diskMb is not enforceable for a bind-mounted scratch workspace");
   }
@@ -215,19 +230,18 @@ function assertProvider(manifest: BenchmarkManifest, provider: PlannerProvider |
 }
 
 function resolveBenchmarkTools(scope: string[]): ToolDefinition[] {
-  const allowed = new Map(baseTools
-    .filter((tool) => tool.name !== "skill_load" && !tool.name.startsWith("knowledge_"))
-    .map((tool) => [tool.name, tool]));
+  const allowed = new Map(baseTools.map((tool) => [tool.name, tool]));
   return scope.map((name) => {
     const tool = allowed.get(name);
-    if (!tool) throw new Error(`benchmark toolScope contains unavailable or forbidden tool: ${name}`);
+    if (!tool) throw new Error(`benchmark toolScope contains unknown tool: ${name}`);
     return tool;
   });
 }
 
-async function driveRun(runtime: AgentRuntime, rootSessionId: string, manifest: BenchmarkManifest, started: number, promptState: () => PromptState): Promise<BenchmarkStopReason | undefined> {
+async function driveRun(runtime: AgentRuntime, rootSessionId: string, manifest: BenchmarkManifest, started: number, promptState: () => PromptState, onPoll?: () => void): Promise<BenchmarkStopReason | undefined> {
   let stableChecks = 0;
   for (;;) {
+    onPoll?.();
     const stop = benchmarkLimit(runtime, rootSessionId, manifest, started);
     if (stop) return stop;
     if (promptState() !== "pending") {
@@ -239,6 +253,42 @@ async function driveRun(runtime: AgentRuntime, rootSessionId: string, manifest: 
       }
     }
     await delay(25);
+  }
+}
+
+const PROGRESS_POLL_INTERVAL_MS = 1_000;
+
+function makeProgressPump(runtime: AgentRuntime, sessionId: string, emit: (line: string) => void): (force?: boolean) => void {
+  const toolStatus = new Map<string, string>();
+  const seenTurns = new Set<string>();
+  let lastEmit = 0;
+  return (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastEmit < PROGRESS_POLL_INTERVAL_MS) return;
+    lastEmit = now;
+    for (const turn of runtime.store.listTurns(sessionId, 100_000)) {
+      if (seenTurns.has(turn.id)) continue;
+      seenTurns.add(turn.id);
+      emit(`— turn ${seenTurns.size} —`);
+    }
+    for (const call of runtime.store.listToolCalls(sessionId, 100_000).reverse()) {
+      const previous = toolStatus.get(call.id);
+      if (previous === call.status) continue;
+      toolStatus.set(call.id, call.status);
+      if (previous === undefined) emit(`  → ${call.tool}${summarizeArgs(call.args)}`);
+      else if (call.status !== "pending" && call.status !== "running") emit(`  ${call.status === "error" ? "✗" : "✓"} ${call.tool} [${call.status}]`);
+    }
+  };
+}
+
+function summarizeArgs(args: unknown): string {
+  try {
+    const text = JSON.stringify(args);
+    if (!text || text === "{}" || text === "null") return "";
+    const flat = text.replace(/\s+/g, " ");
+    return ` ${flat.length > 96 ? `${flat.slice(0, 93)}...` : flat}`;
+  } catch {
+    return "";
   }
 }
 
@@ -470,6 +520,7 @@ async function freezeRun(manifest: BenchmarkManifest, session: Session, tools: T
     kaliToolManifestHash: hashPath(KALI_TOOL_MANIFEST_PATH),
     ...(manifest.challenge.targetImage ? { targetImage: manifest.challenge.targetImage } : {}),
     ...(manifest.challenge.targetImageDigest ? { targetImageDigest: manifest.challenge.targetImageDigest } : {}),
+    ...(manifest.challenge.targetCompose && existsSync(manifest.challenge.targetCompose.composeFile) ? { targetComposeHash: hashPath(manifest.challenge.targetCompose.composeFile) } : {}),
     ...(manifest.oracle?.executableSha256 ? { oracleExecutableHash: manifest.oracle.executableSha256 } : {}),
     ...(manifest.antiCheat?.executableSha256 ? { antiCheatExecutableHash: manifest.antiCheat.executableSha256 } : {}),
     timeoutSeconds: manifest.limits.timeoutSeconds,
@@ -484,9 +535,9 @@ async function freezeRun(manifest: BenchmarkManifest, session: Session, tools: T
     networkPolicy: manifest.isolation.network,
     internetPolicy: manifest.isolation.internet,
     projectInstructionsEnabled: false,
-    mcpEnabled: false,
-    knowledgeEnabled: false,
-    skillsEnabled: false,
+    mcpEnabled: manifest.isolation.mcp,
+    knowledgeEnabled: manifest.isolation.knowledge,
+    skillsEnabled: manifest.isolation.skills,
     hooksEnabled: false,
     bun: Bun.version,
     platform: platform(),

@@ -62,8 +62,9 @@ export type UpdateArguments =
 
 export type BenchmarkArguments =
   | { kind: "csi-generate"; configPath: string; materialRoot: string; output: string }
-  | { kind: "run"; manifestPath: string; output?: string; workspace?: string; artifactsDir?: string }
-  | { kind: "suite"; manifestPath: string; artifactsDir?: string };
+  | { kind: "generate"; configPath: string; materialRoot: string; output: string }
+  | { kind: "run"; manifestPath: string; output?: string; workspace?: string; artifactsDir?: string; stream?: boolean }
+  | { kind: "suite"; manifestPath: string; artifactsDir?: string; stream?: boolean };
 
 export function parseNoArguments(command: string, args: string[]): void {
   if (args.length > 0) throw new Error(`${command} does not accept arguments`);
@@ -210,12 +211,28 @@ export function parseBenchmarkArguments(args: string[]): BenchmarkArguments {
     if (!output) throw new Error("bench csi generate requires --output <suite.json>");
     return { kind: "csi-generate", configPath, materialRoot, output };
   }
+  if (subcommand === "generate") {
+    const { values, positionals } = parseStrict(args.slice(1), {
+      config: { type: "string" },
+      materials: { type: "string" },
+      output: { type: "string" }
+    });
+    requirePositionals("bench generate", positionals, 0, 1);
+    const configPath = positionalOrOption("bench generate", positionals[0], optionalString(values, "config"), "--config");
+    const materialRoot = optionalString(values, "materials");
+    const output = optionalString(values, "output");
+    if (!configPath) throw new Error("bench generate requires a campaign config json path");
+    if (!materialRoot) throw new Error("bench generate requires --materials <material-dir with catalog.json>");
+    if (!output) throw new Error("bench generate requires --output <suite.json>");
+    return { kind: "generate", configPath, materialRoot, output };
+  }
   if (subcommand === "run") {
     const { values, positionals } = parseStrict(args.slice(1), {
       manifest: { type: "string" },
       output: { type: "string" },
       workspace: { type: "string" },
-      artifacts: { type: "string" }
+      artifacts: { type: "string" },
+      stream: { type: "boolean" }
     });
     requirePositionals("bench run", positionals, 0, 1);
     const manifestPath = positionalOrOption("bench run", positionals[0], optionalString(values, "manifest"), "--manifest");
@@ -225,13 +242,15 @@ export function parseBenchmarkArguments(args: string[]): BenchmarkArguments {
       manifestPath,
       ...optionalProperty("output", optionalString(values, "output")),
       ...optionalProperty("workspace", optionalString(values, "workspace")),
-      ...optionalProperty("artifactsDir", optionalString(values, "artifacts"))
+      ...optionalProperty("artifactsDir", optionalString(values, "artifacts")),
+      stream: optionalBoolean(values, "stream")
     };
   }
   if (subcommand === "suite") {
     const { values, positionals } = parseStrict(args.slice(1), {
       manifest: { type: "string" },
-      artifacts: { type: "string" }
+      artifacts: { type: "string" },
+      stream: { type: "boolean" }
     });
     requirePositionals("bench suite", positionals, 0, 1);
     const manifestPath = positionalOrOption("bench suite", positionals[0], optionalString(values, "manifest"), "--manifest");
@@ -239,7 +258,8 @@ export function parseBenchmarkArguments(args: string[]): BenchmarkArguments {
     return {
       kind: "suite",
       manifestPath,
-      ...optionalProperty("artifactsDir", optionalString(values, "artifacts"))
+      ...optionalProperty("artifactsDir", optionalString(values, "artifacts")),
+      stream: optionalBoolean(values, "stream")
     };
   }
   throw new Error(`unknown bench command: ${subcommand}`);

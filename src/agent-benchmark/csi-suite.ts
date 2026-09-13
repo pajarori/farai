@@ -1,15 +1,14 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { CSI_CYBENCH_33 } from "./csi-cybench-33";
-import { hashPath } from "./hash";
-import { normalizeBenchmarkSuiteManifest } from "./manifest";
+import { generateBenchmarkSuiteFromCatalog, type BenchCatalog } from "./bench-suite";
+import { normalizeComposeSpec } from "./manifest";
 import type { BenchmarkManifest, BenchmarkSuiteManifest } from "./types";
-import { readBoundedFileText, readBoundedFileTextSync } from "../file-read";
+import { readBoundedFileText } from "../file-read";
 import { atomicWriteFile } from "../agent-core/atomic-file";
 
 const CSI_CAMPAIGN_MAX_BYTES = 4 * 1024 * 1024;
 const CSI_MATERIAL_INDEX_MAX_BYTES = 16 * 1024 * 1024;
-const CSI_PROMPT_MAX_BYTES = 1024 * 1024;
 
 export type CsiCampaignConfig = {
   schemaVersion: 1;
@@ -33,6 +32,7 @@ export type CsiChallengeMaterial = {
   requiresTarget?: boolean;
   files?: Array<{ source: string; destination: string; sha256?: string }>;
   target?: { image: string; digest: string; command?: string[] };
+  targetCompose?: { composeFile: string; service: string; buildArgs?: Record<string, string> };
   timeout?: { minutes: number; provenance: string };
   oracle: {
     executable: string;
@@ -53,97 +53,25 @@ export async function loadCsiMaterialIndex(root: string): Promise<CsiMaterialInd
 }
 
 export async function generateCsiBenchmarkSuite(configInput: CsiCampaignConfig, materialRoot: string): Promise<BenchmarkSuiteManifest> {
-  const config = normalizeCsiCampaignConfig(configInput);
-  const root = resolve(materialRoot);
-  const materials = await loadCsiMaterialIndex(root);
-  const selectedIds = config.challenges ?? CSI_CYBENCH_33.challenges.map((challenge) => challenge.id);
-  const selected = selectedIds.map((id) => {
-    const challenge = CSI_CYBENCH_33.challenges.find((entry) => entry.id === id);
-    if (!challenge) throw new Error(`unknown csi challenge: ${id}`);
-    return challenge;
-  });
-  const runs = selected.map((challenge): BenchmarkManifest => {
-    const material = materials.challenges[challenge.id];
-    if (!material) throw new Error(`missing protected material for csi challenge: ${challenge.id}`);
-    if (config.isolation.backend === "host" && material.requiresTarget) throw new Error(`host csi challenge requires a live target and cannot run in host smoke mode: ${challenge.id}`);
-    const promptPath = protectedPath(root, material.promptFile, `${challenge.id}.promptFile`);
-    if (!existsSync(promptPath) || !statSync(promptPath).isFile()) throw new Error(`missing prompt file for csi challenge: ${challenge.id}`);
-    const prompt = readBoundedFileTextSync(promptPath, CSI_PROMPT_MAX_BYTES, `csi prompt ${challenge.id}`).trim();
-    if (!prompt) throw new Error(`empty prompt file for csi challenge: ${challenge.id}`);
-    const files = material.files?.map((file, index) => {
-      const source = protectedPath(root, file.source, `${challenge.id}.files[${index}].source`);
-      if (!existsSync(source)) throw new Error(`missing input for csi challenge ${challenge.id}: ${file.source}`);
-      if (statSync(source).isDirectory() && !listFiles(source).length) throw new Error(`empty input directory for csi challenge ${challenge.id}: ${file.source}`);
-      const digest = hashPath(source);
-      if (file.sha256 && file.sha256.toLowerCase() !== digest) throw new Error(`input hash mismatch for csi challenge ${challenge.id}: ${file.source}`);
-      return { source, destination: file.destination, sha256: digest };
-    });
-    if (material.requiredFiles?.length && !files?.length) throw new Error(`missing file staging for csi challenge: ${challenge.id}`);
-    if (material.requiredFiles?.length) {
-      const available = new Set(files!.flatMap((file) => listFiles(file.source).map((path) => path.split(/[\\/]/).at(-1)!)));
-      const missing = material.requiredFiles.filter((name) => !available.has(name));
-      if (missing.length) throw new Error(`missing required protected files for csi challenge ${challenge.id}: ${missing.join(", ")}`);
-    }
-    const executable = protectedPath(root, material.oracle.executable, `${challenge.id}.oracle.executable`);
-    if (!existsSync(executable) || !statSync(executable).isFile()) throw new Error(`missing oracle executable for csi challenge: ${challenge.id}`);
-    if ((statSync(executable).mode & 0o111) === 0) throw new Error(`oracle executable is not executable for csi challenge: ${challenge.id}`);
-    const antiCheatExecutable = material.antiCheat ? protectedPath(root, material.antiCheat.executable, `${challenge.id}.antiCheat.executable`) : undefined;
-    if (antiCheatExecutable && (!existsSync(antiCheatExecutable) || !statSync(antiCheatExecutable).isFile())) throw new Error(`missing anti-cheat executable for csi challenge: ${challenge.id}`);
-    if (antiCheatExecutable && (statSync(antiCheatExecutable).mode & 0o111) === 0) throw new Error(`anti-cheat executable is not executable for csi challenge: ${challenge.id}`);
-    if (config.isolation.backend === "docker" && !material.target) throw new Error(`docker csi challenge requires a pinned target image: ${challenge.id}`);
-    if (config.isolation.backend === "docker" && !antiCheatExecutable) throw new Error(`docker csi challenge requires a protected anti-cheat executable: ${challenge.id}`);
-    const timeoutMinutes = resolveTimeoutMinutes(challenge.id, challenge.timeout, material.timeout);
-    return {
-      schemaVersion: 1,
-      suite: {
-        id: CSI_CYBENCH_33.id,
-        version: CSI_CYBENCH_33.version,
-        source: CSI_CYBENCH_33.source,
-        sourceDigest: CSI_CYBENCH_33.sourceDigest
-      },
-      challenge: {
-        id: challenge.id,
-        prompt,
-        category: challenge.category,
-        difficulty: challenge.difficulty,
-        source: challenge.source,
-        ...(material.target ? {
-          targetImage: material.target.image,
-          targetImageDigest: material.target.digest,
-          ...(material.target.command?.length ? { targetCommand: material.target.command } : {})
-        } : {})
-      },
-      model: config.model,
-      limits: { timeoutSeconds: timeoutMinutes * 60, ...config.limits },
-      isolation: config.isolation,
-      ...(files?.length ? { files } : {}),
-      toolScope: config.toolScope,
-      oracle: {
-        command: [executable, ...(material.oracle.args ?? [])],
-        executableSha256: hashPath(executable),
-        flagPattern: material.oracle.flagPattern,
-        ...(material.oracle.flags ? { flags: material.oracle.flags } : {}),
-        ...(material.oracle.timeoutSeconds ? { timeoutSeconds: material.oracle.timeoutSeconds } : {})
-      },
-      ...(antiCheatExecutable ? {
-        antiCheat: {
-          executable: antiCheatExecutable,
-          executableSha256: hashPath(antiCheatExecutable),
-          ...(material.antiCheat?.args ? { args: material.antiCheat.args } : {})
-        }
-      } : {})
-    };
-  });
-  return normalizeBenchmarkSuiteManifest({
+  return generateBenchmarkSuiteFromCatalog(configInput, materialRoot, csiCatalog());
+}
+
+function csiCatalog(): BenchCatalog {
+  return {
     schemaVersion: 1,
     id: CSI_CYBENCH_33.id,
     version: CSI_CYBENCH_33.version,
     source: CSI_CYBENCH_33.source,
     sourceDigest: CSI_CYBENCH_33.sourceDigest,
-    repetitions: config.repetitions,
-    concurrency: config.concurrency,
-    runs
-  });
+    challenges: CSI_CYBENCH_33.challenges.map((challenge) => ({
+      id: challenge.id,
+      title: challenge.title,
+      category: challenge.category,
+      difficulty: challenge.difficulty,
+      source: challenge.source,
+      timeout: challenge.timeout
+    }))
+  };
 }
 
 export function writeCsiBenchmarkSuite(suite: BenchmarkSuiteManifest, path: string): void {
@@ -178,6 +106,9 @@ export function normalizeCsiMaterialIndex(value: unknown): CsiMaterialIndex {
     const requiredFiles = item.requiredFiles ?? item.required_files;
     const requiresTarget = item.requiresTarget ?? item.requires_target;
     const target = item.target === undefined ? undefined : object(item.target, `challenges.${id}.target`);
+    const targetComposeRaw = item.targetCompose ?? item.target_compose;
+    const targetCompose = targetComposeRaw === undefined ? undefined : object(targetComposeRaw, `challenges.${id}.targetCompose`);
+    if (target && targetCompose) throw new Error(`challenges.${id} cannot set both target and targetCompose`);
     const timeout = item.timeout === undefined ? undefined : object(item.timeout, `challenges.${id}.timeout`);
     const antiCheat = item.antiCheat ?? item.anti_cheat;
     const antiCheatObject = antiCheat === undefined ? undefined : object(antiCheat, `challenges.${id}.antiCheat`);
@@ -191,6 +122,7 @@ export function normalizeCsiMaterialIndex(value: unknown): CsiMaterialIndex {
         digest: requiredDigest(target.digest, `challenges.${id}.target.digest`),
         ...(target.command === undefined ? {} : { command: stringArray(target.command, `challenges.${id}.target.command`, false) })
       } } : {}),
+      ...(targetCompose ? { targetCompose: normalizeComposeSpec(targetCompose, `challenges.${id}.targetCompose`) } : {}),
       ...(timeout ? { timeout: { minutes: positiveNumber(timeout.minutes, `challenges.${id}.timeout.minutes`), provenance: requiredString(timeout.provenance, `challenges.${id}.timeout.provenance`) } } : {}),
       oracle: {
         executable: requiredString(oracle.executable, `challenges.${id}.oracle.executable`),
@@ -220,39 +152,17 @@ function normalizeMaterialFiles(value: unknown, id: string): NonNullable<CsiChal
   });
 }
 
-function resolveTimeoutMinutes(id: string, catalog: (typeof CSI_CYBENCH_33.challenges)[number]["timeout"], material: CsiChallengeMaterial["timeout"]): number {
-  if (catalog.status === "verified") {
-    if (material && material.minutes !== catalog.minutes) throw new Error(`protected timeout for ${id} conflicts with the paper: ${material.minutes}m != ${catalog.minutes}m`);
-    return catalog.minutes;
-  }
-  if (!material) throw new Error(`timeout for ${id} is absent from the public paper; provide it with provenance in protected material index`);
-  return material.minutes;
-}
-
-function protectedPath(root: string, path: string, name: string): string {
-  if (isAbsolute(path)) throw new Error(`${name} must be relative to the protected material root`);
-  const resolved = resolve(root, path);
-  const difference = relative(root, resolved);
-  if (!difference || difference.startsWith("..") || isAbsolute(difference)) throw new Error(`${name} escapes the protected material root`);
-  return resolved;
-}
-
-function listFiles(rootPath: string): string[] {
-  if (!statSync(rootPath).isDirectory()) return [rootPath];
-  return readdirSync(rootPath).flatMap((name) => listFiles(join(rootPath, name)));
-}
-
-function object(value: unknown, name: string): Record<string, unknown> {
+export function object(value: unknown, name: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be an object`);
   return value as Record<string, unknown>;
 }
 
-function requiredString(value: unknown, name: string): string {
+export function requiredString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`);
   return value.trim();
 }
 
-function optionalString(value: unknown): string | undefined {
+export function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
@@ -273,7 +183,7 @@ function booleanValue(value: unknown, name: string): boolean {
   return value;
 }
 
-function positiveNumber(value: unknown, name: string): number {
+export function positiveNumber(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number`);
   return value;
 }
