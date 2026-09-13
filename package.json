@@ -48,7 +48,7 @@
     "test": "bun test ./test/*.test.ts ./test/*.test.tsx",
     "verify": "bun run typecheck && bun run test && bun run test:package",
     "release:check": "bun run verify && bun audit",
-    "eval:smoke": "bun run test/evals/smoke.ts",
+    "eval:smoke": "bun run src/cli/index.ts eval",
     "prepare": "bun run scripts/prepare-package.ts",
     "prepublishOnly": "bun run verify",
     "prepack": "bun run build",

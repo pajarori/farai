@@ -66,6 +66,18 @@ farai update rollback
 
 Set `FARAI_CONTENT_MANIFEST_URL` for a private channel or local `file://` manifest, and `FARAI_CONTENT_DIR` to isolate the local content store. Set `FARAI_DISABLE_CONTENT_UPDATE=1` to disable the channel.
 
+Run Farai's hermetic agent-loop regression suite without model credentials or Docker:
+
+```bash
+farai eval --stream
+```
+
+Custom JSON suites can assert responses, events, stop reasons, tool selection, tool argument subsets, tool order, and error budgets:
+
+```bash
+farai eval examples/eval-suite.json --output eval-result.json
+```
+
 ## Status
 
 Farai is under active development.

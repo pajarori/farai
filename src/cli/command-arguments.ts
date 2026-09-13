@@ -66,6 +66,13 @@ export type BenchmarkArguments =
   | { kind: "run"; manifestPath: string; output?: string; workspace?: string; artifactsDir?: string; stream?: boolean }
   | { kind: "suite"; manifestPath: string; artifactsDir?: string; stream?: boolean };
 
+export type EvalArguments = {
+  suitePath?: string;
+  output?: string;
+  stream: boolean;
+  keepWorkspaces: boolean;
+};
+
 export function parseNoArguments(command: string, args: string[]): void {
   if (args.length > 0) throw new Error(`${command} does not accept arguments`);
 }
@@ -190,6 +197,23 @@ export function parseRunArguments(args: string[]): RunArguments {
     ...optionalProperty("sessionId", optionalString(values, "session")),
     text,
     json: optionalBoolean(values, "json")
+  };
+}
+
+export function parseEvalArguments(args: string[]): EvalArguments {
+  const { values, positionals } = parseStrict(args, {
+    suite: { type: "string" },
+    output: { type: "string" },
+    stream: { type: "boolean" },
+    "keep-workspaces": { type: "boolean" }
+  });
+  requirePositionals("eval", positionals, 0, 1);
+  const suitePath = positionalOrOption("eval", positionals[0], optionalString(values, "suite"), "--suite");
+  return {
+    ...optionalProperty("suitePath", suitePath),
+    ...optionalProperty("output", optionalString(values, "output")),
+    stream: optionalBoolean(values, "stream"),
+    keepWorkspaces: optionalBoolean(values, "keep-workspaces")
   };
 }
 

@@ -11,6 +11,7 @@ import { FARAI_VERSION } from "../version";
 import { resolveSessionLocation } from "../session-catalog";
 import {
   parseBenchmarkArguments,
+  parseEvalArguments,
   parseInitArguments,
   parseModelArguments,
   parseNoArguments,
@@ -73,6 +74,10 @@ async function main(): Promise<void> {
     case "bench":
       if (wantsHelp(args)) { help("bench"); break; }
       await benchmark(args);
+      break;
+    case "eval":
+      if (wantsHelp(args)) { help("eval"); break; }
+      await evaluate(args);
       break;
     case "model":
       if (wantsHelp(args)) { help("model"); break; }
@@ -352,6 +357,18 @@ async function benchmark(args: string[]): Promise<void> {
   }
 }
 
+async function evaluate(args: string[]): Promise<void> {
+  const parsed = parseEvalArguments(args);
+  const { loadEvalSuite, runEvalSuite, writeEvalResult } = await import("../agent-eval/runner");
+  const result = await runEvalSuite(await loadEvalSuite(parsed.suitePath), {
+    keepWorkspaces: parsed.keepWorkspaces,
+    ...(parsed.stream ? { onProgress: (line: string) => process.stderr.write(`${line}\n`) } : {})
+  });
+  if (parsed.output) writeEvalResult(result, parsed.output);
+  console.log(JSON.stringify(result, null, 2));
+  if (!result.ok) process.exitCode = 2;
+}
+
 function wantsHelp(args: string[]): boolean {
   return args.includes("--help") || args.includes("-h") || args[0] === "help";
 }
@@ -420,6 +437,13 @@ Usage:
   farai bench suite <suite.json> [--artifacts dir] [--stream]
   farai bench generate <campaign.json> --materials <dir with catalog.json> --output <suite.json>
   farai bench csi generate <campaign.json> --materials <dir> --output <suite.json>`,
+    eval: `Farai eval
+
+Usage:
+  farai eval [suite.json] [--output result.json] [--stream] [--keep-workspaces]
+  farai eval --suite <suite.json> [--output result.json]
+
+Without a suite path, Farai runs its hermetic built-in agent-loop regression suite.`,
     config: `Farai config
 
 Usage:
@@ -446,6 +470,7 @@ Usage:
   farai model add <provider[/model]> --base-url <url> [--api-key-env ENV] [--set-default] [--project]
   farai bench run <manifest.json> [--output result.json] [--workspace scratch-dir] [--artifacts dir] [--stream]
   farai bench suite <suite.json> [--artifacts dir] [--stream]
+  farai eval [suite.json] [--output result.json] [--stream]
   farai config
   farai update [status|check|apply|rollback]
 

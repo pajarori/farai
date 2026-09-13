@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "title": "Farai custom harness regression",
+  "defaultTimeoutSeconds": 30,
+  "cases": [
+    {
+      "name": "durable note tool selection",
+      "planner": "heuristic",
+      "prompts": [
+        "remember custom eval target"
+      ],
+      "expect": {
+        "events": [
+          "tool_call",
+          "tool_result",
+          "loop_stop"
+        ],
+        "stopReasons": [
+          "final_response"
+        ],
+        "toolCalls": [
+          {
+            "tool": "notes_add",
+            "status": "done",
+            "argsInclude": {
+              "text": "remember custom eval target",
+              "tags": [
+                "user"
+              ]
+            }
+          }
+        ],
+        "plannerErrorsAtMost": 0,
+        "toolErrorsAtMost": 0
+      }
+    }
+  ]
+}
