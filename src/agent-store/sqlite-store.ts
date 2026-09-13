@@ -86,6 +86,7 @@ const OUTPUT_ARTIFACT_PAGE_MAX_BYTES = 48 * 1024;
 const OUTPUT_ARTIFACT_LINE_MAX_BYTES = 16 * 1024 * 1024;
 const ACTIVE_CAMPAIGN_RUN_PREDICATE = "status in ('draft', 'ready', 'running', 'waiting', 'paused', 'blocked', 'rate_limited', 'budget_limited', 'time_limited')";
 const TERMINAL_JOB_STATUSES = "('succeeded', 'failed', 'cancelled', 'lost')";
+const TERMINAL_TOOL_CALL_STATUSES = "('done', 'error')";
 
 export type StoreChange =
   | { kind: "event"; sessionId: string; event: SessionEvent }
@@ -1849,10 +1850,17 @@ export class SqliteStore {
     return { job: finalized.job, toolCalls: finalized.toolCalls.map((item) => item.toolCall) };
   }
 
-  saveToolCall(record: ToolCallRecord): void {
+  saveToolCall(record: ToolCallRecord): ToolCallRecord {
     const canonicalRecord = { ...record, tool: canonicalToolName(record.tool) };
-    writeToolCallRow(this.database(), canonicalRecord);
-    this.emit({ kind: "toolCall", sessionId: canonicalRecord.sessionId, toolCall: canonicalRecord });
+    const db = this.database();
+    const saved = db.transaction(() => {
+      writeToolCallRow(db, canonicalRecord);
+      const row = db.query("select * from tool_calls where id = $id").get({ $id: canonicalRecord.id }) as Row | null;
+      if (!row) throw new Error(`Tool call not found after save: ${canonicalRecord.id}`);
+      return toolCallFromRow(row);
+    }).immediate();
+    this.emit({ kind: "toolCall", sessionId: saved.sessionId, toolCall: saved });
+    return saved;
   }
 
   settleToolCall(
@@ -1862,18 +1870,31 @@ export class SqliteStore {
     const canonicalRecord = { ...record, tool: canonicalToolName(record.tool) };
     const db = this.database();
     const settled = db.transaction(() => {
+      const existingRow = db.query("select * from tool_calls where id = $id").get({ $id: canonicalRecord.id }) as Row | null;
+      if (existingRow && isTerminalToolCallStatus(String(existingRow.status))) {
+        const existing = toolCallFromRow(existingRow);
+        const timelinePart = syncToolCallTimelineRow(db, existing);
+        const terminalMatches = (existing.status === "done" && terminal?.type === "tool_result") || (existing.status === "error" && terminal?.type === "error");
+        const terminalPart = terminalMatches && existing.turnId && existing.messageId
+          ? ensureTerminalToolPart(db, existing, terminal)
+          : undefined;
+        return { record: existing, timelinePart, terminalPart };
+      }
       writeToolCallRow(db, canonicalRecord);
-      const timelinePart = syncToolCallTimelineRow(db, canonicalRecord);
-      const terminalPart = terminal && canonicalRecord.turnId && canonicalRecord.messageId
-        ? ensureTerminalToolPart(db, canonicalRecord, terminal)
+      const storedRow = db.query("select * from tool_calls where id = $id").get({ $id: canonicalRecord.id }) as Row | null;
+      if (!storedRow) throw new Error(`Tool call not found after settlement: ${canonicalRecord.id}`);
+      const stored = toolCallFromRow(storedRow);
+      const timelinePart = syncToolCallTimelineRow(db, stored);
+      const terminalPart = terminal && stored.turnId && stored.messageId
+        ? ensureTerminalToolPart(db, stored, terminal)
         : undefined;
-      return { timelinePart, terminalPart };
-    })();
-    this.emit({ kind: "toolCall", sessionId: canonicalRecord.sessionId, toolCall: canonicalRecord });
+      return { record: stored, timelinePart, terminalPart };
+    }).immediate();
+    this.emit({ kind: "toolCall", sessionId: settled.record.sessionId, toolCall: settled.record });
     if (settled.timelinePart) this.emit({ kind: "part", sessionId: settled.timelinePart.sessionId, part: settled.timelinePart });
     if (settled.terminalPart?.inserted || settled.terminalPart?.updated) this.emit({ kind: "part", sessionId: settled.terminalPart.part.sessionId, part: settled.terminalPart.part });
     return {
-      toolCall: canonicalRecord,
+      toolCall: settled.record,
       ...(settled.timelinePart ? { timelinePart: settled.timelinePart } : {}),
       ...(settled.terminalPart ? { terminalPart: settled.terminalPart.part } : {})
     };
@@ -3078,10 +3099,10 @@ function writeToolCallRow(db: Database, record: ToolCallRecord): void {
   db.query(
     `insert into tool_calls (id, session_id, tool, args_json, status, evidence_ids_json, output_artifact_id, turn_id, message_id, timeline_part_id, job_id, process_id, provider_tool_call_id, created_at, updated_at)
      values ($id, $session, $tool, $args, $status, $evidence, $artifact, $turn, $message, $part, $job, $process, $providerToolCallId, $created, $updated)
-     on conflict(id) do update set tool = excluded.tool, args_json = excluded.args_json, status = excluded.status,
-       evidence_ids_json = excluded.evidence_ids_json, output_artifact_id = excluded.output_artifact_id,
-       turn_id = excluded.turn_id, message_id = excluded.message_id, timeline_part_id = excluded.timeline_part_id,
-       job_id = excluded.job_id, process_id = excluded.process_id, provider_tool_call_id = excluded.provider_tool_call_id, updated_at = excluded.updated_at`
+     on conflict(id) do update set tool = excluded.tool, args_json = excluded.args_json, status = case when tool_calls.status in ${TERMINAL_TOOL_CALL_STATUSES} then tool_calls.status else excluded.status end,
+       evidence_ids_json = excluded.evidence_ids_json, output_artifact_id = coalesce(excluded.output_artifact_id, tool_calls.output_artifact_id),
+       turn_id = coalesce(excluded.turn_id, tool_calls.turn_id), message_id = coalesce(excluded.message_id, tool_calls.message_id), timeline_part_id = coalesce(excluded.timeline_part_id, tool_calls.timeline_part_id),
+       job_id = coalesce(excluded.job_id, tool_calls.job_id), process_id = coalesce(excluded.process_id, tool_calls.process_id), provider_tool_call_id = coalesce(excluded.provider_tool_call_id, tool_calls.provider_tool_call_id), updated_at = excluded.updated_at`
   ).run({
     $id: stored.id,
     $session: stored.sessionId,
@@ -3124,7 +3145,10 @@ function settleBackgroundToolCallRows(db: Database, input: BackgroundToolSettlem
     $process: input.processId ?? null,
     $toolCall: input.toolCallId ?? null
   }) as Row[];
-  return rows.map(toolCallFromRow).map((record) => {
+  const settled: BackgroundToolSettlement[] = [];
+  for (const row of rows) {
+    const record = toolCallFromRow(row);
+    if (isTerminalToolCallStatus(record.status) && record.status !== input.status) continue;
     const toolCall = {
       ...record,
       status: input.status,
@@ -3132,9 +3156,17 @@ function settleBackgroundToolCallRows(db: Database, input: BackgroundToolSettlem
       ...(input.outputArtifactId ? { outputArtifactId: input.outputArtifactId } : {})
     };
     writeToolCallRow(db, toolCall);
-    const timelinePart = syncToolCallTimelineRow(db, toolCall);
-    return { toolCall, ...(timelinePart ? { timelinePart } : {}) };
-  });
+    const storedRow = db.query("select * from tool_calls where id = $id").get({ $id: toolCall.id }) as Row | null;
+    if (!storedRow) throw new Error(`Tool call not found after background settlement: ${toolCall.id}`);
+    const stored = toolCallFromRow(storedRow);
+    const timelinePart = syncToolCallTimelineRow(db, stored);
+    settled.push({ toolCall: stored, ...(timelinePart ? { timelinePart } : {}) });
+  }
+  return settled;
+}
+
+function isTerminalToolCallStatus(status: string): status is "done" | "error" {
+  return status === "done" || status === "error";
 }
 
 function ensureTerminalToolPart(

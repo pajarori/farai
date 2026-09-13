@@ -62,10 +62,10 @@ export class ToolCallJournal {
 
   markRunning(toolCall: ToolCallRecord): ToolCallRecord {
     const running = { ...toolCall, status: "running" as const };
-    this.store.saveToolCall(running);
-    this.sync(running);
-    this.emit(running.sessionId, "tool_started", { toolCallId: running.id, tool: running.tool, args: running.args });
-    return running;
+    const saved = this.store.saveToolCall(running);
+    this.sync(saved);
+    if (saved.status === "running") this.emit(saved.sessionId, "tool_started", { toolCallId: saved.id, tool: saved.tool, args: saved.args });
+    return saved;
   }
 
   settleError(toolCall: ToolCallRecord, error: string, state: ToolErrorState = {}, emitEvent = true): ToolCallRecord {

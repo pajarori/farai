@@ -305,6 +305,5 @@ function terminalSummary(job: BackgroundJob): string {
 
 export function attachJobToToolCall(store: SqliteStore, toolCall: ToolCallRecord, job: BackgroundJob): ToolCallRecord {
   const next = { ...toolCall, jobId: job.id };
-  store.saveToolCall(next);
-  return next;
+  return store.saveToolCall(next);
 }
