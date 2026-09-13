@@ -417,5 +417,16 @@ export const browserTools: ToolDefinition[] = [
       filename: { type: "string", description: "Optional output file." }
     }, ["index"]),
     mutates: false
+  }),
+  browserTool({
+    name: "browser_eval",
+    operation: "browser_evaluate",
+    description: "Execute a JavaScript function directly in the selected browser page and return its serializable result. Use this for DOM inspection or page-side behavior that has no dedicated browser tool; the function runs in the page, not in Node, and should not be used to bypass browser interaction evidence.",
+    inputSchema: objectSchema({
+      function: { type: "string", description: "JavaScript function expression, for example () => document.title." },
+      element: { type: "string", description: "Optional human-readable description of the target element." },
+      ref: { type: "string", description: "Optional exact target reference from the current browser snapshot." }
+    }, ["function"]),
+    mutates: true
   })
 ];

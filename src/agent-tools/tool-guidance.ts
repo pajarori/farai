@@ -404,6 +404,7 @@ const EXACT_GUIDANCE: Record<string, string> = {
   browser_tabs: "list, create, close, or select tabs within one context. tab indexes are context-local; separate contexts isolate cookies.",
   browser_network_requests: "inspect requests observed by one browser context after the relevant browser action, then use the returned index with browser_network_request.",
   browser_network_request: "inspect one request index from browser_network_requests; do not reuse it after the network log resets.",
+  browser_eval: "execute a serializable JavaScript function in the selected page context for DOM or page-state inspection; it runs in the browser, not Node, and should complement rather than replace evidence-producing browser actions.",
   kali_tool_search: "search the actual command inventory in the managed Kali container when a command map is ambiguous or packages changed; it does not execute commands.",
   agent_spawn: "start one bounded child context. use mode=detached for background work, pass non-overlapping claims for parallel tasks, and use session ids for child lifecycle calls.",
   agent_list: "list child lifecycle state with an empty object; use returned session ids for agent controls and job ids only for process polling.",
