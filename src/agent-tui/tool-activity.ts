@@ -60,6 +60,14 @@ const WORKSPACE_TOOLS = new Set(["fs_read", "fs_list", "fs_grep", "fs_write", "f
 const RECON_TOOLS = new Set(["port_scan", "nmap_scan", "subdomain_enum", "dns_probe", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "dir_enum", "exploit_search", "kali_tool_search"]);
 const HTTP_TOOLS = new Set(["http_request", "internet_search", "internet_fetch"]);
 
+function isCommandTool(tool: string): boolean {
+  return tool === "exec_command" || tool === "shell_exec";
+}
+
+function commandText(tool: string, args: Record<string, unknown>): string | undefined {
+  return stringValue(tool === "exec_command" ? args.cmd : args.command);
+}
+
 export function presentToolActivity(input: ToolActivityInput): ToolActivityPresentation {
   const tool = canonicalToolName(input.tool) || "tool";
   const args = inputObject(input.args);
@@ -110,7 +118,7 @@ export function formatActivityDuration(durationMs: number | undefined): string |
 }
 
 function toolFamily(tool: string): ToolActivityFamily {
-  if (tool === "shell_exec" || tool === "session_poll" || tool === "session_stop") return "command";
+  if (isCommandTool(tool) || tool === "write_stdin" || tool === "session_poll" || tool === "session_stop") return "command";
   if (WORKSPACE_TOOLS.has(tool)) return "workspace";
   if (tool === "browser_context" || BROWSER_TOOLS.has(tool)) return "browser";
   if (HTTP_TOOLS.has(tool)) return "http";
@@ -131,7 +139,7 @@ function activityGrouping(
   args: Record<string, unknown>,
   metadata: Record<string, unknown>
 ): Pick<ToolActivityPresentation, "groupKey" | "groupPast" | "groupActive"> | undefined {
-  if (tool === "shell_exec") return { groupKey: "command", groupPast: "ran", groupActive: "running" };
+  if (isCommandTool(tool)) return { groupKey: "command", groupPast: "ran", groupActive: "running" };
   if (family === "workspace") return { groupKey: "workspace", groupPast: "inspected", groupActive: "inspecting" };
   if (family === "browser" && tool !== "browser_context") {
     const context = stringValue(metadata.browserContextName) ?? stringValue(args.browser) ?? "default";
@@ -165,11 +173,11 @@ function toolStandalone(tool: string, input: ToolActivityInput, warning: boolean
   if (tool === "browser_context" || tool === "internet_search" || tool === "internet_fetch") return true;
   if (family === "browser") return false;
   const definition = toolDefinition(tool);
-  return definition?.mutates === true && tool !== "shell_exec";
+  return definition?.mutates === true && !isCommandTool(tool);
 }
 
 function compactActivityLabel(tool: string, args: Record<string, unknown>, title: string): string {
-  if (tool === "shell_exec") return (stringValue(args.command) ?? title).replace(/\s+/g, " ").trim();
+  if (isCommandTool(tool)) return (commandText(tool, args) ?? title).replace(/\s+/g, " ").trim();
   if (tool === "http_request") {
     const method = (stringValue(args.method) ?? "get").toLowerCase();
     return `${method} ${stringValue(args.url) ?? "request"}`;
@@ -194,7 +202,7 @@ function toolOutcome(
 ): string | undefined {
   if (active) return liveOutcome(text);
   if (result?.ok === false) return firstMeaningfulLine(text) ?? result.summary;
-  if (tool === "port_scan" || tool === "nmap_scan" || (tool === "shell_exec" && /^\s*(?:sudo\s+)?nmap\b/i.test(stringValue(args.command) ?? ""))) {
+  if (tool === "port_scan" || tool === "nmap_scan" || (isCommandTool(tool) && /^\s*(?:sudo\s+)?nmap\b/i.test(commandText(tool, args) ?? ""))) {
     const ports = parseNmap(text);
     if (ports.length > 0) return ports.slice(0, 6).map((row) => `${row.port}/${row.service}`).join(", ") + (ports.length > 6 ? ` · +${ports.length - 6}` : "");
     const discovered = numberValue(metadata.recordCount) ?? arrayValue(metadata.discoveredPorts).length;
@@ -265,7 +273,7 @@ function toolOutcome(
   if (tool.startsWith("browser_")) return browserOutcome(text, metadata) ?? cleanSummary(result?.summary);
   if (tool.startsWith("proxy_")) return proxyOutcome(metadata, result?.summary, text);
   if (tool === "image_view") return result?.summary?.replace(/^image\s+/i, "") ?? firstMeaningfulLine(text);
-  if (tool === "shell_exec") {
+  if (isCommandTool(tool)) {
     const first = firstMeaningfulLine(text);
     if (first) return first;
     const exit = result?.summary?.match(/\bexit=(\d+)/)?.[1];
@@ -282,7 +290,7 @@ function toolPreview(
   active: boolean
 ): string[] {
   if (!text && !Object.keys(metadata).length) return [];
-  if (tool === "port_scan" || tool === "nmap_scan" || (tool === "shell_exec" && /^\s*(?:sudo\s+)?nmap\b/i.test(stringValue(args.command) ?? ""))) {
+  if (tool === "port_scan" || tool === "nmap_scan" || (isCommandTool(tool) && /^\s*(?:sudo\s+)?nmap\b/i.test(commandText(tool, args) ?? ""))) {
     const rows = parseNmap(text);
     if (rows.length > 0) return withMore(rows.slice(0, 5).map((row) => `${row.port}/${row.proto}  ${row.service}${row.version ? `  ${row.version}` : ""}`), rows.length, 5);
   }

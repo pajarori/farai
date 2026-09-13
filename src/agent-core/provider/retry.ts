@@ -51,6 +51,11 @@ export type ModelRetryDecision = {
   status?: number;
 };
 
+export function isContextOverflowError(error: unknown): boolean {
+  const text = errorChain(error).map(errorText).filter(Boolean).join("\n");
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 export function classifyModelRetry(error: unknown): ModelRetryDecision {
   const chain = errorChain(error);
   const status = firstNumber(chain, ["status", "statusCode"]);

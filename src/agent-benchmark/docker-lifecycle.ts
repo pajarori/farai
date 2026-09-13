@@ -12,10 +12,11 @@ export type BenchmarkProcessRunner = (command: string, args: string[], options?:
 export type BenchmarkDockerTargetStep = { args: string[]; env?: Record<string, string> };
 
 export type BenchmarkDockerPlan = {
-  names: { network: string; target: string };
+  names: { network: string; target: string; agent: string };
   targetImage: string;
   networkCreate: string[];
   targetStart: BenchmarkDockerTargetStep;
+  agentStart: string[];
   composeConnect?: { network: string; project: string; composeFile: string; service: string };
   antiCheat?: { command: string; args: string[]; env: Record<string, string> };
   cleanup: string[][];
@@ -24,6 +25,7 @@ export type BenchmarkDockerPlan = {
 export type BenchmarkDockerState = {
   network: string;
   targetContainer: string;
+  agentContainer: string;
   agentImageId: string;
   agentImageContract: string;
   targetImage: string;
@@ -31,6 +33,7 @@ export type BenchmarkDockerState = {
   antiCheatApplied: boolean;
   cleaned: boolean;
   targetState?: { running: boolean; exitCode: number };
+  agentState?: { running: boolean; exitCode: number };
   errors: string[];
 };
 
@@ -50,7 +53,8 @@ export class BenchmarkDockerLifecycle {
     private readonly manifest: BenchmarkManifest,
     private readonly workspace: string,
     private readonly runId: string,
-    private readonly runner: BenchmarkProcessRunner = runProcess
+    private readonly runner: BenchmarkProcessRunner = runProcess,
+    private readonly manageAgent = true
   ) {}
 
   async start(): Promise<{ state: BenchmarkDockerState; plan: BenchmarkDockerPlan }> {
@@ -89,11 +93,12 @@ export class BenchmarkDockerLifecycle {
     const agentImageContract = image.contract?.trim() ?? "";
     if (agentImageContract !== KALI_IMAGE_CONTRACT) throw new Error(`benchmark agent image does not satisfy the current capability contract: ${agentImageContract || "missing"}`);
     const targetImage = this.manifest.challenge.targetCompose ? undefined : await resolveTargetImage(this.manifest, this.runner);
-    const plan = buildBenchmarkDockerPlan(this.manifest, this.workspace, this.runId, agentImageId, targetImage);
+    const plan = buildBenchmarkDockerPlan(this.manifest, this.workspace, this.runId, agentImageId, targetImage, this.manageAgent);
     this.planValue = plan;
     const state: BenchmarkDockerState = {
       network: plan.names.network,
       targetContainer: plan.names.target,
+      agentContainer: plan.names.agent,
       agentImageId,
       agentImageContract,
       targetImage: plan.targetImage,
@@ -119,6 +124,7 @@ export class BenchmarkDockerLifecycle {
         if (result.exitCode !== 0) throw new Error(result.stderr || "anti-cheat hook failed");
         state.antiCheatApplied = true;
       }
+      if (this.manageAgent) await this.requiredDocker(plan.agentStart, "start benchmark agent");
       state.started = true;
       return { state, plan };
     } catch (error) {
@@ -135,6 +141,7 @@ export class BenchmarkDockerLifecycle {
     if (result.exitCode !== 0 && !/already exists|already in network|endpoint with name/i.test(result.stderr)) {
       throw new Error(result.stderr || `failed to connect agent to benchmark network ${network}`);
     }
+    if (this.stateValue) this.stateValue.agentContainer = containerName;
   }
 
   async stop(): Promise<BenchmarkDockerState | undefined> {
@@ -152,7 +159,11 @@ export class BenchmarkDockerLifecycle {
     const state = this.stateValue;
     const plan = this.planValue;
     if (!state || !plan || state.cleaned) return state;
-    const targetState = await this.inspectState(state.targetContainer);
+    const [agentState, targetState] = await Promise.all([
+      this.inspectState(state.agentContainer),
+      this.inspectState(state.targetContainer)
+    ]);
+    if (agentState) state.agentState = agentState;
     if (targetState) state.targetState = targetState;
     let cleaned = true;
     for (const args of plan.cleanup) {
@@ -222,7 +233,7 @@ export class BenchmarkDockerLifecycle {
   }
 }
 
-export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace: string, runId: string, agentImageId: string, targetImageOverride?: string): BenchmarkDockerPlan {
+export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace: string, runId: string, agentImageId: string, targetImageOverride?: string, manageAgent = true): BenchmarkDockerPlan {
   if (manifest.isolation.backend !== "docker") throw new Error("benchmark docker plan requires isolation.backend=docker");
   if (manifest.isolation.network !== "target_only" || manifest.isolation.internet !== "disabled") {
     throw new Error("docker benchmark isolation requires network=target_only and internet=disabled");
@@ -238,7 +249,8 @@ export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace:
   const composeProject = `farai-bench-${suffix}`;
   const names = {
     network: `farai-bench-${suffix}`,
-    target: compose ? `${composeProject}-${compose.service}` : `farai-bench-target-${suffix}`
+    target: compose ? `${composeProject}-${compose.service}` : `farai-bench-target-${suffix}`,
+    agent: `farai-bench-agent-${suffix}`
   };
   const resources = manifest.isolation.resources;
   if (resources?.diskMb) throw new Error("docker benchmark diskMb is not enforceable for a bind-mounted scratch workspace");
@@ -249,10 +261,10 @@ export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace:
   ];
   const targetImage = compose ? `compose:${compose.service}` : (targetImageOverride ?? pinnedImage(manifest.challenge.targetImage!, manifest.challenge.targetImageDigest!));
   const composeEnv = compose?.buildArgs && Object.keys(compose.buildArgs).length ? compose.buildArgs : undefined;
-  const targetStart: BenchmarkDockerTargetStep = compose
-    ? { args: ["compose", "-p", composeProject, "-f", compose.composeFile, "up", "-d", "--build"], ...(composeEnv ? { env: composeEnv } : {}) }
-    : {
-        args: [
+  const targetStart: BenchmarkDockerTargetStep = {
+    args: compose
+      ? ["compose", "-p", composeProject, "-f", compose.composeFile, "up", "-d", "--build"]
+      : [
           "run", "-d", "--name", names.target,
           "--network", names.network,
           "--network-alias", "target",
@@ -262,8 +274,28 @@ export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace:
           ...resourceArgs,
           targetImage,
           ...(manifest.challenge.targetCommand ?? [])
-        ]
-      };
+        ],
+    ...(composeEnv ? { env: composeEnv } : {})
+  };
+  const resolvedWorkspace = resolve(workspace);
+  const agentStart = [
+    "run", "-d", "--name", names.agent,
+    "--network", names.network,
+    "--workdir", "/workspace",
+    "--volume", `${resolvedWorkspace}:/workspace:rw`,
+    "--volume", "/workspace/.farai",
+    "--read-only",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
+    "--tmpfs", "/root:rw,nosuid,nodev,size=256m",
+    "--tmpfs", "/run:rw,nosuid,nodev,size=64m",
+    "--cap-drop", "ALL",
+    "--cap-add", "NET_ADMIN",
+    "--cap-add", "NET_RAW",
+    ...common,
+    ...resourceArgs,
+    agentImageId,
+    "sleep", "infinity"
+  ];
   const targetCleanup: string[][] = compose
     ? [["compose", "-p", composeProject, "-f", compose.composeFile, "down", "-v", "--remove-orphans"]]
     : [["rm", "-f", "-v", names.target]];
@@ -272,16 +304,20 @@ export function buildBenchmarkDockerPlan(manifest: BenchmarkManifest, workspace:
     targetImage,
     networkCreate: ["network", "create", "--internal", "--label", "org.farai.benchmark=true", names.network],
     targetStart,
+    agentStart,
     ...(compose ? { composeConnect: { network: names.network, project: composeProject, composeFile: compose.composeFile, service: compose.service } } : {}),
     antiCheat: {
       command: manifest.antiCheat.executable,
       args: manifest.antiCheat.args ?? [],
       env: {
+        FARAI_TARGET_CONTAINER: names.target,
+        FARAI_AGENT_CONTAINER: names.agent,
         FARAI_BENCHMARK_NETWORK: names.network,
         FARAI_CHALLENGE_ID: manifest.challenge.id
       }
     },
     cleanup: [
+      ...(manageAgent ? [["rm", "-f", "-v", names.agent]] : []),
       ...targetCleanup,
       ["network", "rm", names.network]
     ]

@@ -77,6 +77,7 @@ const RESUMABLE_SESSION_PREDICATE = `(
   or exists (select 1 from usage where session_id = s.id)
   or exists (select 1 from compaction_boundaries where session_id = s.id)
   or exists (select 1 from memory_items where session_id = s.id)
+  or exists (select 1 from session_plans where session_id = s.id)
   or exists (select 1 from todos where session_id = s.id)
   or exists (select 1 from output_artifacts where session_id = s.id)
 )`;
@@ -289,6 +290,7 @@ export class SqliteStore {
         .get({ $session: sessionId }) as Row | null;
       if (resumable) return;
       db.query("delete from events where session_id = $session").run({ $session: sessionId });
+      db.query("delete from session_plans where session_id = $session").run({ $session: sessionId });
       const result = db.query("delete from sessions where id = $session").run({ $session: sessionId });
       discarded = result.changes === 1;
     })();
@@ -1011,6 +1013,7 @@ export class SqliteStore {
     preCompactTokens?: number;
     postCompactTokens?: number;
     expectedPreviousBoundaryId?: string | null;
+    replacementHistory?: CompactionBoundary["replacementHistory"];
   }): CompactionBoundary {
     const db = this.database();
     const createdAt = nowIso();
@@ -1020,6 +1023,7 @@ export class SqliteStore {
       trigger: input.trigger,
       throughMessageRowId: input.throughMessageRowId,
       summary: input.summary,
+      ...(input.replacementHistory ? { replacementHistory: input.replacementHistory } : {}),
       ...(input.preCompactTokens !== undefined ? { preCompactTokens: input.preCompactTokens } : {}),
       ...(input.postCompactTokens !== undefined ? { postCompactTokens: input.postCompactTokens } : {}),
       createdAt
@@ -1050,13 +1054,14 @@ export class SqliteStore {
         .get({ $session: event.sessionId }) as { sequence?: number } | null;
       event.sequence = Number(next?.sequence ?? 1);
       db.query(`insert into compaction_boundaries
-        (id, session_id, trigger, through_message_rowid, summary, pre_compact_tokens, post_compact_tokens, created_at)
-        values ($id, $session, $trigger, $through, $summary, $pre, $post, $created)`)
+        (id, session_id, trigger, through_message_rowid, summary, pre_compact_tokens, post_compact_tokens, created_at, replacement_history_json)
+        values ($id, $session, $trigger, $through, $summary, $pre, $post, $created, $history)`)
         .run({
           $id: boundary.id,
           $session: boundary.sessionId,
           $trigger: boundary.trigger,
           $through: boundary.throughMessageRowId,
+          $history: boundary.replacementHistory ? stringifyPersistedJson(boundary.replacementHistory, PERSISTENCE_LIMITS.eventJsonBytes, "compaction history") : null,
           $summary: assertPersistedText(boundary.summary, PERSISTENCE_LIMITS.summaryBytes, "compaction summary"),
           $pre: boundary.preCompactTokens ?? null,
           $post: boundary.postCompactTokens ?? null,
@@ -1189,6 +1194,7 @@ export class SqliteStore {
       db.query("delete from background_jobs where session_id = $session").run({ $session: sessionId });
       db.query("delete from events where session_id = $session").run({ $session: sessionId });
       db.query("delete from compaction_boundaries where session_id = $session").run({ $session: sessionId });
+      db.query("delete from session_plans where session_id = $session").run({ $session: sessionId });
       db.query("update sessions set summary = null, summary_updated_at = null, updated_at = $updated where id = $session")
         .run({ $updated: updated, $session: sessionId });
     })();
@@ -1364,6 +1370,18 @@ export class SqliteStore {
         where session_id = $session and rowid > $after and rowid <= $through
         order by rowid asc limit $limit`)
       .all({ $session: sessionId, $after: afterRowId, $through: throughRowId, $limit: limit }) as Row[];
+    return this.hydrateMessages(rows);
+  }
+
+  listUserMessagesThroughRow(sessionId: string, throughRowId: number, limit = 100): MessageWithParts[] {
+    if (throughRowId <= 0 || limit <= 0) return [];
+    const rows = this.database()
+      .query(`select * from (
+        select rowid as _rowid, * from messages
+        where session_id = $session and role = 'user' and rowid <= $through
+        order by rowid desc limit $limit
+      ) order by _rowid asc`)
+      .all({ $session: sessionId, $through: throughRowId, $limit: limit }) as Row[];
     return this.hydrateMessages(rows);
   }
 
@@ -2264,6 +2282,36 @@ export class SqliteStore {
     }));
   }
 
+  replacePlan(sessionId: string, plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>): Array<{ step: string; status: "pending" | "in_progress" | "completed" }> {
+    this.loadSession(sessionId);
+    if (plan.length > 100 || plan.some((item) => !item.step.trim() || !["pending", "in_progress", "completed"].includes(item.status))) throw new Error("invalid plan");
+    if (plan.filter((item) => item.status === "in_progress").length > 1) throw new Error("plan may have only one in_progress step");
+    if (plan.length === 0) {
+      this.database().query("delete from session_plans where session_id = ?").run(sessionId);
+      return [];
+    }
+    const json = assertPersistedText(JSON.stringify(plan), PERSISTENCE_LIMITS.documentTextBytes, "plan");
+    this.database().query(`insert into session_plans (session_id, plan_json) values (?, ?)
+      on conflict(session_id) do update set plan_json = excluded.plan_json`).run(sessionId, json);
+    return this.loadPlan(sessionId);
+  }
+
+  loadPlan(sessionId: string): Array<{ step: string; status: "pending" | "in_progress" | "completed" }> {
+    const row = this.database().query("select plan_json from session_plans where session_id = ?").get(sessionId) as { plan_json: string } | null;
+    if (!row) return [];
+    try {
+      const plan = JSON.parse(row.plan_json) as unknown;
+      if (!Array.isArray(plan)) return [];
+      return plan.filter((item): item is { step: string; status: "pending" | "in_progress" | "completed" } => Boolean(
+        item && typeof item === "object" && !Array.isArray(item)
+        && typeof (item as { step?: unknown }).step === "string"
+        && ["pending", "in_progress", "completed"].includes(String((item as { status?: unknown }).status))
+      ));
+    } catch {
+      return [];
+    }
+  }
+
   createTodo(item: Omit<TodoItem, "id" | "createdAt" | "updatedAt">): TodoItem {
     const now = nowIso();
     const todo: TodoItem = {
@@ -2778,6 +2826,10 @@ export class SqliteStore {
       );
       create unique index if not exists memory_unique_idx on memory_items(session_id, kind, key);
       create index if not exists memory_session_kind_idx on memory_items(session_id, kind, key);
+      create table if not exists session_plans (
+        session_id text primary key,
+        plan_json text not null
+      );
       create table if not exists todos (
         id text primary key,
         session_id text not null,
@@ -2817,6 +2869,7 @@ export class SqliteStore {
     addColumnIfMissing(db, "sessions", "model", "text");
     addColumnIfMissing(db, "sessions", "email_primary_id", "text");
     addColumnIfMissing(db, "sessions", "email_secondary_id", "text");
+    addColumnIfMissing(db, "compaction_boundaries", "replacement_history_json", "text");
     addColumnIfMissing(db, "sessions", "summary", "text");
     addColumnIfMissing(db, "sessions", "summary_updated_at", "text");
     addColumnIfMissing(db, "sessions", "tool_scope_json", "text");
@@ -3028,6 +3081,7 @@ function compactionBoundaryFromRow(row: Row): CompactionBoundary {
     trigger: row.trigger as CompactionBoundary["trigger"],
     throughMessageRowId: Number(row.through_message_rowid),
     summary: String(row.summary),
+    ...(typeof row.replacement_history_json === "string" ? { replacementHistory: JSON.parse(row.replacement_history_json) as NonNullable<CompactionBoundary["replacementHistory"]> } : {}),
     ...(typeof row.pre_compact_tokens === "number" ? { preCompactTokens: row.pre_compact_tokens } : {}),
     ...(typeof row.post_compact_tokens === "number" ? { postCompactTokens: row.post_compact_tokens } : {}),
     createdAt: String(row.created_at)

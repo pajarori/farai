@@ -2,6 +2,7 @@ import type { BackgroundJob, ToolResult } from "../../types";
 import type { BackendExecResult, BackendSessionResult, BackendSessionStatus, ExecutionBackend, SessionKind } from "../backends/types";
 import { profileFor } from "./session-kinds";
 import { sessionManager, type StartSessionResult } from "./session-manager";
+import { boundOutputTokens } from "./process-output";
 
 function withHint(kind: SessionKind, output: string, ready: boolean): string {
   const hint = profileFor(kind).hint({ ready });
@@ -12,12 +13,12 @@ export function withSessionHint(kind: SessionKind, output: string): string {
   return withHint(kind, output, profileFor(kind).looksReady(output));
 }
 
-export function backgroundToolResult(tool: string, started: StartSessionResult, kind: SessionKind = "generic"): ToolResult {
+export function backgroundToolResult(tool: string, started: StartSessionResult, kind: SessionKind = "generic", maxOutputTokens?: unknown): ToolResult {
   const running = started.session.status === "running";
-  const output = started.output || "(no output yet)";
+  const output = boundOutputTokens(started.output || "(no output yet)", maxOutputTokens);
   const ready = profileFor(kind).looksReady(started.output);
   return {
-    ok: true,
+    ok: running || started.session.exitCode === 0,
     summary: running
       ? `${tool} running in background: processId=${started.sessionId}`
       : `${tool} completed before yield: processId=${started.sessionId} exit=${started.session.exitCode}`,
@@ -55,9 +56,9 @@ export function terminalJobOutput(job: BackgroundJob): string {
   return job.error ?? `background job ${job.status}.`;
 }
 
-export function sessionPollResult(processId: string, result: BackendSessionResult, kind: SessionKind = "generic"): ToolResult {
+export function sessionPollResult(processId: string, result: BackendSessionResult, kind: SessionKind = "generic", maxOutputTokens?: unknown): ToolResult {
   const running = result.session.status === "running";
-  const output = result.output || "(no output yet)";
+  const output = boundOutputTokens(result.output || "(no output yet)", maxOutputTokens);
   const ready = profileFor(kind).looksReady(result.output);
   return {
     ok: result.session.status !== "error",

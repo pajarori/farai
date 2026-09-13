@@ -97,14 +97,18 @@ export async function containerWriteFile(context: ToolContext, path: string, con
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "write");
   const p = resolveContainerPath(path, workspace);
-  await runInContainer(
-    context,
-    `mkdir -p -- "$(dirname ${shQuote(p)})" && base64 -d > ${shQuote(p)} << 'FARAI_FS_B64_EOF'\n${base64Heredoc(content)}\nFARAI_FS_B64_EOF`
-  );
+  const tmp = `${p}.farai-tmp-${context.toolCallId}`;
+  try {
+    await runInContainer(context, `mkdir -p -- "$(dirname ${shQuote(p)})" && base64 -d > ${shQuote(tmp)} << 'FARAI_FS_B64_EOF'\n${base64Heredoc(content)}\nFARAI_FS_B64_EOF\n mv -f -- ${shQuote(tmp)} ${shQuote(p)}`);
+  } finally {
+    try { await runInContainer(context, `rm -f -- ${shQuote(tmp)}`); } catch { /* best effort cleanup */ }
+  }
 }
 
 export async function containerListFilesRecursive(context: ToolContext, path: string, limit: number): Promise<string[]> {
-  const root = resolveContainerPath(path, containerWorkspace(context));
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "read");
+  const root = resolveContainerPath(path, workspace);
   const script = `
 import os
 root = ${JSON.stringify(root)}
@@ -132,7 +136,9 @@ export async function containerGrep(
   include: string | undefined,
   limit: number
 ): Promise<string[]> {
-  const root = resolveContainerPath(path, containerWorkspace(context));
+  const workspace = containerWorkspace(context);
+  assertNotProtectedPath(path, workspace, "read");
+  const root = resolveContainerPath(path, workspace);
   const script = `
 import os, re, base64
 root = ${JSON.stringify(root)}
@@ -176,6 +182,7 @@ export async function containerRemove(context: ToolContext, path: string): Promi
 export async function containerApplySimplePatch(context: ToolContext, patch: string): Promise<string[]> {
   const lines = patch.split(/\r?\n/);
   if (!lines[0]?.startsWith("*** Begin Patch")) throw new Error("patch must start with *** Begin Patch");
+  if (!lines.some((line) => line.startsWith("*** End Patch"))) throw new Error("patch must end with *** End Patch");
   const applied: string[] = [];
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i] ?? "";
@@ -203,18 +210,22 @@ export async function containerApplySimplePatch(context: ToolContext, patch: str
     if (line.startsWith("*** Update File: ")) {
       const rel = line.slice("*** Update File: ".length).trim();
       let current = await containerReadFile(context, rel);
-      const minus: string[] = [];
-      const plus: string[] = [];
+      const oldLines: string[] = [];
+      const newLines: string[] = [];
       while (++i < lines.length && !lines[i]?.startsWith("***")) {
         const next = lines[i] ?? "";
-        if (next.startsWith("-")) minus.push(next.slice(1));
-        if (next.startsWith("+")) plus.push(next.slice(1));
+        if (next.startsWith("-")) { oldLines.push(next.slice(1)); continue; }
+        if (next.startsWith("+")) { newLines.push(next.slice(1)); continue; }
+        if (next.startsWith(" ")) { const value = next.slice(1); oldLines.push(value); newLines.push(value); continue; }
+        if (next.trim()) throw new Error(`invalid update line for ${rel}`);
       }
       i--;
-      const oldText = minus.join("\n");
-      const newText = plus.join("\n");
+      const oldText = oldLines.join("\n");
+      const newText = newLines.join("\n");
       if (!oldText) throw new Error(`update patch for ${rel} has no removal lines`);
-      if (!current.includes(oldText)) throw new Error(`update patch did not match ${rel}`);
+      const first = current.indexOf(oldText);
+      if (first < 0) throw new Error(`update patch did not match ${rel}`);
+      if (current.indexOf(oldText, first + 1) >= 0) throw new Error(`update patch is ambiguous for ${rel}`);
       current = current.replace(oldText, newText);
       await containerWriteFile(context, rel, current);
       applied.push(`M ${rel}`);

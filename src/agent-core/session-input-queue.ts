@@ -10,7 +10,6 @@ type InputQueueEvent = (
   payload: Record<string, unknown>
 ) => void;
 
-/** Owns durable user-input admission and classification on top of the generic mailbox. */
 export class SessionInputQueue {
   private readonly scheduledPromptIds = new Set<string>();
 

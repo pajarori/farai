@@ -26,7 +26,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     prompt: "Perform only the delegated reconnaissance scope. Prefer typed discovery tools, preserve evidence, avoid duplicate probes, and return deduplicated assets with source status and uncertainty.",
     tools: [
       "subdomain_enum", "dns_probe", "port_scan", "nmap_scan", "http_probe", "tls_probe", "url_discover", "web_crawl",
-      "vulnerability_scan", "vulnerability_lookup", "dir_enum", "exploit_search", "kali_tool_search", "shell_exec",
+      "vulnerability_scan", "vulnerability_lookup", "dir_enum", "exploit_search", "kali_tool_search", "exec_command", "write_stdin",
       "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_eval", "browser_network_requests", "browser_network_request",
       "campaign_asset", "campaign_observe", "campaign_hypothesis", "campaign_search", "notes_add", "evidence_save",
       "session_poll", "session_stop", "tool_output_read"
@@ -41,7 +41,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
       "browser_press_key", "browser_wait_for", "browser_tabs", "browser_eval", "browser_network_requests", "browser_network_request",
       "email_list", "email_create", "email_inbox", "email_read", "email_wait",
       "http_request", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup",
-      "dir_enum", "exploit_search", "kali_tool_search", "shell_exec", "campaign_observe",
+      "dir_enum", "exploit_search", "kali_tool_search", "exec_command", "write_stdin", "campaign_observe",
       "campaign_hypothesis", "campaign_test", "notes_add", "evidence_save", "session_poll", "session_stop", "tool_output_read"
     ]
   },
@@ -51,7 +51,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     prompt: "Handle only the delegated code task. Inspect before editing, preserve unrelated changes, make the smallest coherent patch, and return changed files, validation, and residual risk.",
     tools: [
       "fs_list", "fs_grep", "fs_read", "fs_write", "fs_edit", "patch_apply", "git_status", "git_diff",
-      "lsp_inspect", "code_write_script", "shell_exec", "todo_add", "todo_update", "todo_list", "tool_output_read"
+      "lsp_inspect", "code_write_script", "exec_command", "write_stdin", "update_plan", "todo_add", "todo_update", "todo_list", "tool_output_read"
     ]
   },
   {
@@ -60,7 +60,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     prompt: "Independently verify only the delegated claim. Establish a baseline, run the smallest discriminating test, save evidence, and return proven, disproven, or inconclusive with exact reasoning.",
     tools: [
       "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_eval", "browser_network_requests", "browser_network_request",
-      "http_request", "http_probe", "tls_probe", "vulnerability_scan", "vulnerability_lookup", "shell_exec", "campaign_search", "campaign_test", "campaign_verify", "evidence_save",
+      "http_request", "http_probe", "tls_probe", "vulnerability_scan", "vulnerability_lookup", "exec_command", "write_stdin", "campaign_search", "campaign_test", "campaign_verify", "evidence_save",
       "report_add_finding", "report_update_finding", "tool_output_read"
     ]
   }

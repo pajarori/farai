@@ -1,24 +1,22 @@
+import { setTimeout as delay } from "node:timers/promises";
+import { classifyModelRetry, isContextOverflowError, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from "../provider/retry";
 import { takeBytes } from "../../agent-tools/shared/output-bound";
 import type { ConversationEntry, PlannerAction, PlannerInput, PlannerProvider } from "../provider";
 
 const COMPACT_SUMMARY_MAX_BYTES = 48 * 1024;
-const COMPACT_RESERVED_OUTPUT_TOKENS = 20_000;
-const COMPACT_MAX_RETRIES = 3;
-export const AUTO_COMPACT_MAX_FAILURES = 3;
-export const MANUAL_COMPACT_MIN_TOKENS = 2_000;
+const COMPACT_CHECKPOINT_MAX_BYTES = 16 * 1024;
 
-const COMPACT_PROMPT = `Respond with text only. Do not call tools.
+const COMPACT_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
-Create a detailed continuation summary of the conversation. Preserve:
-1. The user's primary requests, explicit instructions, corrections, and all steering messages.
-2. Important technical concepts, architecture, decisions, constraints, and model/provider details.
-3. Files, symbols, commands, edits, and code patterns needed to continue accurately.
-4. Tool outcomes, evidence, findings, credentials, flags, background jobs, and failed attempts.
-5. Errors encountered and how they were fixed.
-6. Open todos, blockers, current work, and the exact next useful action.
-7. Every user message that changes intent or requirements.
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
 
-Return only the final self-contained continuation summary. Do not include private analysis, XML tags, preambles, or commentary about preparing the summary.`;
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+
+export const SUMMARY_PREFIX = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 
 export function compactPrompt(customInstructions?: string): string {
   const extra = customInstructions?.trim();
@@ -26,19 +24,27 @@ export function compactPrompt(customInstructions?: string): string {
 }
 
 export function formatCompactSummary(text: string): string {
-  const taggedSummary = text.match(/<summary>([\s\S]*?)<\/summary>/i)?.[1];
   const withoutAnalysis = text
     .replace(/<analysis>[\s\S]*?<\/analysis>/gi, "")
     .replace(/<analysis>[\s\S]*$/gi, "")
-    .replace(/<\/?summary>/gi, "")
     .trim();
-  const summary = (taggedSummary ?? withoutAnalysis).trim();
-  return takeBytes(summary.replace(/\n{3,}/g, "\n\n"), COMPACT_SUMMARY_MAX_BYTES, "head");
+  const summary = (withoutAnalysis.match(/<summary>([\s\S]*?)<\/summary>/i)?.[1] ?? withoutAnalysis).trim();
+  return summary.replace(/\n{3,}/g, "\n\n");
+}
+
+export function mergeCompactCheckpoint(summary: string, checkpoint: string): string {
+  const retained = takeBytes(checkpoint.trim(), COMPACT_CHECKPOINT_MAX_BYTES, "head");
+  if (!retained) return formatCompactSummary(summary);
+  const separator = "\n\nRetained execution checkpoint:\n";
+  return `${formatCompactSummary(summary)}${separator}${retained}`.trim();
 }
 
 export function compactActionsText(actions: PlannerAction[]): string {
   if (actions.some((action) => action.kind === "tool" || action.kind === "tool_parse_error")) {
     throw new Error("compaction model attempted tool use");
+  }
+  if (actions.some((action) => action.kind === "respond" && (action.truncated || action.recoverable))) {
+    throw new Error("compaction model returned an incomplete summary");
   }
   const text = actions
     .filter((action): action is Extract<PlannerAction, { kind: "respond" }> => action.kind === "respond")
@@ -48,6 +54,7 @@ export function compactActionsText(actions: PlannerAction[]): string {
     throw new Error("compaction model returned incomplete private analysis without a summary");
   }
   const summary = formatCompactSummary(text);
+  if (Buffer.byteLength(summary, "utf8") > COMPACT_SUMMARY_MAX_BYTES) throw new Error("compaction model returned an oversized summary");
   if (!summary || /^planner error:/i.test(summary)) throw new Error("compaction model returned no valid summary");
   return summary;
 }
@@ -58,51 +65,69 @@ export async function runModelCompaction(input: {
   customInstructions?: string;
   signal?: AbortSignal;
 }): Promise<string> {
-  const history = input.plannerInput.history;
-  let current = history;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < COMPACT_MAX_RETRIES; attempt += 1) {
-    const compactInput: PlannerInput = {
-      ...input.plannerInput,
-      userText: "compact",
-      systemInstruction: compactPrompt(input.customInstructions),
-      history: [
-        ...(attempt > 0 ? [{ role: "user" as const, text: "[internal compaction note: earlier conversation was truncated to fit the summary request; this is not a user-authored message]" }] : []),
-        ...current
-      ],
-      toolChoice: "none"
-    };
+  let history = structuredClone(input.plannerInput.history);
+  const prompt = compactPrompt(input.customInstructions);
+  let failedAttempts = 0;
+  while (true) {
+    if (input.signal?.aborted) throw new Error(`compaction cancelled: ${String(input.signal.reason ?? "aborted")}`);
     try {
-      return compactActionsText(await input.planner.plan(compactInput, input.signal ? { signal: input.signal } : undefined));
+      const actions = await input.planner.plan({
+        ...input.plannerInput,
+        userText: prompt,
+        history: [...history, { role: "user", text: prompt }],
+        tools: [],
+        toolCatalog: [],
+        toolChoice: "none"
+      }, input.signal ? { signal: input.signal } : undefined);
+      if (input.signal?.aborted) throw new Error(`compaction cancelled: ${String(input.signal.reason ?? "aborted")}`);
+      return compactActionsText(actions);
     } catch (error) {
-      lastError = error;
-      if (!isPromptTooLong(error) || current.length < 4) throw error;
-      current = dropOldestRound(current);
+      if (input.signal?.aborted) throw new Error(`compaction cancelled: ${String(input.signal.reason ?? "aborted")}`);
+      if (isContextOverflowError(error) && history.length > 0) {
+        history = dropOldestItem(history);
+        failedAttempts = 0;
+        continue;
+      }
+      failedAttempts += 1;
+      if (!classifyModelRetry(error).retryable || failedAttempts >= MODEL_RETRY_MAX_ATTEMPTS) throw error;
+      await delay(modelRetryDelayMs(error, failedAttempts), undefined, input.signal ? { signal: input.signal } : undefined);
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "compaction failed"));
 }
 
-export function estimateTokens(value: unknown): number {
-  return Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(value), "utf8") / 4));
+export function buildCompactedHistory(history: ConversationEntry[], summary: string, maxUserTokens = 20_000): Array<{ role: "user" | "context"; text: string }> {
+  const retained: Array<{ role: "user" | "context"; text: string }> = [];
+  let remaining = Math.max(0, maxUserTokens) * 4;
+  for (const entry of [...history].reverse()) {
+    if (entry.role !== "user" || remaining <= 0) continue;
+    const bytes = Buffer.byteLength(entry.text, "utf8");
+    if (bytes > remaining) {
+      const left = Math.floor(remaining / 2);
+      const removed = Math.ceil((bytes - remaining) / 4);
+      const text = `${takeBytes(entry.text, left, "head")}…${removed} tokens truncated…${takeBytes(entry.text, remaining - left, "tail")}`;
+      retained.push({ role: "user", text });
+      break;
+    }
+    retained.push({ role: "user", text: entry.text });
+    remaining -= bytes;
+  }
+  retained.reverse();
+  retained.push({ role: "context", text: `${SUMMARY_PREFIX}\n${summary}` });
+  return retained;
+}
+
+export function insertCompactionContext(history: ConversationEntry[], text: string): void {
+  let index = history.length - 1;
+  while (index >= 0 && history[index]?.role !== "user") index -= 1;
+  history.splice(index >= 0 ? index : Math.max(0, history.length - 1), 0, { role: "context", text });
 }
 
 export function autoCompactThreshold(contextWindow: number, maxOutputTokens: number): number {
-  const reservedOutput = Math.min(maxOutputTokens, COMPACT_RESERVED_OUTPUT_TOKENS);
-  const effective = Math.max(1, contextWindow - reservedOutput);
-  const safety = Math.min(13_000, Math.max(1, Math.floor(contextWindow * 0.15)));
-  return Math.max(1, effective - safety);
+  return Math.max(1, Math.min(Math.floor(contextWindow * 0.9), contextWindow - maxOutputTokens));
 }
 
-function isPromptTooLong(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /prompt.*too long|context.*(length|window|limit)|too many tokens/i.test(message);
-}
-
-function dropOldestRound(history: ConversationEntry[]): ConversationEntry[] {
-  let index = history.findIndex((entry, current) => current > 0 && entry.role === "user");
-  if (index <= 0) index = Math.max(1, Math.floor(history.length * 0.2));
-  const next = history.slice(index);
-  while (next[0]?.role === "tool") next.shift();
-  return next.length > 0 ? next : history.slice(-1);
+function dropOldestItem(history: ConversationEntry[]): ConversationEntry[] {
+  let index = 1;
+  while (history[index]?.role === "tool") index += 1;
+  return history.slice(index);
 }

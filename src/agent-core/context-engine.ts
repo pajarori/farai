@@ -4,7 +4,7 @@ import type { CampaignRun, FileStateStore, Session, ToolDefinition } from "../ty
 import { canonicalToolName } from "../tool-names";
 import { renderSkillCatalog } from "../agent-skills/registry";
 import { activeBackgroundJobs } from "./loop/background";
-import { autoCompactThreshold } from "./loop/compaction";
+import { autoCompactThreshold, buildCompactedHistory } from "./loop/compaction";
 import { buildToolsPayload, estimateProviderMessagesTokens, toProviderMessages, type ConversationEntry } from "./provider";
 import type { ProviderToolDef } from "./provider/protocol";
 import { buildSystemPrompt } from "./provider/system-prompt";
@@ -88,6 +88,8 @@ export type ContextRequest = {
   maxInputTokens?: number;
   toolsEnabled?: boolean;
   fullHistory?: boolean;
+  historyOverride?: ConversationEntry[];
+  throughMessageRowId?: number;
 };
 
 export class ContextEngine {
@@ -100,8 +102,13 @@ export class ContextEngine {
   }
 
   assemble(input: ContextRequest): ContextProjection {
-    const messages = this.store.listContextMessages(input.session.id, 100_000);
-    const query = input.userText?.trim() || latestUserText(messages) || "";
+    const messages = input.throughMessageRowId === undefined
+      ? this.store.listContextMessages(input.session.id, 100_000)
+      : this.store.listMessagesBetweenRows(input.session.id, this.store.latestCompactionBoundary(input.session.id)?.throughMessageRowId ?? 0, input.throughMessageRowId, Number.MAX_SAFE_INTEGER);
+    const automaticBudget = autoCompactThreshold(input.contextWindow, input.maxOutputTokens);
+    const requestBudget = input.maxInputTokens ? Math.min(automaticBudget, input.maxInputTokens) : automaticBudget;
+    const retainedHistory = this.retainedCompactionHistory(input.session.id);
+    const query = input.userText?.trim() || latestUserText(messages) || latestUserEntryText(retainedHistory) || "";
     const knowledgeQuery = retrievalQuery(messages, input.userText);
     const activeJobs = activeBackgroundJobs(this.store.listToolCalls(input.session.id, 200));
     const hasOutputArtifacts = this.store.listToolCalls(input.session.id, 100).some((call) => Boolean(call.outputArtifactId));
@@ -116,12 +123,12 @@ export class ContextEngine {
     const selectedToolCatalog = buildToolsPayload(capabilities.direct.map((tool) => tool.name), input.availableTools, { userText: query, maxDetailedTools: 2 });
     const toolCatalog = mergeProviderToolCatalog(input.advertisedTools, selectedToolCatalog, input.availableTools);
     const directToolNames = toolCatalog.map((tool) => tool.name);
-    const automaticBudget = autoCompactThreshold(input.contextWindow, input.maxOutputTokens);
-    const requestBudget = input.maxInputTokens ? Math.min(automaticBudget, input.maxInputTokens) : automaticBudget;
     const history = projectConversationHistory(messages, {
       fullToolResultMaxBytes: 8 * 1024,
       full: true
     });
+    history.entries = input.historyOverride ?? [...retainedHistory, ...history.entries];
+    history.estimatedTokens = estimateProviderMessagesTokens(toProviderMessages(history.entries));
     if (input.userText?.trim() && !historyHasLatestUserText(history.entries, input.userText.trim())) {
       history.entries.push({ role: "user", text: input.userText.trim() });
       history.estimatedTokens = estimateProviderMessagesTokens(toProviderMessages(history.entries));
@@ -183,6 +190,17 @@ export class ContextEngine {
 
   inspect(input: ContextRequest): ContextManifest {
     return this.assemble(input).manifest;
+  }
+
+  private retainedCompactionHistory(sessionId: string): ConversationEntry[] {
+    const boundary = this.store.latestCompactionBoundary(sessionId);
+    if (boundary?.replacementHistory) return boundary.replacementHistory;
+    const summary = boundary?.summary ?? this.store.loadSession(sessionId).summary;
+    if (!summary) return [];
+    const messages = boundary
+      ? this.store.listUserMessagesThroughRow(sessionId, boundary.throughMessageRowId, Number.MAX_SAFE_INTEGER)
+      : [];
+    return buildCompactedHistory(projectConversationHistory(messages, { full: true }).entries, summary);
   }
 
   private knowledgeBlock(sessionId: string, query: string): string | undefined {
@@ -258,7 +276,7 @@ export class ContextEngine {
       title: "Kali Capability Inventory",
       source: "Farai curated image manifest",
       content: [
-        "The curated Kali command map is preloaded here so exact available commands can be selected and called directly with shell_exec. The managed image installs only the manifest-selected packages and Farai runtime extras, records its actual PATH inventory at build time, and is rejected when its capability contract is stale or incomplete. Do not run which, command -v, or kali_tool_search before a manifest-listed command. Prefer a purpose-built Farai tool when it covers the workflow. kali_tool_search is only a recovery path after an unexpected exit 127, runtime package changes, or genuine command ambiguity. Capabilities absent from this map are not part of the default image; choose an available alternative instead of assuming the full Kali distribution is installed.",
+        "The curated Kali command map is preloaded here so exact available commands can be selected and called directly with exec_command. The managed image installs only the manifest-selected packages and Farai runtime extras, records its actual PATH inventory at build time, and is rejected when its capability contract is stale or incomplete. Do not run which, command -v, or kali_tool_search before a manifest-listed command. Prefer a purpose-built Farai tool when it covers the workflow. kali_tool_search is only a recovery path after an unexpected exit 127, runtime package changes, or genuine command ambiguity. Capabilities absent from this map are not part of the default image; choose an available alternative instead of assuming the full Kali distribution is installed.",
         renderKaliCommandCatalog()
       ].join("\n\n"),
       mandatory: true,
@@ -442,7 +460,7 @@ function estimateRequestTokens(session: Session, candidates: ContextCandidate[],
   const contextBlocks = candidates
     .filter((item) => item.stable)
     .map((item) => ({ id: item.id, title: item.title, body: item.content, stable: true }));
-  const system = buildSystemPrompt({ session, ...(session.summary ? { compactedSummary: session.summary } : {}), contextBlocks, ...(systemInstruction ? { systemInstruction } : {}) });
+  const system = buildSystemPrompt({ session, contextBlocks, ...(systemInstruction ? { systemInstruction } : {}) });
   const volatileContext = renderVolatileContext(candidates.filter((item) => !item.stable));
   const messages = toProviderMessages([
     ...history,
@@ -453,7 +471,7 @@ function estimateRequestTokens(session: Session, candidates: ContextCandidate[],
 
 function breakdownFor(session: Session, candidates: ContextCandidate[], history: HistoryProjection, tools: ProviderToolDef[], systemInstruction?: string): Record<string, number> {
   const breakdown: Record<string, number> = {};
-  const emptySystem = buildSystemPrompt({ session, ...(session.summary ? { compactedSummary: session.summary } : {}), ...(systemInstruction ? { systemInstruction } : {}) });
+  const emptySystem = buildSystemPrompt({ session, ...(systemInstruction ? { systemInstruction } : {}) });
   breakdown.kernel = textTokens(emptySystem);
   for (const item of candidates) breakdown[item.class] = (breakdown[item.class] ?? 0) + item.estimatedTokens;
   breakdown.history = history.estimatedTokens;
@@ -659,6 +677,14 @@ function historyHasLatestUserText(history: ConversationEntry[], text: string): b
 
 function latestUserText(messages: ReturnType<SqliteStore["listContextMessages"]>): string | undefined {
   return latestRoleText(messages, "user");
+}
+
+function latestUserEntryText(entries: ConversationEntry[]): string | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role === "user" && entry.text.trim()) return entry.text;
+  }
+  return undefined;
 }
 
 function latestRoleText(messages: ReturnType<SqliteStore["listContextMessages"]>, role: "user" | "assistant"): string | undefined {

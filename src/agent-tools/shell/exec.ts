@@ -122,7 +122,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
 
-function upstreamTlsVerificationFailed(output: string): boolean {
+export function upstreamTlsVerificationFailed(output: string): boolean {
   const normalized = output.toLowerCase();
   return normalized.includes("x-farai-proxy-error: upstream-tls-verification-failed")
     || normalized.includes("farai proxy: upstream tls verification failed");

@@ -147,6 +147,7 @@ export type BenchmarkResult = {
       antiCheatApplied: boolean;
       cleaned: boolean;
       targetState?: { running: boolean; exitCode: number };
+      agentState?: { running: boolean; exitCode: number };
       errors: string[];
     };
   };

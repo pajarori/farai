@@ -253,7 +253,7 @@ print(json.dumps({
     "query": query,
     "inventoryCount": len(catalog),
     "matches": matches,
-    "guidance": "prefer a typed Farai capability when one exists; otherwise inspect the selected command's local man page or --help once, then execute it with shell_exec using machine-readable output and bounded scope"
+    "guidance": "prefer a typed Farai capability when one exists; otherwise inspect the selected command's local man page or --help once, then execute it with exec_command using machine-readable output and bounded scope"
 }, ensure_ascii=True, separators=(",", ":")))
 `;
 

@@ -15,7 +15,6 @@ const TRUNCATED_ENTRY_MARKER = "\n...[history entry truncated to fit the active 
 
 export function projectConversationHistory(messages: MessageWithParts[], options: {
   maxTokens?: number;
-  /** @deprecated Canonical tool results no longer change shape based on recency. */
   recentFullToolResults?: number;
   fullToolResultMaxBytes?: number;
   full?: boolean;

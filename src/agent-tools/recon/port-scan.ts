@@ -211,7 +211,7 @@ const portScanSchema = {
 
 export const portScanTool: ToolDefinition = {
   name: "port_scan",
-  description: "Discover open TCP ports with ProjectDiscovery naabu, then enrich only the discovered ports with targeted Nmap service detection by default. mode=fast returns verified naabu results without Nmap, mode=service is the bounded default, and mode=deep runs Nmap directly. Use explicit ports for focused checks and shell_exec for UDP, custom NSE, evasion, or specialized Nmap workflows.",
+  description: "Discover open TCP ports with ProjectDiscovery naabu, then enrich only the discovered ports with targeted Nmap service detection by default. mode=fast returns verified naabu results without Nmap, mode=service is the bounded default, and mode=deep runs Nmap directly. Use explicit ports for focused checks and exec_command for UDP, custom NSE, evasion, or specialized Nmap workflows.",
   inputSchema: portScanSchema,
   mutates: false,
   timeoutMs: 900_000,
@@ -224,7 +224,7 @@ export const portScanTool: ToolDefinition = {
 
 export const nmapScanTool: ToolDefinition = {
   name: "nmap_scan",
-  description: "Run an explicit Nmap TCP scan with optional service/version detection and an optional bounded port list. This compatibility tool always uses direct Nmap; prefer port_scan for faster naabu discovery followed by targeted service enrichment, and use shell_exec for UDP or custom NSE workflows.",
+  description: "Run an explicit Nmap TCP scan with optional service/version detection and an optional bounded port list. This compatibility tool always uses direct Nmap; prefer port_scan for faster naabu discovery followed by targeted service enrichment, and use exec_command for UDP or custom NSE workflows.",
   inputSchema: {
     type: "object",
     required: ["target"],

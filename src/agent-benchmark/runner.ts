@@ -3,11 +3,12 @@ import { arch, platform, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AgentRuntime } from "../agent-core/runtime";
+import { KaliContainerBackend } from "../agent-container/kali";
 import { ensurePrivateDirectory } from "../agent-core/private-path";
 import { buildSystemPrompt } from "../agent-core/provider/system-prompt";
 import { buildToolsPayload, createChatProviderForSession, type PlannerProvider } from "../agent-core/provider";
 import type { ChatProvider } from "../agent-core/provider/protocol";
-import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT, containerNameForSession } from "../agent-container/kali";
+import { DEFAULT_KALI_IMAGE, KALI_IMAGE_CONTRACT } from "../agent-container/kali";
 import { KALI_TOOL_MANIFEST_PATH } from "../agent-container/kali-tool-manifest";
 import { HostProcessBackend } from "../agent-tools/backends/host-process";
 import { runCapturedProcess } from "../agent-tools/backends/captured-process";
@@ -75,7 +76,17 @@ export async function runBenchmark(input: BenchmarkManifest, options: BenchmarkR
       enableMcp: manifest.isolation.mcp,
       enableProjectInstructions: false,
       registerSessionCatalog: false,
-      ...(executionBackend ? { executionBackend } : {})
+      ...(executionBackend ? { executionBackend } : {}),
+      ...(dockerState ? {
+        containerBackendFactory: (containerWorkspace: string, rootSessionId: string, timeoutMs?: number) => new KaliContainerBackend({
+          workspace: containerWorkspace,
+          rootWorkspace: workspace,
+          rootSessionId,
+          containerName: dockerState!.agentContainer,
+          image: dockerState!.agentImageId,
+          ...(timeoutMs ? { timeoutMs } : {})
+        })
+      } : {})
     });
     const startedAt = new Date().toISOString();
     const started = Date.now();
@@ -90,8 +101,6 @@ export async function runBenchmark(input: BenchmarkManifest, options: BenchmarkR
     if (dockerLifecycle) {
       chmodSync(workspace, 0o755);
       chmodSync(join(workspace, ".farai"), 0o755);
-      await runtime.startContainer(session.id);
-      await dockerLifecycle.connectAgent(containerNameForSession(session.id));
     }
     if (manifest.isolation.mcp) {
       await runtime.refreshMcp(session, { force: true, background: false }).catch(() => undefined);
@@ -601,7 +610,7 @@ function activitySummary(toolCalls: ToolCallRecord[], events: SessionEvent[], jo
   return {
     modelRequests: events.filter((event) => event.type === "planner_attempt").length,
     toolCalls: toolCalls.length,
-    commands: toolCalls.filter((call) => call.tool === "shell_exec").length,
+    commands: toolCalls.filter((call) => call.tool === "exec_command" || call.tool === "shell_exec").length,
     toolErrors: toolCalls.filter((call) => call.status === "error").length,
     plannerErrors: events.filter((event) => event.type === "planner_error").length,
     loopSupervisions: events.filter((event) => event.type === "loop_supervision").length,

@@ -134,15 +134,31 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
   },
   code_write_script: {
     filename: "filename beneath the workspace helpers directory, not an absolute host path",
-    content: "complete script content; keep it valid source text and execute it later with shell_exec when needed"
+    content: "complete script content; keep it valid source text and execute it later with exec_command when needed"
+  },
+  exec_command: {
+    cmd: "command executed inside the managed Kali workspace; use purpose-built recon, browser, web, or proxy tools when they provide stronger semantics",
+    workdir: "workspace-relative or container-absolute working directory for this command",
+    yield_time_ms: "milliseconds to wait for initial output before returning a process id",
+    max_output_tokens: "positive output budget for this response",
+    network: "direct leaves shell traffic uncaptured; proxy injects Farai's managed HTTP(S) proxy variables and records eligible traffic"
+  },
+  write_stdin: {
+    session_id: "process id returned by exec_command; never use a child-agent session id",
+    chars: "optional stdin bytes for an interactive process; omit to poll without writing",
+    yield_time_ms: "milliseconds to wait for new output before returning",
+    max_output_tokens: "positive output budget for this poll response"
+  },
+  update_plan: {
+    plan: "complete ordered replacement plan with at most one in_progress step"
   },
   shell_exec: {
-    command: "command executed inside the managed Kali container; use purpose-built recon, browser, web, or proxy tools when they provide stronger semantics",
+    command: "legacy command adapter; prefer exec_command for new work",
     background: "return immediately with a job id for listeners, servers, interactive shells, or commands expected to exceed the turn",
     network: "direct leaves shell traffic uncaptured; proxy injects Farai's managed HTTP(S) proxy variables and records eligible traffic"
   },
   session_poll: {
-    jobId: "job id returned by shell_exec, callback, or another background tool",
+    jobId: "job id returned by a legacy background tool, callback, or another background operation",
     processId: "legacy process id returned by an older background command; do not use a child agent sessionId here",
     input: "stdin sent to an interactive process only; omit for a read-only poll"
   },
@@ -333,10 +349,13 @@ const ENUM_HINTS: Record<string, Record<string, string>> = {
 };
 
 const EXACT_GUIDANCE: Record<string, string> = {
-  shell_exec: "use for a real command in the managed Kali container when no purpose-built tool models the task. background listeners, servers, and interactive commands, then poll the returned job with session_poll. choose network=proxy only when shell HTTP traffic must be captured; direct is deliberate bypass.",
+  exec_command: "run a real command in the managed Kali workspace when no purpose-built tool models the task. use write_stdin with the returned process id for listeners, servers, and interactive commands. choose network=proxy only when shell HTTP traffic must be captured; direct is deliberate bypass.",
+  write_stdin: "poll only a process id returned by exec_command. pass chars only to an interactive process waiting for stdin; do not start another command or use a child-agent session id.",
+  update_plan: "replace the complete ordered execution plan. keep at most one step in_progress and mark steps completed only after verification.",
+  shell_exec: "legacy compatibility adapter for recorded prompts and custom scopes. prefer exec_command and write_stdin for new work.",
   session_poll: "poll only an id returned by a background tool. pass input only to an interactive process waiting for stdin; do not start another command or use a child session id.",
   session_stop: "stop one background job or legacy process by its returned id. use agent_interrupt or agent_close for child agents.",
-  port_scan: "use for TCP discovery with naabu followed by bounded Nmap enrichment. use explicit ports for focused checks; use shell_exec for UDP, custom NSE, or specialized scan behavior.",
+  port_scan: "use for TCP discovery with naabu followed by bounded Nmap enrichment. use explicit ports for focused checks; use exec_command for UDP, custom NSE, or specialized scan behavior.",
   nmap_scan: "run an explicit TCP Nmap scan for compatibility or a focused service check. prefer port_scan for normal discovery and enrichment.",
   subdomain_enum: "perform passive subdomain discovery from independent certificate, DNS, and archive sources. validate returned names with dns_probe or http_probe before testing them.",
   dns_probe: "resolve discovered names and inspect selected DNS records with wildcard filtering. this validates candidates; it is not a passive discovery source.",
@@ -347,7 +366,7 @@ const EXACT_GUIDANCE: Record<string, string> = {
   vulnerability_scan: "run the pinned local Nuclei templates against authorized targets. treat matches as candidate evidence, not verified findings; enable oast only for an intentional callback test.",
   vulnerability_lookup: "query ProjectDiscovery vulnerability intelligence by ids or filters. it informs prioritization and does not prove that a target is vulnerable.",
   http_request: "send one exact request when method, headers, body, redirects, path spelling, or HTTP version matters. use internet_fetch for reading public pages and browser tools for cookies or forms.",
-  dir_enum: "run bounded ffuf content discovery against a URL containing FUZZ. use shell_exec for custom matchers, recursion, or multiple injection points.",
+  dir_enum: "run bounded ffuf content discovery against a URL containing FUZZ. use exec_command for custom matchers, recursion, or multiple injection points.",
   exploit_search: "search the local offline Exploit-DB index. a matching title is not proof that an exploit applies or is safe to run.",
   fs_read: "read one workspace file, bounded PDF pages, or one directory level. use fs_list for recursive discovery and fs_grep for content search.",
   fs_list: "discover workspace paths recursively while excluding Farai state and dependency trees. use fs_read for the selected file.",
@@ -374,7 +393,7 @@ const EXACT_GUIDANCE: Record<string, string> = {
   cvss_calculate: "validate and score one complete CVSS:3.1 base vector using metric abbreviations AV, AC, PR, UI, S, C, I, A; the returned score and severity are authoritative.",
   report_add_finding: "persist a candidate finding after evidence exists. calculate CVSS first when uncertain; severity is derived from the vector and is not independently guessed.",
   report_update_finding: "update exactly one existing finding instead of duplicating it or changing the old record to not_applicable. changing CVSS requires evidence supporting the new metric.",
-  code_write_script: "write a reusable helper beneath the workspace helpers directory. use fs_write for other files and shell_exec for one-off commands.",
+  code_write_script: "write a reusable helper beneath the workspace helpers directory. use fs_write for other files and exec_command for one-off commands.",
   callback_host_info: "inspect host interfaces before choosing a reverse-shell LHOST because the Kali container and host VPN use different network namespaces.",
   callback_listen: "start a host-side TCP listener for an authorized callback, then poll it and stop it with the returned service name or job id.",
   callback_oast: "start an Interactsh out-of-band session for an authorized blind interaction test, trigger the target, then poll the returned job.",

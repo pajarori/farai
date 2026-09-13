@@ -18,7 +18,6 @@ type DispatcherDependencies = {
   isStoreOpen: () => boolean;
 };
 
-/** Serializes durable mailbox delivery without leaking queue policy into AgentRuntime. */
 export class SessionMailboxDispatcher {
   private readonly completionWakes = new Map<string, Promise<void>>();
   private readonly inputWakes = new Map<string, Promise<void>>();

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, CampaignRun, Message, MessageWithParts, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
+import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, CampaignRun, Message, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/registry";
 import { formatMcpInventory, getMcpPrompt, getMcpPromptDescriptor, listMcpServerStatuses, probeMcpServer as probeMcpServerConfig, renderMcpPromptResult, renderMcpServerInstructionContext, requestMcpFormElicitation, startMcpServer, stopMcpServer, stopMcpToolsForSession, type McpRefreshInput, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
@@ -27,10 +27,10 @@ import { resolveContextWindow, resolveMaxOutputTokens, resolveMaxSteps, resolveM
 import { defaultModelSelection } from "./model-catalog";
 import { sessionManager } from "../agent-tools/shared/session-manager";
 import { oastEvidenceForSession, parseOastEvents } from "../agent-tools/callback/oast-parser";
-import { activeBackgroundJobs, processIdFromArgs, renderBackgroundJobs, stableValue, type ActiveBackgroundJob } from "./loop/background";
+import { activeBackgroundJobs, processIdFromArgs, stableValue, type ActiveBackgroundJob } from "./loop/background";
 import { DEFAULT_SESSION_TITLE, isDefaultSessionTitle, sessionDisplayName, titleFromPrompt, titleFromModelText, SESSION_TITLE_PROMPT } from "../session-title";
-import { nonEmpty } from "./loop/history";
-import { AUTO_COMPACT_MAX_FAILURES, MANUAL_COMPACT_MIN_TOKENS, autoCompactThreshold, estimateTokens, runModelCompaction } from "./loop/compaction";
+import { insertCompactionContext } from "./loop/compaction";
+import { compactSessionHistory, type CompactionOptions } from "./compaction-service";
 import { loadHooks, runHooks, type HookRunner } from "./hooks/host";
 import type { HookDefinition, HookEvent } from "./hooks/types";
 import { callMcpServerTool } from "./../agent-tools/mcp-manager";
@@ -51,7 +51,7 @@ import { canonicalToolName } from "../tool-names";
 import { LspManager } from "../agent-lsp";
 import { BACKGROUND_MAILBOX_BATCH_SIZE, backgroundCompletionArtifact, renderMailboxItems } from "./mailbox-render";
 import { browserObservationSignature } from "../agent-tools/browser/observation";
-import { classifyModelRetry, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from "./provider/retry";
+import { classifyModelRetry, isContextOverflowError, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from "./provider/retry";
 import { isInternalMetaReasoning, isReasoningDuplicate, isReasoningPrefix, mergeReasoningText, normalizeReasoningSummary, sanitizeVisibleResponse, separateEmbeddedReasoning, stripReasoningEcho } from "./reasoning-summary";
 import { KnowledgeStore } from "../agent-knowledge/store";
 import { knowledgeDbPath } from "../agent-knowledge/paths";
@@ -89,7 +89,6 @@ const LOOP_SUPERVISION_NO_PROGRESS_STEPS = 12;
 const LOOP_SUPERVISION_STEER_INTERVAL = 5;
 const LOOP_PATTERN_MAX_PERIOD = 8;
 const PROGRESS_ACTION_TOOLS = new Set(["http_request", "subdomain_enum", "dns_probe", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "dir_enum", "port_scan", "nmap_scan", "fs_edit", "fs_write", "patch_apply", "code_write_script", "campaign_verify", "campaign_test", "callback_oast", "exploit_search"]);
-const AUTO_COMPACTION_CONTINUATION = "[internal continuation after context compaction: Continue the active user task from the compacted prior context. Do not repeat, regenerate, or explain the summary. Resume with the exact next useful action.]";
 const WRAPUP_MODEL_TIMEOUT_MS = 15_000;
 const WRAPUP_CONTINUATION_ATTEMPTS = 3;
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 2_000;
@@ -145,7 +144,7 @@ const INTERNAL_META_STREAM_PREFIXES = [
 
 type ToolPlannerAction = Extract<PlannerAction, { kind: "tool" }>;
 type ToolActionOutcome = { shouldContinue: boolean; resetAutoContinue?: boolean; cancelled?: boolean };
-type StepControl = { cancelled?: boolean; timedOut?: boolean; empty?: boolean; shouldContinue: boolean };
+type StepControl = { contextOverflow?: boolean; cancelled?: boolean; timedOut?: boolean; empty?: boolean; shouldContinue: boolean };
 type ProviderSlot = { contextMessage: Message; assistantMessage: Message };
 type ProviderCatalogPayload = { key: string; tools: ProviderToolDef[] };
 type StreamingPartsState = {
@@ -206,13 +205,6 @@ function continuationText(previous: string, next: string): string {
   if (/^[\p{L}\p{N}]/u.test(next) && /[\p{L}\p{N},;:!?)]$/u.test(previous)) return `${previous} ${next}`;
   if (/^[.,;:!?)]/u.test(next) || /[(/\[{\-–—/]$/u.test(previous)) return `${previous}${next}`;
   return `${previous}${next}`;
-}
-
-class IneffectiveCompactionError extends Error {
-  constructor(readonly preTokens: number, readonly postTokens: number) {
-    super(`compaction did not reduce active context: ${preTokens} -> ${postTokens} estimated tokens`);
-    this.name = "IneffectiveCompactionError";
-  }
 }
 
 class ModelCallDeadlineError extends Error {
@@ -278,7 +270,6 @@ export class AgentRuntime {
   private readonly firedSessionStart = new Set<string>();
   private readonly pendingHookContext = new Map<string, string[]>();
   private readonly resourceSessionIds = new Set<string>();
-  private readonly autoCompactFailures = new Map<string, number>();
   private readonly compactionControllers = new Map<string, AbortController>();
   private readonly runtimeId = id();
   private readonly campaignSupervisor: CampaignSupervisor;
@@ -1029,7 +1020,9 @@ export class AgentRuntime {
         }
       }
     }
-    return undefined;
+    const initialContext = this.store.latestCompactionBoundary(sessionId)?.replacementHistory
+      ?.slice(0, -1).reverse().find((entry) => entry.role === "context");
+    return initialContext ? createHash("sha256").update(initialContext.text.trim()).digest("hex") : undefined;
   }
 
   private drainPendingUserInput(session: Session, turn: Turn): ProviderSlot | undefined {
@@ -1288,7 +1281,6 @@ export class AgentRuntime {
     this.pendingSteeringContext.delete(sessionId);
     this.pendingHookContext.delete(sessionId);
     this.firedSessionStart.delete(sessionId);
-    this.autoCompactFailures.delete(sessionId);
     this.fileState.clear(sessionId);
     for (const turn of this.store.listTurns(sessionId, 1000)) {
       this.deleteStreamingParts(turn.id);
@@ -1482,7 +1474,7 @@ export class AgentRuntime {
             ? []
             : this.mailbox.claim(current.id, "context", BACKGROUND_MAILBOX_BATCH_SIZE);
           try {
-            const result = await this.runPrompt(current, input, { mailboxItems: completionItems });
+            const result = await this.runPrompt(current, input, { mailboxItems: completionItems, ...(options.signal ? { signal: options.signal } : {}) });
             this.mailbox.consume([claimed]);
             this.mailbox.consume(completionItems);
             for (const completion of completionItems) {
@@ -1510,7 +1502,7 @@ export class AgentRuntime {
   private async runPrompt(
     session: Session,
     input: string,
-    options: { source?: "user" | "background"; mailboxItems?: SessionMailboxItem[] } = {}
+    options: { source?: "user" | "background"; mailboxItems?: SessionMailboxItem[]; signal?: AbortSignal } = {}
   ): Promise<AgentPromptResult> {
     session = this.store.loadSession(session.id);
     const source = options.source ?? "user";
@@ -1582,7 +1574,7 @@ export class AgentRuntime {
       this.persistTextPart(session.id, turn.id, assistantMessage.id, response);
       this.stopTurn(turn, "completed", "final_response");
     } else {
-      response = await this.runAgentLoop(session, turn, contextMessage, assistantMessage, input, source === "user", options.mailboxItems);
+      response = await this.runAgentLoop(session, turn, contextMessage, assistantMessage, input, source === "user", options.mailboxItems, options.signal);
       const settledRun = activeCampaignRun ?? this.campaignSupervisor.activeRunForSession(session.id);
       const persistedRun = this.store.loadSession(session.id).campaignRunId;
       const runToSettle = settledRun ?? (persistedRun ? this.store.loadCampaignRun(persistedRun) : undefined);
@@ -1643,7 +1635,8 @@ export class AgentRuntime {
     assistantMessage: Message,
     input: string | undefined,
     userAuthored = true,
-    mailboxItems: SessionMailboxItem[] = []
+    mailboxItems: SessionMailboxItem[] = [],
+    externalSignal?: AbortSignal
   ): Promise<string> {
     const responses: string[] = [];
     let planner: PlannerProvider;
@@ -1662,18 +1655,27 @@ export class AgentRuntime {
 
     let autoContinueStreak = 0;
     let resumeAfterCompaction = false;
+    let forceCompaction = false;
+    let recoveredOverflow = false;
     const maxSteps = this.maxSteps;
     const maxTurnMs = this.maxTurnMs;
     const loopStartedAt = Date.now();
     let timeBudgetWarned = false;
     let loopError: string | undefined;
+    const cancelFromCaller = () => { if (this.store.loadTurn(turn.id).status === "running") this.cancelTurn(turn.id, "cancelled by caller"); };
+    externalSignal?.addEventListener("abort", cancelFromCaller, { once: true });
     let lastProgress = this.progressSnapshot(session.id, turn.id);
     let stepsSinceProgress = 0;
     let lastSteerStep = Number.NEGATIVE_INFINITY;
     let loopSupervisionWarnings = 0;
     let lastProviderContextHash = this.latestProviderContextHash(session.id);
     try {
+    if (externalSignal?.aborted) throw externalSignal.reason ?? new Error("prompt cancelled");
     for (let step = 0; ; step++) {
+      if (externalSignal?.aborted) {
+        this.cancelTurn(turn.id, "cancelled by caller");
+        return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
+      }
       let providerSlotReady = step === 0;
       const current = this.store.loadTurn(turn.id);
       if (current.status === "cancelled") {
@@ -1701,9 +1703,10 @@ export class AgentRuntime {
         responses.push(...await this.forceStepLimitWrapUp(session, turn, assistantMessage, planner, maxSteps));
         break;
       }
-      const compactResult = await this.maybeAutoCompact(session, planner);
-      if (compactResult.status === "ineffective") {
-        const text = `Auto-compaction did not reduce active context (${compactResult.preTokens} -> ${compactResult.postTokens} estimated tokens); no provider request was sent.`;
+      const compactResult = await this.maybeAutoCompact(session, planner, forceCompaction);
+      forceCompaction = false;
+      if (compactResult.status === "failed") {
+        const text = `Auto-compaction failed: ${compactResult.error}`;
         this.event(session.id, "planner_error", { turnId: turn.id, planner: planner.name, error: text, recoverable: false });
         if (userAuthored) {
           responses.push(text);
@@ -1718,7 +1721,7 @@ export class AgentRuntime {
         session = this.store.loadSession(session.id);
         ({ contextMessage, assistantMessage } = this.createProviderSlot(session, turn));
         providerSlotReady = true;
-        lastProviderContextHash = undefined;
+        lastProviderContextHash = this.latestProviderContextHash(session.id);
       }
       await this.refreshMcp(session).catch((error) => {
         this.event(session.id, "planner_error", {
@@ -1806,11 +1809,11 @@ export class AgentRuntime {
       }
       const capturedContext = this.captureProviderContext(session, turn, contextMessage, context.volatileContext, lastProviderContextHash);
       if (capturedContext) lastProviderContextHash = capturedContext.hash;
-      const history = [
-        ...context.history,
-        ...(capturedContext ? [{ role: "context" as const, text: capturedContext.text }] : []),
-        ...(resumeAfterCompaction ? [{ role: "user" as const, text: AUTO_COMPACTION_CONTINUATION }] : [])
-      ];
+      const history = [...context.history];
+      if (capturedContext) {
+        if (resumeAfterCompaction) insertCompactionContext(history, capturedContext.text);
+        else history.push({ role: "context", text: capturedContext.text });
+      }
       const plannerInput: PlannerInput = {
         session,
         ...(step === 0 && input && userAuthored && !resumeAfterCompaction ? { userText: input } : {}),
@@ -1829,6 +1832,13 @@ export class AgentRuntime {
       const control = chatProvider
         ? await this.streamStep(chatProvider, plannerInput, session, turn, assistantMessage, planner.name, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs)
         : await this.batchStep(planner, plannerInput, session, turn, assistantMessage, step, context.manifest, responses, autoContinue, userAuthored, remainingTurnMs);
+      if (control.contextOverflow) {
+        if (recoveredOverflow) throw new Error("provider context limit still exceeded after compaction");
+        recoveredOverflow = true;
+        forceCompaction = true;
+        continue;
+      }
+      recoveredOverflow = false;
       autoContinueStreak = autoContinue.streak;
       if (control.cancelled) return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
       if (control.timedOut) {
@@ -1871,6 +1881,7 @@ export class AgentRuntime {
       } catch {  }
       this.event(session.id, "error", { turnId: turn.id, error: loopError });
     } finally {
+      externalSignal?.removeEventListener("abort", cancelFromCaller);
       const finalTurn = this.store.loadTurn(turn.id);
       if (finalTurn.status === "running") {
         this.stopTurn(turn, "failed", "planner_error", loopError ?? "agent loop ended without a terminal state");
@@ -1950,6 +1961,7 @@ export class AgentRuntime {
       actions = suppressReasoningEchoActions(await this.planWithRetry(planner, plannerInput, session, turn, assistantMessage, context, modelTimeoutMs, !userAuthored));
     } catch (error) {
       if (error instanceof ModelCallDeadlineError) return { timedOut: true, shouldContinue: false };
+      if (isContextOverflowError(error)) return { contextOverflow: true, shouldContinue: true };
       throw error;
     }
     if (this.store.loadTurn(turn.id).status === "cancelled") return { cancelled: true, shouldContinue: false };
@@ -2129,6 +2141,7 @@ export class AgentRuntime {
               : { cancelled: true, shouldContinue };
           }
           this.prepareStreamingRetry(session.id, turn.id);
+          if (dispatched.length === 0 && isContextOverflowError(error)) return { contextOverflow: true, shouldContinue: true };
           const retry = plannerRetryState(error, attempt, dispatched.length === 0);
           const errorPayload = {
             turnId: turn.id,
@@ -2633,18 +2646,14 @@ export class AgentRuntime {
     }
   }
 
-  private estimatedActiveTokens(session: Session, planner?: PlannerProvider): number {
-    const manifest = this.assembleContext({
+  private activeContextManifest(session: Session, planner: PlannerProvider): ContextManifest {
+    return this.assembleContext({
       session,
       availableTools: listToolsForSession(session),
       contextWindow: resolveContextWindow(planner?.contextWindow),
       maxOutputTokens: resolveMaxOutputTokens(planner?.maxOutputTokens),
       ...this.contextBudgetInput()
     }).manifest;
-    const reducible = Math.max(0, manifest.estimatedTokens - manifest.tools.schemaTokens);
-    const activeHistory = this.buildConversationHistory(session);
-    const durable = estimateTokens({ summary: session.summary, history: activeHistory });
-    return Math.max(reducible, durable);
   }
 
   private progressSnapshot(sessionId: string, turnId: string): number {
@@ -2749,49 +2758,27 @@ export class AgentRuntime {
     await stopDisposableInboxesForSession(sessionId);
   }
 
-  private async maybeAutoCompact(session: Session, planner: PlannerProvider): Promise<
+  private async maybeAutoCompact(session: Session, planner: PlannerProvider, force = false): Promise<
     | { status: "compacted" | "ok" }
-    | { status: "ineffective"; preTokens: number; postTokens: number }
+    | { status: "failed"; error: string }
   > {
-    if ((this.autoCompactFailures.get(session.id) ?? 0) >= AUTO_COMPACT_MAX_FAILURES) return { status: "ok" };
-    const estimated = this.estimatedActiveTokens(session, planner);
+    const manifest = this.activeContextManifest(session, planner);
+    const estimated = manifest.estimatedTokens;
     const latestUsage = this.store.latestUsage(session.id, session.model);
     const boundary = this.store.latestCompactionBoundary(session.id);
     const actual = latestUsage && (!boundary || latestUsage.createdAt > boundary.createdAt) ? latestUsage.inputTokens : 0;
-    const threshold = autoCompactThreshold(resolveContextWindow(planner.contextWindow), resolveMaxOutputTokens(planner.maxOutputTokens));
-    const preCompactTokens = Math.max(estimated, actual);
-    if (preCompactTokens < threshold) return { status: "ok" };
-    if (boundary && this.buildConversationHistory(session).length === 0) return { status: "ok" };
+    const threshold = manifest.requestBudget;
+    if (!force && Math.max(estimated, actual) < threshold) return { status: "ok" };
+    const controller = new AbortController();
+    this.compactionControllers.set(session.id, controller);
     try {
       this.event(session.id, "compaction", { stage: "started", trigger: "auto" });
-      await this.compactSessionWithPlanner(session, planner, { trigger: "auto", preCompactTokens });
-      this.autoCompactFailures.delete(session.id);
-      const compacted = this.store.latestCompactionBoundary(session.id);
-      const postCompactTokens = compacted?.postCompactTokens ?? 0;
-      if (postCompactTokens >= preCompactTokens) {
-        this.event(session.id, "planner_error", {
-          error: `auto-compact was ineffective: ${preCompactTokens} -> ${postCompactTokens} estimated tokens`,
-          recoverable: false
-        });
-        return { status: "ineffective", preTokens: preCompactTokens, postTokens: postCompactTokens };
-      }
+      await this.compactSessionWithPlanner(session, planner, { trigger: "auto", signal: controller.signal });
       return { status: "compacted" };
     } catch (error) {
-      if (error instanceof IneffectiveCompactionError) {
-        this.event(session.id, "planner_error", {
-          error: `auto-compact was ineffective: ${error.preTokens} -> ${error.postTokens} estimated tokens`,
-          recoverable: false
-        });
-        return { status: "ineffective", preTokens: error.preTokens, postTokens: error.postTokens };
-      }
-      const failures = (this.autoCompactFailures.get(session.id) ?? 0) + 1;
-      this.autoCompactFailures.set(session.id, failures);
-      this.event(session.id, "planner_error", {
-        error: `auto-compact failed: ${error instanceof Error ? error.message : String(error)}`,
-        recoverable: failures < AUTO_COMPACT_MAX_FAILURES,
-        failures
-      });
-      return { status: "ok" };
+      return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (this.compactionControllers.get(session.id) === controller) this.compactionControllers.delete(session.id);
     }
   }
 
@@ -2947,6 +2934,7 @@ export class AgentRuntime {
             break;
           }
           this.prepareStreamingRetry(session.id, turn.id);
+          if (isContextOverflowError(error)) throw error;
           const retry = plannerRetryState(error, attempt, true);
           const errorPayload = {
             turnId: turn.id,
@@ -3949,142 +3937,17 @@ export class AgentRuntime {
   async compactSessionWithPlanner(
     session: Session,
     planner: PlannerProvider,
-    options: { trigger?: "manual" | "auto"; customInstructions?: string; preCompactTokens?: number; signal?: AbortSignal } = {}
+    options: CompactionOptions = {}
   ): Promise<Session> {
-    session = this.store.loadSession(session.id);
-    const trigger = options.trigger ?? "manual";
-    if (options.signal?.aborted) throw new Error(`compaction cancelled: ${String(options.signal.reason ?? "aborted")}`);
-    const previousBoundary = this.store.latestCompactionBoundary(session.id);
-    const afterMessageRowId = previousBoundary?.throughMessageRowId ?? 0;
-    const throughMessageRowId = this.store.maxMessageRowId(session.id);
-    if (throughMessageRowId <= afterMessageRowId) throw new Error("not enough conversation history to compact");
-    const availableTools = listToolsForSession(session);
-    const context = this.assembleContext({
-      session,
-      availableTools,
+    return compactSessionHistory(this.store, session.id, planner, (current, historyOverride, throughMessageRowId) => this.assembleContext({
+      session: current,
+      availableTools: listToolsForSession(current),
       contextWindow: resolveContextWindow(planner.contextWindow),
       maxOutputTokens: resolveMaxOutputTokens(planner.maxOutputTokens),
       ...this.contextBudgetInput(),
-      toolsEnabled: false
-    });
-    const snapshotMessages = this.store.listMessagesBetweenRows(session.id, afterMessageRowId, throughMessageRowId, Number.MAX_SAFE_INTEGER);
-    const history = [
-      ...projectConversationHistory(snapshotMessages, { full: true }).entries,
-      ...(context.volatileContext ? [{ role: "context" as const, text: context.volatileContext }] : [])
-    ];
-    const compactableTokens = estimateTokens({ summary: session.summary, history });
-    const preTokens = options.preCompactTokens ?? estimateTokens({ summary: session.summary, history, context: context.contextBlocks });
-    if (trigger === "manual" && compactableTokens < MANUAL_COMPACT_MIN_TOKENS) {
-      throw new Error(`not enough conversation to compact (${compactableTokens} tokens; minimum ${MANUAL_COMPACT_MIN_TOKENS})`);
-    }
-    let summary: string;
-    if (planner.compactionMode === "deterministic") {
-      summary = this.buildCompactSummary(session, snapshotMessages);
-    } else {
-      try {
-        summary = await runModelCompaction({
-          planner,
-          plannerInput: {
-            session,
-            history,
-            ...(session.summary ? { compactedSummary: session.summary } : {}),
-            contextBlocks: context.contextBlocks,
-            tools: [],
-            toolCatalog: context.toolCatalog,
-            toolChoice: "none"
-          },
-          ...(options.customInstructions ? { customInstructions: options.customInstructions } : {}),
-          ...(options.signal ? { signal: options.signal } : {})
-        });
-      } catch (error) {
-        if (trigger !== "auto" || options.signal?.aborted) throw error;
-        summary = this.buildCompactSummary(session, snapshotMessages);
-        this.event(session.id, "planner_error", {
-          error: `model compaction failed; used deterministic fallback: ${error instanceof Error ? error.message : String(error)}`,
-          recoverable: true
-        });
-      }
-    }
-    if (options.signal?.aborted) throw new Error(`compaction cancelled: ${String(options.signal.reason ?? "aborted")}`);
-    const postTokens = estimateTokens({ summary, context: context.contextBlocks });
-    if (postTokens >= preTokens) throw new IneffectiveCompactionError(preTokens, postTokens);
-    this.store.commitCompaction({
-      sessionId: session.id,
-      trigger,
-      summary,
-      throughMessageRowId,
-      preCompactTokens: preTokens,
-      postCompactTokens: postTokens,
-      expectedPreviousBoundaryId: previousBoundary?.id ?? null
-    });
-    this.autoCompactFailures.delete(session.id);
-    return this.store.loadSession(session.id);
-  }
-
-  private buildCompactSummary(session: Session, messages: MessageWithParts[]): string {
-    const evidence = this.store.listEvidence(session.id).slice(-20);
-    const notes = this.store.listNotes(session.id).slice(-20);
-    const findings = this.store.listFindings(session.id);
-    const memory = this.store.listMemory(session.id).slice(0, 30);
-    const todos = this.store.listTodos(session.id, { limit: 30 });
-    const toolCalls = this.store.listToolCalls(session.id, 20);
-    const backgroundJobs = activeBackgroundJobs(this.store.listToolCalls(session.id, 200));
-    const attempts = session.campaignId ? this.store.listTestAttempts(session.campaignId).slice(0, 8) : [];
-    const recentMessages = messages.slice(-40);
-    const latestUserRequests = recentMessages
-      .filter((message) => message.role === "user")
-      .flatMap((message) => message.parts)
-      .filter((part) => part.type === "text")
-      .map((part) => ((part.payload as { text?: string }).text ?? "").trim())
-      .filter(Boolean)
-      .slice(-8);
-    const latestAssistantText = recentMessages
-      .filter((message) => message.role === "assistant")
-      .flatMap((message) => message.parts)
-      .filter((part) => part.type === "text")
-      .map((part) => ((part.payload as { text?: string }).text ?? "").trim())
-      .filter(Boolean)
-      .slice(-6);
-    return [
-      `session summary for ${sessionDisplayName(session)}`,
-      `Provider/model: ${session.provider ?? "env"}/${session.model ?? "env"}`,
-      ...(session.summary ? ["", "Prior compacted context:", takeBytes(session.summary, 24 * 1024, "head")] : []),
-      "",
-      "Recent user requests:",
-      ...nonEmpty(latestUserRequests.map((text) => `- ${text.slice(0, 240)}`)),
-      "",
-      "Recent assistant outcomes:",
-      ...nonEmpty(latestAssistantText.map((text) => `- ${text.slice(0, 240)}`)),
-      "",
-      "Open todos:",
-      ...nonEmpty(todos.filter((todo) => todo.status !== "done" && todo.status !== "cancelled").map((todo) => `- [${todo.status}/${todo.priority}] ${todo.text}`)),
-      "",
-      "Notes:",
-      ...nonEmpty(notes.map((note) => `- ${note.text}`)),
-      "",
-      "Memory:",
-      ...nonEmpty(memory.map((item) => `- ${item.kind}:${item.key}=${JSON.stringify(item.value).slice(0, 160)}`)),
-      "",
-      "Evidence:",
-      ...nonEmpty(evidence.map((item) => `- ${item.id}: ${item.title} — ${item.summary.slice(0, 180)}`)),
-      "",
-      "Findings:",
-      ...nonEmpty(findings.map((finding) => `- ${finding.severity}${finding.cvssScore === undefined ? "" : ` (cvss ${finding.cvssScore.toFixed(1)})`}: ${finding.title} on ${finding.target}`)),
-      ...(attempts.length > 0 ? ["", "Campaign test attempts:", ...attempts.map((attempt) => `- ${attempt.status}/${attempt.evidenceLevel}: ${attempt.title} on ${attempt.target}`)] : []),
-      "",
-      "Recent tools:",
-      ...nonEmpty(toolCalls.map((call) => `- ${call.tool} ${call.status}`)),
-      "",
-      "Active background jobs:",
-      ...renderBackgroundJobs(backgroundJobs),
-      "",
-      "Next-step guidance:",
-      ...nonEmpty([
-        ...todos.filter((todo) => todo.status !== "done" && todo.status !== "cancelled").slice(0, 5).map((todo) => `- Continue todo: ${todo.text}`),
-        ...(toolCalls[0] ? [`- Last tool was ${toolCalls[0].tool} with status ${toolCalls[0].status}; continue from that result.`] : []),
-        ...(backgroundJobs.length ? ["- Poll an existing relevant background job before starting an equivalent task."] : [])
-      ])
-    ].join("\n");
+      ...(historyOverride ? { historyOverride } : {}),
+      ...(throughMessageRowId !== undefined ? { throughMessageRowId } : {})
+    }), options);
   }
 
   contextSummary(session: Session): string {

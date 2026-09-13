@@ -823,7 +823,7 @@ function upsertTodoItem(items: TodoListRowItem[], next: TodoListRowItem): void {
 }
 
 function isTodoTool(tool: string): boolean {
-  return tool === "todo_add" || tool === "todo_update" || tool === "todo_list";
+  return tool === "update_plan" || tool === "todo_add" || tool === "todo_update" || tool === "todo_list";
 }
 
 function displayToolResult(tool: string, fallback: string, result: ToolResult | undefined, humanResult?: string): string {
@@ -911,9 +911,10 @@ function extractJson(value: string): string | undefined {
 function todoItemFromUnknown(value: unknown): TodoListRowItem | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const obj = value as Record<string, unknown>;
-  if (typeof obj.text !== "string") return undefined;
+  const text = typeof obj.text === "string" ? obj.text : typeof obj.step === "string" ? obj.step : undefined;
+  if (!text) return undefined;
   return {
-    text: obj.text,
+    text,
     status: normalizeTodoStatus(typeof obj.status === "string" ? obj.status : "pending"),
     ...(typeof obj.priority === "string" ? { priority: obj.priority } : {}),
     ...(typeof obj.id === "string" ? { id: obj.id } : {})

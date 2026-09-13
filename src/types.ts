@@ -315,6 +315,7 @@ export type ToolInputPreview = {
 };
 
 export type CompactionBoundary = {
+  replacementHistory?: Array<{ role: "user" | "context"; text: string }>;
   id: string;
   sessionId: string;
   trigger: "manual" | "auto";
@@ -678,6 +679,7 @@ export type ToolContext = {
     loadFinding?: (findingId: string) => Finding;
     updateSession?: (sessionId: string, patch: Partial<Pick<Session, "campaignId" | "title" | "phase" | "workspace">>) => Session;
     upsertMemory: (item: Omit<MemoryItem, "id" | "createdAt" | "updatedAt">) => MemoryItem;
+    replacePlan?: (sessionId: string, plan: Array<{ step: string; status: "pending" | "in_progress" | "completed" }>) => Array<{ step: string; status: "pending" | "in_progress" | "completed" }>;
     createTodo: (item: Omit<TodoItem, "id" | "createdAt" | "updatedAt">) => TodoItem;
     updateTodo: (todoId: string, patch: Partial<Pick<TodoItem, "text" | "status" | "priority">>) => TodoItem;
     listTodos: (sessionId: string, options?: { turnId?: string; status?: TodoStatus; limit?: number }) => TodoItem[];
