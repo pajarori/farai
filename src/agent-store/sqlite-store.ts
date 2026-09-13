@@ -869,29 +869,31 @@ export class SqliteStore {
     this.emit({ kind: "transientEvent", sessionId: event.sessionId, event });
   }
 
+  private appendEventInTransaction(db: Database, event: SessionEvent, payloadLabel = "session event payload"): SessionEvent {
+    const next = db.query("select coalesce(max(sequence), 0) + 1 as sequence from events where session_id = $session")
+      .get({ $session: event.sessionId }) as { sequence?: number } | null;
+    const persisted: SessionEvent = { ...event, sequence: Number(next?.sequence ?? 1) };
+    db.query(
+      `insert into events (id, session_id, sequence, type, payload_json, created_at)
+       values ($id, $session, $sequence, $type, $payload, $created)`
+    ).run({
+      $id: persisted.id,
+      $session: persisted.sessionId,
+      $sequence: persisted.sequence!,
+      $type: persisted.type,
+      $payload: stringifyPersistedJson(persisted.payload, PERSISTENCE_LIMITS.eventJsonBytes, payloadLabel),
+      $created: persisted.createdAt
+    });
+    db.query("update sessions set updated_at = $updated where id = $session").run({
+      $updated: persisted.createdAt,
+      $session: persisted.sessionId
+    });
+    return persisted;
+  }
+
   appendEvent(event: SessionEvent): SessionEvent {
     const db = this.database();
-    const stored = db.transaction(() => {
-      const next = db.query("select coalesce(max(sequence), 0) + 1 as sequence from events where session_id = $session")
-        .get({ $session: event.sessionId }) as { sequence?: number } | null;
-      const persisted: SessionEvent = { ...event, sequence: Number(next?.sequence ?? 1) };
-      db.query(
-        `insert into events (id, session_id, sequence, type, payload_json, created_at)
-         values ($id, $session, $sequence, $type, $payload, $created)`
-      ).run({
-        $id: persisted.id,
-        $session: persisted.sessionId,
-        $sequence: persisted.sequence!,
-        $type: persisted.type,
-        $payload: stringifyPersistedJson(persisted.payload, PERSISTENCE_LIMITS.eventJsonBytes, "session event payload"),
-        $created: persisted.createdAt
-      });
-      db.query("update sessions set updated_at = $updated where id = $session").run({
-        $updated: persisted.createdAt,
-        $session: persisted.sessionId
-      });
-      return persisted;
-    })();
+    const stored = db.transaction(() => this.appendEventInTransaction(db, event)).immediate();
     this.emit({ kind: "event", sessionId: stored.sessionId, event: stored });
     return stored;
   }
@@ -1011,26 +1013,8 @@ export class SqliteStore {
         payload: { turnId: next.id, status, reason, ...(errorSummary ? { errorSummary } : {}) },
         createdAt: updatedAt
       };
-      const sequence = db.query("select coalesce(max(sequence), 0) + 1 as sequence from events where session_id = $session")
-        .get({ $session: event.sessionId }) as { sequence?: number } | null;
-      event.sequence = Number(sequence?.sequence ?? 1);
-      db.query(
-        `insert into events (id, session_id, sequence, type, payload_json, created_at)
-         values ($id, $session, $sequence, $type, $payload, $created)`
-      ).run({
-        $id: event.id,
-        $session: event.sessionId,
-        $sequence: event.sequence,
-        $type: event.type,
-        $payload: stringifyPersistedJson(event.payload, PERSISTENCE_LIMITS.eventJsonBytes, "turn stop event payload"),
-        $created: event.createdAt
-      });
-      db.query("update sessions set updated_at = $updated where id = $session").run({
-        $updated: event.createdAt,
-        $session: event.sessionId
-      });
-      return { turn: next, event };
-    })();
+      return { turn: next, event: this.appendEventInTransaction(db, event, "turn stop event payload") };
+    }).immediate();
     if (settled.event) this.emit({ kind: "event", sessionId: settled.event.sessionId, event: settled.event });
     if (settled.event) this.emit({ kind: "turn", sessionId: settled.turn.sessionId, turn: settled.turn });
     return settled.turn;
@@ -1096,7 +1080,7 @@ export class SqliteStore {
       },
       createdAt
     };
-    db.transaction(() => {
+    const persistedEvent = db.transaction(() => {
       if ("expectedPreviousBoundaryId" in input) {
         const current = db.query("select id from compaction_boundaries where session_id = $session order by rowid desc limit 1")
           .get({ $session: input.sessionId }) as { id?: string } | null;
@@ -1105,9 +1089,6 @@ export class SqliteStore {
           throw new Error(`compaction conflict: expected previous boundary ${input.expectedPreviousBoundaryId ?? "none"}, found ${currentId ?? "none"}`);
         }
       }
-      const next = db.query("select coalesce(max(sequence), 0) + 1 as sequence from events where session_id = $session")
-        .get({ $session: event.sessionId }) as { sequence?: number } | null;
-      event.sequence = Number(next?.sequence ?? 1);
       db.query(`insert into compaction_boundaries
         (id, session_id, trigger, through_message_rowid, summary, pre_compact_tokens, post_compact_tokens, created_at, replacement_history_json)
         values ($id, $session, $trigger, $through, $summary, $pre, $post, $created, $history)`)
@@ -1124,10 +1105,9 @@ export class SqliteStore {
         });
       db.query("update sessions set summary = $summary, summary_updated_at = $created, updated_at = $created where id = $session")
         .run({ $summary: assertPersistedText(boundary.summary, PERSISTENCE_LIMITS.summaryBytes, "session summary"), $created: boundary.createdAt, $session: boundary.sessionId });
-      db.query("insert into events (id, session_id, sequence, type, payload_json, created_at) values ($id, $session, $sequence, $type, $payload, $created)")
-        .run({ $id: event.id, $session: event.sessionId, $sequence: event.sequence!, $type: event.type, $payload: stringifyPersistedJson(event.payload, PERSISTENCE_LIMITS.eventJsonBytes, "compaction event payload"), $created: event.createdAt });
-    })();
-    this.emit({ kind: "event", sessionId: event.sessionId, event });
+      return this.appendEventInTransaction(db, event, "compaction event payload");
+    }).immediate();
+    this.emit({ kind: "event", sessionId: event.sessionId, event: persistedEvent });
     const session = this.loadSession(input.sessionId);
     this.emit({ kind: "session", sessionId: session.id, session });
     return boundary;
@@ -1593,45 +1573,47 @@ export class SqliteStore {
 
   enqueueMailbox(input: Omit<SessionMailboxItem, "id" | "sequence" | "state" | "createdAt">): SessionMailboxItem {
     const db = this.database();
-    const existing = db.query("select * from session_mailbox where session_id = $session and dedupe_key = $dedupe")
-      .get({ $session: input.sessionId, $dedupe: input.dedupeKey }) as Row | null;
-    if (existing) return mailboxItemFromRow(existing);
-    const next = db.query("select coalesce(max(sequence), 0) + 1 as sequence from session_mailbox where session_id = $session")
-      .get({ $session: input.sessionId }) as { sequence?: number } | null;
-    const item: SessionMailboxItem = {
-      id: id(),
-      sessionId: input.sessionId,
-      sequence: Number(next?.sequence ?? 1),
-      kind: input.kind,
-      payload: input.payload,
-      triggerPolicy: input.triggerPolicy,
-      state: "queued",
-      dedupeKey: input.dedupeKey,
-      ...(input.leaseOwner ? { leaseOwner: input.leaseOwner } : {}),
-      ...(input.leaseExpiresAt ? { leaseExpiresAt: input.leaseExpiresAt } : {}),
-      ...(input.claimedAt ? { claimedAt: input.claimedAt } : {}),
-      ...(input.consumedAt ? { consumedAt: input.consumedAt } : {}),
-      createdAt: nowIso()
-    };
-    db.query(`insert into session_mailbox
-      (id, session_id, sequence, kind, payload_json, trigger_policy, state, dedupe_key, lease_owner, lease_expires_at, created_at, claimed_at, consumed_at)
-      values ($id, $session, $sequence, $kind, $payload, $trigger, $state, $dedupe, $leaseOwner, $leaseExpires, $created, $claimed, $consumed)`)
-      .run({
-        $id: item.id,
-        $session: item.sessionId,
-        $sequence: item.sequence,
-        $kind: item.kind,
-        $payload: stringifyPersistedJson(item.payload, PERSISTENCE_LIMITS.mailboxJsonBytes, "session mailbox payload"),
-        $trigger: item.triggerPolicy,
-        $state: item.state,
-        $dedupe: item.dedupeKey,
-        $leaseOwner: item.leaseOwner ?? null,
-        $leaseExpires: item.leaseExpiresAt ?? null,
-        $created: item.createdAt,
-        $claimed: item.claimedAt ?? null,
-        $consumed: item.consumedAt ?? null
-      });
-    return item;
+    return db.transaction(() => {
+      const existing = db.query("select * from session_mailbox where session_id = $session and dedupe_key = $dedupe")
+        .get({ $session: input.sessionId, $dedupe: input.dedupeKey }) as Row | null;
+      if (existing) return mailboxItemFromRow(existing);
+      const next = db.query("select coalesce(max(sequence), 0) + 1 as sequence from session_mailbox where session_id = $session")
+        .get({ $session: input.sessionId }) as { sequence?: number } | null;
+      const item: SessionMailboxItem = {
+        id: id(),
+        sessionId: input.sessionId,
+        sequence: Number(next?.sequence ?? 1),
+        kind: input.kind,
+        payload: input.payload,
+        triggerPolicy: input.triggerPolicy,
+        state: "queued",
+        dedupeKey: input.dedupeKey,
+        ...(input.leaseOwner ? { leaseOwner: input.leaseOwner } : {}),
+        ...(input.leaseExpiresAt ? { leaseExpiresAt: input.leaseExpiresAt } : {}),
+        ...(input.claimedAt ? { claimedAt: input.claimedAt } : {}),
+        ...(input.consumedAt ? { consumedAt: input.consumedAt } : {}),
+        createdAt: nowIso()
+      };
+      db.query(`insert into session_mailbox
+        (id, session_id, sequence, kind, payload_json, trigger_policy, state, dedupe_key, lease_owner, lease_expires_at, created_at, claimed_at, consumed_at)
+        values ($id, $session, $sequence, $kind, $payload, $trigger, $state, $dedupe, $leaseOwner, $leaseExpires, $created, $claimed, $consumed)`)
+        .run({
+          $id: item.id,
+          $session: item.sessionId,
+          $sequence: item.sequence,
+          $kind: item.kind,
+          $payload: stringifyPersistedJson(item.payload, PERSISTENCE_LIMITS.mailboxJsonBytes, "session mailbox payload"),
+          $trigger: item.triggerPolicy,
+          $state: item.state,
+          $dedupe: item.dedupeKey,
+          $leaseOwner: item.leaseOwner ?? null,
+          $leaseExpires: item.leaseExpiresAt ?? null,
+          $created: item.createdAt,
+          $claimed: item.claimedAt ?? null,
+          $consumed: item.consumedAt ?? null
+        });
+      return item;
+    }).immediate();
   }
 
   listMailbox(sessionId: string, state?: SessionMailboxItem["state"]): SessionMailboxItem[] {
@@ -2455,7 +2437,7 @@ export class SqliteStore {
       if (version < 10) this.addCampaignLifecycleSchema(db);
       if (version < 11) this.addCvssSchema(db);
       db.exec("pragma user_version = 11");
-    })();
+    }).immediate();
   }
 
   private addUsagePricingSchema(db: Database): void {

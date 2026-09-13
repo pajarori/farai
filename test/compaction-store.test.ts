@@ -47,6 +47,37 @@ test("compaction boundary scopes active history while retaining the full transcr
   expect(store.loadSession(session.id).summary).toBe("summary of first turn");
 });
 
+test("event and mailbox allocators serialize writers across sqlite connections", async () => {
+  const rootPath = root();
+  const stateRoot = join(rootPath, ".farai");
+  const store = new SqliteStore(stateRoot);
+  const session = await store.createSession();
+  store.close();
+  const source = `import { SqliteStore } from "./src/agent-store/sqlite-store.ts";
+const store = new SqliteStore(process.env.FARAI_WORKER_ROOT!);
+const sessionId = process.env.FARAI_SESSION!;
+const prefix = process.env.FARAI_PREFIX!;
+for (let index = 0; index < Number(process.env.FARAI_COUNT); index += 1) {
+  store.appendEvent({ id: prefix + "-event-" + index, sessionId, type: "text", payload: { prefix, index }, createdAt: new Date().toISOString() });
+}
+store.enqueueMailbox({ sessionId, kind: "job_completion", payload: { prefix }, triggerPolicy: "wake", dedupeKey: "concurrent:mailbox" });
+store.close();`;
+  const children = ["one", "two"].map((prefix) => Bun.spawn(["bun", "-e", source], {
+    cwd: join(import.meta.dir, ".."),
+    env: { ...process.env, FARAI_WORKER_ROOT: stateRoot, FARAI_SESSION: session.id, FARAI_PREFIX: prefix, FARAI_COUNT: "20" },
+    stdout: "pipe",
+    stderr: "pipe"
+  }));
+  const statuses = await Promise.all(children.map(async (child) => ({ code: await child.exited, stderr: await new Response(child.stderr).text() })));
+  expect(statuses.map((status) => status.code), statuses.map((status) => status.stderr).join("\n")).toEqual([0, 0]);
+  const reopened = new SqliteStore(stateRoot);
+  const events = reopened.listEvents(session.id);
+  expect(events.map((event) => event.sequence)).toEqual(Array.from({ length: 41 }, (_, index) => index + 1));
+  expect(new Set(events.map((event) => event.id)).size).toBe(41);
+  expect(reopened.listMailbox(session.id)).toHaveLength(1);
+  reopened.close();
+});
+
 test("message hydration preserves message and part order across SQL batches", async () => {
   const store = new SqliteStore(join(root(), ".farai"));
   const session = await store.createSession({ workspace: "/tmp" });
