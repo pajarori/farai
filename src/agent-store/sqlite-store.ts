@@ -84,6 +84,7 @@ const RESUMABLE_SESSION_PREDICATE = `(
 const OUTPUT_ARTIFACT_PAGE_MAX_LINES = 1_000;
 const OUTPUT_ARTIFACT_PAGE_MAX_BYTES = 48 * 1024;
 const OUTPUT_ARTIFACT_LINE_MAX_BYTES = 16 * 1024 * 1024;
+const ACTIVE_CAMPAIGN_RUN_PREDICATE = "status in ('draft', 'ready', 'running', 'waiting', 'paused', 'blocked', 'rate_limited', 'budget_limited', 'time_limited')";
 
 export type StoreChange =
   | { kind: "event"; sessionId: string; event: SessionEvent }
@@ -293,7 +294,7 @@ export class SqliteStore {
       db.query("delete from session_plans where session_id = $session").run({ $session: sessionId });
       const result = db.query("delete from sessions where id = $session").run({ $session: sessionId });
       discarded = result.changes === 1;
-    })();
+    }).immediate();
     if (discarded) rmSync(join(this.root, "attachments", sessionAttachmentDirectory(sessionId)), { recursive: true, force: true });
     return discarded;
   }
@@ -363,9 +364,8 @@ export class SqliteStore {
     const run: CampaignRun = { id: id(), ...input, createdAt: now, updatedAt: now };
     const db = this.database();
     db.transaction(() => {
-      const active = db.query(
-        `select id from campaign_runs where root_session_id = $session and status in ('draft', 'ready', 'running', 'waiting', 'paused', 'blocked', 'rate_limited', 'budget_limited', 'time_limited') limit 1`
-      ).get({ $session: run.rootSessionId }) as { id?: string } | null;
+      const active = db.query(`select id from campaign_runs where root_session_id = $session and ${ACTIVE_CAMPAIGN_RUN_PREDICATE} limit 1`)
+        .get({ $session: run.rootSessionId }) as { id?: string } | null;
       if (active?.id) throw new Error(`session already has an active campaign run: ${active.id}`);
       db.query(
         `insert into campaign_runs (id, campaign_id, root_session_id, workspace, objective, status, current_wave_id, blocker, last_error, metadata_json, created_at, updated_at, started_at, paused_at, completed_at)
@@ -387,7 +387,7 @@ export class SqliteStore {
         $paused: run.pausedAt ?? null,
         $completed: run.completedAt ?? null
       });
-    })();
+    }).immediate();
     return run;
   }
 
@@ -405,24 +405,27 @@ export class SqliteStore {
   }
 
   updateCampaignRun(runId: string, patch: Partial<Pick<CampaignRun, "status" | "currentWaveId" | "blocker" | "lastError" | "metadata" | "startedAt" | "pausedAt" | "completedAt">>): CampaignRun {
-    const current = this.loadCampaignRun(runId);
-    const next: CampaignRun = { ...current, ...patch, updatedAt: nowIso() };
-    this.database().query(
-      `update campaign_runs set status = $status, current_wave_id = $wave, blocker = $blocker, last_error = $error,
-       metadata_json = $metadata, updated_at = $updated, started_at = $started, paused_at = $paused, completed_at = $completed where id = $id`
-    ).run({
-      $id: next.id,
-      $status: next.status,
-      $wave: next.currentWaveId ?? null,
-      $blocker: next.blocker ?? null,
-      $error: next.lastError ?? null,
-      $metadata: stringifyPersistedJson(next.metadata, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign run metadata"),
-      $updated: next.updatedAt,
-      $started: next.startedAt ?? null,
-      $paused: next.pausedAt ?? null,
-      $completed: next.completedAt ?? null
-    });
-    return next;
+    const db = this.database();
+    return db.transaction(() => {
+      const current = this.loadCampaignRun(runId);
+      const next: CampaignRun = { ...current, ...patch, updatedAt: nowIso() };
+      db.query(
+        `update campaign_runs set status = $status, current_wave_id = $wave, blocker = $blocker, last_error = $error,
+         metadata_json = $metadata, updated_at = $updated, started_at = $started, paused_at = $paused, completed_at = $completed where id = $id`
+      ).run({
+        $id: next.id,
+        $status: next.status,
+        $wave: next.currentWaveId ?? null,
+        $blocker: next.blocker ?? null,
+        $error: next.lastError ?? null,
+        $metadata: stringifyPersistedJson(next.metadata, PERSISTENCE_LIMITS.structuredJsonBytes, "campaign run metadata"),
+        $updated: next.updatedAt,
+        $started: next.startedAt ?? null,
+        $paused: next.pausedAt ?? null,
+        $completed: next.completedAt ?? null
+      });
+      return next;
+    }).immediate();
   }
 
   upsertCampaignRequirement(input: Omit<CampaignRequirement, "id" | "createdAt" | "updatedAt">): CampaignRequirement {
@@ -479,26 +482,32 @@ export class SqliteStore {
   }
 
   updateCampaignWave(waveId: string, patch: Partial<Pick<CampaignWave, "status" | "progressSummary" | "blocker" | "startedAt" | "finishedAt">>): CampaignWave {
-    const row = this.database().query("select * from campaign_waves where id = $id").get({ $id: waveId }) as Row | null;
-    if (!row) throw new Error(`Campaign wave not found: ${waveId}`);
-    const current = campaignWaveFromRow(row);
-    const next: CampaignWave = { ...current, ...patch, updatedAt: nowIso() };
-    this.database().query("update campaign_waves set status = $status, progress_summary = $summary, blocker = $blocker, updated_at = $updated, started_at = $started, finished_at = $finished where id = $id").run({
-      $id: next.id, $status: next.status, $summary: next.progressSummary ?? null, $blocker: next.blocker ?? null, $updated: next.updatedAt, $started: next.startedAt ?? null, $finished: next.finishedAt ?? null
-    });
-    return next;
+    const db = this.database();
+    return db.transaction(() => {
+      const row = db.query("select * from campaign_waves where id = $id").get({ $id: waveId }) as Row | null;
+      if (!row) throw new Error(`Campaign wave not found: ${waveId}`);
+      const current = campaignWaveFromRow(row);
+      const next: CampaignWave = { ...current, ...patch, updatedAt: nowIso() };
+      db.query("update campaign_waves set status = $status, progress_summary = $summary, blocker = $blocker, updated_at = $updated, started_at = $started, finished_at = $finished where id = $id").run({
+        $id: next.id, $status: next.status, $summary: next.progressSummary ?? null, $blocker: next.blocker ?? null, $updated: next.updatedAt, $started: next.startedAt ?? null, $finished: next.finishedAt ?? null
+      });
+      return next;
+    }).immediate();
   }
 
   createCampaignClaim(input: Omit<CampaignClaim, "id" | "createdAt" | "updatedAt">): CampaignClaim {
-    const existing = this.database().query("select * from campaign_claims where wave_id = $wave and claim_key = $key").get({ $wave: input.waveId, $key: input.claimKey }) as Row | null;
-    if (existing) return campaignClaimFromRow(existing);
-    const now = nowIso();
-    const claim: CampaignClaim = { id: id(), ...input, createdAt: now, updatedAt: now };
-    this.database().query(
-      `insert into campaign_claims (id, run_id, wave_id, claim_key, title, session_id, status, lease_owner, lease_expires_at, created_at, updated_at)
-       values ($id, $run, $wave, $key, $title, $session, $status, $owner, $expires, $created, $updated)`
-    ).run({ $id: claim.id, $run: claim.runId, $wave: claim.waveId, $key: assertPersistedText(claim.claimKey, PERSISTENCE_LIMITS.shortTextBytes, "campaign claim key"), $title: assertPersistedText(claim.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign claim title"), $session: claim.sessionId ?? null, $status: claim.status, $owner: claim.leaseOwner ?? null, $expires: claim.leaseExpiresAt ?? null, $created: claim.createdAt, $updated: claim.updatedAt });
-    return claim;
+    const db = this.database();
+    return db.transaction(() => {
+      const existing = db.query("select * from campaign_claims where wave_id = $wave and claim_key = $key").get({ $wave: input.waveId, $key: input.claimKey }) as Row | null;
+      if (existing) return campaignClaimFromRow(existing);
+      const now = nowIso();
+      const claim: CampaignClaim = { id: id(), ...input, createdAt: now, updatedAt: now };
+      db.query(
+        `insert into campaign_claims (id, run_id, wave_id, claim_key, title, session_id, status, lease_owner, lease_expires_at, created_at, updated_at)
+         values ($id, $run, $wave, $key, $title, $session, $status, $owner, $expires, $created, $updated)`
+      ).run({ $id: claim.id, $run: claim.runId, $wave: claim.waveId, $key: assertPersistedText(claim.claimKey, PERSISTENCE_LIMITS.shortTextBytes, "campaign claim key"), $title: assertPersistedText(claim.title, PERSISTENCE_LIMITS.shortTextBytes, "campaign claim title"), $session: claim.sessionId ?? null, $status: claim.status, $owner: claim.leaseOwner ?? null, $expires: claim.leaseExpiresAt ?? null, $created: claim.createdAt, $updated: claim.updatedAt });
+      return claim;
+    }).immediate();
   }
 
   listCampaignClaims(waveId: string): CampaignClaim[] {
@@ -518,32 +527,37 @@ export class SqliteStore {
       const expires = new Date(now + Math.max(1_000, ttlMs)).toISOString();
       db.query("update campaign_claims set status = 'leased', session_id = null, lease_owner = $owner, lease_expires_at = $expires, updated_at = $updated where id = $id").run({ $id: claimId, $owner: owner, $expires: expires, $updated: nowIso() });
       result = campaignClaimFromRow(db.query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row);
-    })();
+    }).immediate();
     return result;
   }
 
   updateCampaignClaim(claimId: string, patch: Partial<Pick<CampaignClaim, "status" | "sessionId">> & { leaseOwner?: string | null; leaseExpiresAt?: string | null }): CampaignClaim {
-    const row = this.database().query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row | null;
-    if (!row) throw new Error(`Campaign claim not found: ${claimId}`);
-    const current = campaignClaimFromRow(row);
-    const next: CampaignClaim = { ...current, ...(patch.status ? { status: patch.status } : {}), ...(patch.sessionId ? { sessionId: patch.sessionId } : {}), ...(patch.leaseOwner ? { leaseOwner: patch.leaseOwner } : {}), ...(patch.leaseExpiresAt ? { leaseExpiresAt: patch.leaseExpiresAt } : {}), updatedAt: nowIso() };
-    if (patch.sessionId === null) delete next.sessionId;
-    if (patch.leaseOwner === null) delete next.leaseOwner;
-    if (patch.leaseExpiresAt === null) delete next.leaseExpiresAt;
-    this.database().query("update campaign_claims set status = $status, session_id = $session, lease_owner = $owner, lease_expires_at = $expires, updated_at = $updated where id = $id").run({ $id: next.id, $status: next.status, $session: next.sessionId ?? null, $owner: next.leaseOwner ?? null, $expires: next.leaseExpiresAt ?? null, $updated: next.updatedAt });
-    return next;
+    const db = this.database();
+    return db.transaction(() => {
+      const row = db.query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row | null;
+      if (!row) throw new Error(`Campaign claim not found: ${claimId}`);
+      const current = campaignClaimFromRow(row);
+      const next: CampaignClaim = { ...current, ...(patch.status ? { status: patch.status } : {}), ...(patch.sessionId ? { sessionId: patch.sessionId } : {}), ...(patch.leaseOwner ? { leaseOwner: patch.leaseOwner } : {}), ...(patch.leaseExpiresAt ? { leaseExpiresAt: patch.leaseExpiresAt } : {}), updatedAt: nowIso() };
+      if (patch.sessionId === null) delete next.sessionId;
+      if (patch.leaseOwner === null) delete next.leaseOwner;
+      if (patch.leaseExpiresAt === null) delete next.leaseExpiresAt;
+      db.query("update campaign_claims set status = $status, session_id = $session, lease_owner = $owner, lease_expires_at = $expires, updated_at = $updated where id = $id").run({ $id: next.id, $status: next.status, $session: next.sessionId ?? null, $owner: next.leaseOwner ?? null, $expires: next.leaseExpiresAt ?? null, $updated: next.updatedAt });
+      return next;
+    }).immediate();
   }
 
   settleCampaignClaim(claimId: string, owner: string, status: Extract<CampaignClaim["status"], "completed" | "failed" | "released">, sessionId?: string): CampaignClaim | undefined {
     const db = this.database();
     const updated = nowIso();
-    const result = db.query(
-      `update campaign_claims
-       set status = $status, session_id = coalesce($session, session_id), lease_owner = null, lease_expires_at = null, updated_at = $updated
-       where id = $id and status = 'leased' and lease_owner = $owner`
-    ).run({ $id: claimId, $owner: owner, $status: status, $session: sessionId ?? null, $updated: updated });
-    if (result.changes !== 1) return undefined;
-    return campaignClaimFromRow(db.query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row);
+    return db.transaction(() => {
+      const result = db.query(
+        `update campaign_claims
+         set status = $status, session_id = coalesce($session, session_id), lease_owner = null, lease_expires_at = null, updated_at = $updated
+         where id = $id and status = 'leased' and lease_owner = $owner`
+      ).run({ $id: claimId, $owner: owner, $status: status, $session: sessionId ?? null, $updated: updated });
+      if (result.changes !== 1) return undefined;
+      return campaignClaimFromRow(db.query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row);
+    }).immediate();
   }
 
   releaseExpiredCampaignClaims(runId?: string): number {
@@ -576,16 +590,18 @@ export class SqliteStore {
       const created = existing ? String(existing.created_at) : nowIso();
       lease = { runId, owner, heartbeatAt: nowIso(), leaseExpiresAt: new Date(now + Math.max(1_000, ttlMs)).toISOString(), createdAt: created };
       db.query("insert into campaign_leases (run_id, owner, heartbeat_at, lease_expires_at, created_at) values ($run, $owner, $heartbeat, $expires, $created) on conflict(run_id) do update set owner = excluded.owner, heartbeat_at = excluded.heartbeat_at, lease_expires_at = excluded.lease_expires_at").run({ $run: runId, $owner: lease.owner, $heartbeat: lease.heartbeatAt, $expires: lease.leaseExpiresAt, $created: lease.createdAt });
-    })();
+    }).immediate();
     return lease;
   }
 
   heartbeatCampaignLease(runId: string, owner: string, ttlMs: number): CampaignLease | undefined {
-    const existing = this.database().query("select * from campaign_leases where run_id = $run and owner = $owner").get({ $run: runId, $owner: owner }) as Row | null;
+    const db = this.database();
+    const existing = db.query("select * from campaign_leases where run_id = $run and owner = $owner").get({ $run: runId, $owner: owner }) as Row | null;
     if (!existing) return undefined;
     const lease: CampaignLease = { runId, owner, heartbeatAt: nowIso(), leaseExpiresAt: new Date(Date.now() + Math.max(1_000, ttlMs)).toISOString(), createdAt: String(existing.created_at) };
-    this.database().query("update campaign_leases set heartbeat_at = $heartbeat, lease_expires_at = $expires where run_id = $run and owner = $owner").run({ $run: runId, $owner: owner, $heartbeat: lease.heartbeatAt, $expires: lease.leaseExpiresAt });
-    return lease;
+    const result = db.query("update campaign_leases set heartbeat_at = $heartbeat, lease_expires_at = $expires where run_id = $run and owner = $owner")
+      .run({ $run: runId, $owner: owner, $heartbeat: lease.heartbeatAt, $expires: lease.leaseExpiresAt });
+    return result.changes === 1 ? lease : undefined;
   }
 
   campaignLeaseOwner(runId: string): string | undefined {
@@ -595,11 +611,14 @@ export class SqliteStore {
   }
 
   heartbeatCampaignClaim(claimId: string, owner: string, ttlMs: number): CampaignClaim | undefined {
-    const row = this.database().query("select * from campaign_claims where id = $id and status = 'leased' and lease_owner = $owner").get({ $id: claimId, $owner: owner }) as Row | null;
+    const db = this.database();
+    const row = db.query("select * from campaign_claims where id = $id and status = 'leased' and lease_owner = $owner").get({ $id: claimId, $owner: owner }) as Row | null;
     if (!row) return undefined;
     const expires = new Date(Date.now() + Math.max(1_000, ttlMs)).toISOString();
-    this.database().query("update campaign_claims set lease_expires_at = $expires, updated_at = $updated where id = $id and status = 'leased' and lease_owner = $owner").run({ $id: claimId, $owner: owner, $expires: expires, $updated: nowIso() });
-    return campaignClaimFromRow(this.database().query("select * from campaign_claims where id = $id").get({ $id: claimId }) as Row);
+    const updated = nowIso();
+    const result = db.query("update campaign_claims set lease_expires_at = $expires, updated_at = $updated where id = $id and status = 'leased' and lease_owner = $owner")
+      .run({ $id: claimId, $owner: owner, $expires: expires, $updated: updated });
+    return result.changes === 1 ? campaignClaimFromRow({ ...row, lease_expires_at: expires, updated_at: updated }) : undefined;
   }
 
   releaseCampaignLease(runId: string, owner: string): void {
@@ -1232,7 +1251,7 @@ export class SqliteStore {
       db.query("delete from session_plans where session_id = $session").run({ $session: sessionId });
       db.query("update sessions set summary = null, summary_updated_at = null, updated_at = $updated where id = $session")
         .run({ $updated: updated, $session: sessionId });
-    })();
+    }).immediate();
     rmSync(join(this.root, "attachments", sessionAttachmentDirectory(sessionId)), { recursive: true, force: true });
     const session = this.loadSession(sessionId);
     this.emit({ kind: "session", sessionId, session });
@@ -1511,21 +1530,21 @@ export class SqliteStore {
   }
 
   reclaimMailboxClaims(activeOwners: string[]): number {
-    const rows = this.database().query("select id, lease_owner, lease_expires_at from session_mailbox where state = 'claimed'").all() as Array<{ id: string; lease_owner?: string | null; lease_expires_at?: string | null }>;
+    const db = this.database();
     const active = new Set(activeOwners);
     const now = Date.now();
-    const update = this.database().query("update session_mailbox set state = 'queued', lease_owner = null, lease_expires_at = null, claimed_at = null where id = $id and state = 'claimed'");
-    let count = 0;
-    this.database().transaction(() => {
+    return db.transaction(() => {
+      const rows = db.query("select id, lease_owner, lease_expires_at from session_mailbox where state = 'claimed'").all() as Array<{ id: string; lease_owner?: string | null; lease_expires_at?: string | null }>;
+      const update = db.query("update session_mailbox set state = 'queued', lease_owner = null, lease_expires_at = null, claimed_at = null where id = $id and state = 'claimed'");
+      let count = 0;
       for (const row of rows) {
         const expired = !row.lease_expires_at || Date.parse(row.lease_expires_at) <= now;
         const abandoned = !row.lease_owner || !active.has(row.lease_owner);
         if (!expired && !abandoned) continue;
-        update.run({ $id: row.id });
-        count += 1;
+        count += update.run({ $id: row.id }).changes;
       }
-    })();
-    return count;
+      return count;
+    }).immediate();
   }
 
   listJobsByRuntime(runtimeId: string, limit = 10_000): BackgroundJob[] {
@@ -1562,7 +1581,7 @@ export class SqliteStore {
       const rows = db.query("select runtime_id from runtime_leases where expires_at > $now order by runtime_id asc")
         .all({ $now: timestamp }) as Array<{ runtime_id: string }>;
       return rows.map((row) => row.runtime_id);
-    })();
+    }).immediate();
   }
 
   listSessionsWithQueuedMailbox(): string[] {
@@ -1655,7 +1674,7 @@ export class SqliteStore {
           .run({ $owner: leaseOwner, $expires: leaseExpiresAt, $claimed: now, $id: String(row.id) });
       }
       return rows.map((row) => mailboxItemFromRow({ ...row, state: "claimed", lease_owner: leaseOwner, lease_expires_at: leaseExpiresAt, claimed_at: now }));
-    })();
+    }).immediate();
   }
 
   claimMailboxItem(id: string, leaseOwner: string, leaseMs = 30_000): SessionMailboxItem | undefined {
@@ -1668,7 +1687,7 @@ export class SqliteStore {
       db.query("update session_mailbox set state = 'claimed', lease_owner = $owner, lease_expires_at = $expires, claimed_at = $claimed where id = $id and state = 'queued'")
         .run({ $owner: leaseOwner, $expires: leaseExpiresAt, $claimed: now, $id: id });
       return mailboxItemFromRow({ ...row, state: "claimed", lease_owner: leaseOwner, lease_expires_at: leaseExpiresAt, claimed_at: now });
-    })();
+    }).immediate();
   }
 
   consumeMailbox(ids: string[], leaseOwner?: string): void {
@@ -1683,7 +1702,7 @@ export class SqliteStore {
         const changed = update.run({ $consumed: consumedAt, $id: id, $owner: leaseOwner ?? null }).changes;
         if (changed > 0) updateJob.run({ $updated: consumedAt, $id: id });
       }
-    })();
+    }).immediate();
   }
 
   releaseMailbox(ids: string[], leaseOwner?: string): void {
@@ -1693,7 +1712,7 @@ export class SqliteStore {
       : this.database().query("update session_mailbox set state = 'queued', lease_owner = null, lease_expires_at = null, claimed_at = null where id = $id and state = 'claimed'");
     this.database().transaction(() => {
       for (const id of ids) update.run({ $id: id, $owner: leaseOwner ?? null });
-    })();
+    }).immediate();
   }
 
   cancelMailbox(sessionId: string): void {
@@ -1760,7 +1779,7 @@ export class SqliteStore {
           })
         : [];
       return { job, mailbox, toolCalls, jobChanged: true };
-    })();
+    }).immediate();
     if (finalized.jobChanged) this.emit({ kind: "job", sessionId: finalized.job.sessionId, job: finalized.job });
     for (const item of finalized.toolCalls) {
       this.emit({ kind: "toolCall", sessionId: item.toolCall.sessionId, toolCall: item.toolCall });
@@ -1804,7 +1823,7 @@ export class SqliteStore {
           })
         : [];
       return { job, toolCalls };
-    })();
+    }).immediate();
     this.emit({ kind: "job", sessionId: finalized.job.sessionId, job: finalized.job });
     for (const item of finalized.toolCalls) {
       this.emit({ kind: "toolCall", sessionId: item.toolCall.sessionId, toolCall: item.toolCall });
@@ -1866,7 +1885,7 @@ export class SqliteStore {
   }): ToolCallRecord[] {
     if (!input.processId && !input.toolCallId) return [];
     const db = this.database();
-    const settled = db.transaction(() => settleBackgroundToolCallRows(db, input))();
+    const settled = db.transaction(() => settleBackgroundToolCallRows(db, input)).immediate();
     for (const item of settled) {
       this.emit({ kind: "toolCall", sessionId: item.toolCall.sessionId, toolCall: item.toolCall });
       if (item.timelinePart) this.emit({ kind: "part", sessionId: item.timelinePart.sessionId, part: item.timelinePart });
@@ -2422,9 +2441,9 @@ export class SqliteStore {
   }
 
   private migrate(db: Database): void {
-    const version = Number((db.query("pragma user_version").get() as { user_version?: number } | null)?.user_version ?? 0);
-    if (version > 11) throw new Error(`Unsupported Farai database version: ${version}`);
     db.transaction(() => {
+      const version = Number((db.query("pragma user_version").get() as { user_version?: number } | null)?.user_version ?? 0);
+      if (version > 11) throw new Error(`Unsupported Farai database version: ${version}`);
       this.ensureBaselineSchema(db);
       if (version < 2) this.addJobAndMailboxSchema(db);
       if (version < 3) this.addEventSequenceSchema(db);
@@ -2436,8 +2455,28 @@ export class SqliteStore {
       if (version < 9) this.addUsagePricingSchema(db);
       if (version < 10) this.addCampaignLifecycleSchema(db);
       if (version < 11) this.addCvssSchema(db);
+      this.ensureCampaignRunInvariant(db);
       db.exec("pragma user_version = 11");
     }).immediate();
+  }
+
+  private ensureCampaignRunInvariant(db: Database): void {
+    db.exec(`
+      update campaign_runs as loser
+      set status = 'failed',
+          last_error = coalesce(last_error, 'superseded duplicate active campaign run'),
+          completed_at = coalesce(completed_at, updated_at)
+      where ${ACTIVE_CAMPAIGN_RUN_PREDICATE}
+        and exists (
+          select 1 from campaign_runs as winner
+          where winner.root_session_id = loser.root_session_id
+            and ${ACTIVE_CAMPAIGN_RUN_PREDICATE.replaceAll("status", "winner.status")}
+            and (winner.updated_at > loser.updated_at or (winner.updated_at = loser.updated_at and winner.rowid > loser.rowid))
+        );
+      create unique index if not exists campaign_runs_active_root_idx
+        on campaign_runs(root_session_id)
+        where ${ACTIVE_CAMPAIGN_RUN_PREDICATE};
+    `);
   }
 
   private addUsagePricingSchema(db: Database): void {

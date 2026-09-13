@@ -78,6 +78,36 @@ store.close();`;
   reopened.close();
 });
 
+test("campaign run activity is unique per root session at the database boundary", async () => {
+  const stateRoot = join(root(), ".farai");
+  const store = new SqliteStore(stateRoot);
+  const session = await store.createSession();
+  const campaign = store.createCampaign({ workspace: session.workspace, name: "campaign", kind: "pentest", status: "active" });
+  const run = store.createCampaignRun({
+    campaignId: campaign.id,
+    rootSessionId: session.id,
+    workspace: session.workspace,
+    objective: "objective",
+    status: "running",
+    metadata: {}
+  });
+  expect(store.database().query("select name from sqlite_master where type = 'index' and name = 'campaign_runs_active_root_idx'").get()).toBeTruthy();
+  expect(() => store.database().query(`insert into campaign_runs
+    (id, campaign_id, root_session_id, workspace, objective, status, metadata_json, created_at, updated_at)
+    values ('duplicate', $campaign, $session, $workspace, 'duplicate', 'running', '{}', $created, $updated)`)
+    .run({ $campaign: campaign.id, $session: session.id, $workspace: session.workspace, $created: run.createdAt, $updated: run.updatedAt })).toThrow();
+  store.database().exec("drop index campaign_runs_active_root_idx");
+  store.database().query(`insert into campaign_runs
+    (id, campaign_id, root_session_id, workspace, objective, status, metadata_json, created_at, updated_at)
+    values ('duplicate', $campaign, $session, $workspace, 'duplicate', 'running', '{}', $created, $updated)`)
+    .run({ $campaign: campaign.id, $session: session.id, $workspace: session.workspace, $created: run.createdAt, $updated: run.updatedAt });
+  store.close();
+  const repaired = new SqliteStore(stateRoot);
+  expect(repaired.listCampaignRuns(session.workspace).filter((item) => item.status === "running")).toHaveLength(1);
+  expect(repaired.loadCampaignRun(run.id).status).toBe("failed");
+  repaired.close();
+});
+
 test("message hydration preserves message and part order across SQL batches", async () => {
   const store = new SqliteStore(join(root(), ".farai"));
   const session = await store.createSession({ workspace: "/tmp" });
