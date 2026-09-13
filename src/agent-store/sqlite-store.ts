@@ -85,6 +85,7 @@ const OUTPUT_ARTIFACT_PAGE_MAX_LINES = 1_000;
 const OUTPUT_ARTIFACT_PAGE_MAX_BYTES = 48 * 1024;
 const OUTPUT_ARTIFACT_LINE_MAX_BYTES = 16 * 1024 * 1024;
 const ACTIVE_CAMPAIGN_RUN_PREDICATE = "status in ('draft', 'ready', 'running', 'waiting', 'paused', 'blocked', 'rate_limited', 'budget_limited', 'time_limited')";
+const TERMINAL_JOB_STATUSES = "('succeeded', 'failed', 'cancelled', 'lost')";
 
 export type StoreChange =
   | { kind: "event"; sessionId: string; event: SessionEvent }
@@ -1488,9 +1489,15 @@ export class SqliteStore {
   }
 
   saveJob(job: BackgroundJob): BackgroundJob {
-    writeJobRow(this.database(), job);
-    this.emit({ kind: "job", sessionId: job.sessionId, job });
-    return job;
+    const db = this.database();
+    const saved = db.transaction(() => {
+      writeJobRow(db, job);
+      const row = db.query("select * from background_jobs where id = $id").get({ $id: job.id }) as Row | null;
+      if (!row) throw new Error(`Background job not found after save: ${job.id}`);
+      return backgroundJobFromRow(row);
+    }).immediate();
+    this.emit({ kind: "job", sessionId: saved.sessionId, job: saved });
+    return saved;
   }
 
   loadJob(jobId: string): BackgroundJob {
@@ -1756,29 +1763,34 @@ export class SqliteStore {
       }
       const mailbox = this.enqueueMailbox(input.mailbox);
       const completedAt = nowIso();
+      const terminalCurrent = TERMINAL_JOB_STATUSES.includes(current.status);
+      const sameTerminalStatus = terminalCurrent && current.status === input.status;
       const job: BackgroundJob = {
         ...current,
-        status: input.status,
-        ...(input.result !== undefined ? { result: input.result } : {}),
-        ...(input.error !== undefined ? { error: input.error } : {}),
-        ...(input.outputArtifactId !== undefined ? { outputArtifactId: input.outputArtifactId } : {}),
+        status: terminalCurrent ? current.status : input.status,
+        ...((!terminalCurrent || sameTerminalStatus) && input.result !== undefined ? { result: input.result } : {}),
+        ...((!terminalCurrent || sameTerminalStatus) && input.error !== undefined ? { error: input.error } : {}),
+        ...((!terminalCurrent || sameTerminalStatus) && input.outputArtifactId !== undefined ? { outputArtifactId: input.outputArtifactId } : {}),
         mailboxId: mailbox.id,
         deliveryState: "enqueued",
         completedAt,
         updatedAt: completedAt
       };
       writeJobRow(db, job);
+      const storedRow = db.query("select * from background_jobs where id = $id").get({ $id: job.id }) as Row | null;
+      if (!storedRow) throw new Error(`Background job not found after finalization: ${job.id}`);
+      const storedJob = backgroundJobFromRow(storedRow);
       const toolCalls = input.settleToolStatus
         ? settleBackgroundToolCallRows(db, {
-            sessionId: job.sessionId,
+            sessionId: storedJob.sessionId,
             status: input.settleToolStatus,
-            ...(job.processId ? { processId: job.processId } : {}),
-            ...(job.toolCallId ? { toolCallId: job.toolCallId } : {}),
-            jobId: job.id,
-            ...(input.outputArtifactId ? { outputArtifactId: input.outputArtifactId } : {})
+            ...(storedJob.processId ? { processId: storedJob.processId } : {}),
+            ...(storedJob.toolCallId ? { toolCallId: storedJob.toolCallId } : {}),
+            jobId: storedJob.id,
+            ...(storedJob.outputArtifactId ? { outputArtifactId: storedJob.outputArtifactId } : {})
           })
         : [];
-      return { job, mailbox, toolCalls, jobChanged: true };
+      return { job: storedJob, mailbox, toolCalls, jobChanged: true };
     }).immediate();
     if (finalized.jobChanged) this.emit({ kind: "job", sessionId: finalized.job.sessionId, job: finalized.job });
     for (const item of finalized.toolCalls) {
@@ -1801,28 +1813,33 @@ export class SqliteStore {
     const finalized = db.transaction(() => {
       const current = this.loadJob(input.jobId);
       const completedAt = nowIso();
+      const terminalCurrent = TERMINAL_JOB_STATUSES.includes(current.status);
+      const sameTerminalStatus = terminalCurrent && current.status === input.status;
       const job: BackgroundJob = {
         ...current,
-        status: input.status,
-        ...(input.result !== undefined ? { result: input.result } : {}),
-        ...(input.error !== undefined ? { error: input.error } : {}),
-        ...(input.outputArtifactId !== undefined ? { outputArtifactId: input.outputArtifactId } : {}),
+        status: terminalCurrent ? current.status : input.status,
+        ...((!terminalCurrent || sameTerminalStatus) && input.result !== undefined ? { result: input.result } : {}),
+        ...((!terminalCurrent || sameTerminalStatus) && input.error !== undefined ? { error: input.error } : {}),
+        ...((!terminalCurrent || sameTerminalStatus) && input.outputArtifactId !== undefined ? { outputArtifactId: input.outputArtifactId } : {}),
         deliveryState: input.deliveryState,
         completedAt,
         updatedAt: completedAt
       };
       writeJobRow(db, job);
+      const storedRow = db.query("select * from background_jobs where id = $id").get({ $id: job.id }) as Row | null;
+      if (!storedRow) throw new Error(`Background job not found after finalization: ${job.id}`);
+      const storedJob = backgroundJobFromRow(storedRow);
       const toolCalls = input.settleToolStatus
         ? settleBackgroundToolCallRows(db, {
-            sessionId: job.sessionId,
+            sessionId: storedJob.sessionId,
             status: input.settleToolStatus,
-            ...(job.processId ? { processId: job.processId } : {}),
-            ...(job.toolCallId ? { toolCallId: job.toolCallId } : {}),
-            jobId: job.id,
-            ...(input.outputArtifactId ? { outputArtifactId: input.outputArtifactId } : {})
+            ...(storedJob.processId ? { processId: storedJob.processId } : {}),
+            ...(storedJob.toolCallId ? { toolCallId: storedJob.toolCallId } : {}),
+            jobId: storedJob.id,
+            ...(storedJob.outputArtifactId ? { outputArtifactId: storedJob.outputArtifactId } : {})
           })
         : [];
-      return { job, toolCalls };
+      return { job: storedJob, toolCalls };
     }).immediate();
     this.emit({ kind: "job", sessionId: finalized.job.sessionId, job: finalized.job });
     for (const item of finalized.toolCalls) {
@@ -2998,10 +3015,34 @@ function writeJobRow(db: Database, job: BackgroundJob): void {
       cancellation_policy, delivery_state, output_artifact_id, result_json, error, mailbox_id, created_at, started_at, completed_at, updated_at)
      values ($id, $kind, $status, $runtime, $session, $turn, $toolCall, $childSession, $campaignRun, $campaignClaim, $title, $lane, $agentMode, $backend, $process,
       $cancelPolicy, $delivery, $artifact, $result, $error, $mailbox, $created, $started, $completed, $updated)
-     on conflict(id) do update set status = excluded.status, title = excluded.title, lane = excluded.lane, agent_mode = excluded.agent_mode, backend_kind = excluded.backend_kind,
-      process_id = excluded.process_id, campaign_run_id = excluded.campaign_run_id, campaign_claim_id = excluded.campaign_claim_id, output_artifact_id = excluded.output_artifact_id, result_json = excluded.result_json,
-      error = excluded.error, mailbox_id = excluded.mailbox_id, delivery_state = excluded.delivery_state, started_at = excluded.started_at,
-      completed_at = excluded.completed_at, updated_at = excluded.updated_at`
+     on conflict(id) do update set status = case when background_jobs.status in ${TERMINAL_JOB_STATUSES} then background_jobs.status else excluded.status end,
+      title = excluded.title, lane = excluded.lane, agent_mode = excluded.agent_mode, backend_kind = excluded.backend_kind,
+      process_id = excluded.process_id, campaign_run_id = excluded.campaign_run_id, campaign_claim_id = excluded.campaign_claim_id,
+      output_artifact_id = case
+        when background_jobs.status in ${TERMINAL_JOB_STATUSES} and (excluded.status <> background_jobs.status or background_jobs.output_artifact_id is not null) then background_jobs.output_artifact_id
+        else excluded.output_artifact_id
+      end,
+      result_json = case
+        when background_jobs.status in ${TERMINAL_JOB_STATUSES} and (excluded.status <> background_jobs.status or background_jobs.result_json is not null) then background_jobs.result_json
+        else excluded.result_json
+      end,
+      error = case
+        when background_jobs.status in ${TERMINAL_JOB_STATUSES} and (excluded.status <> background_jobs.status or background_jobs.error is not null) then background_jobs.error
+        else excluded.error
+      end,
+      mailbox_id = case
+        when background_jobs.mailbox_id is not null and exists (select 1 from session_mailbox where id = background_jobs.mailbox_id) then background_jobs.mailbox_id
+        when background_jobs.mailbox_id is not null and excluded.mailbox_id is null then background_jobs.mailbox_id
+        else excluded.mailbox_id
+      end,
+      delivery_state = case
+        when background_jobs.delivery_state in ('consumed', 'suppressed') then background_jobs.delivery_state
+        when background_jobs.delivery_state = 'enqueued' and excluded.delivery_state in ('pending', 'suppressed') then background_jobs.delivery_state
+        else excluded.delivery_state
+      end,
+      started_at = case when background_jobs.started_at is not null and excluded.started_at is null then background_jobs.started_at else excluded.started_at end,
+      completed_at = case when background_jobs.completed_at is not null then background_jobs.completed_at else excluded.completed_at end,
+      updated_at = case when background_jobs.status in ${TERMINAL_JOB_STATUSES} and excluded.status <> background_jobs.status then background_jobs.updated_at else max(background_jobs.updated_at, excluded.updated_at) end`
   ).run({
     $id: job.id,
     $kind: job.kind,
