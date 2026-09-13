@@ -176,9 +176,9 @@ export function parseFridaMessages(stdout: string): { messages: unknown[]; summa
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.startsWith("FRIDA_DONE ")) {
-      try { summary = JSON.parse(trimmed.slice("FRIDA_DONE ".length)); } catch { /* ignore */ }
+      try { summary = JSON.parse(trimmed.slice("FRIDA_DONE ".length)); } catch { }
     } else if (trimmed.startsWith("FRIDA ")) {
-      try { messages.push(JSON.parse(trimmed.slice("FRIDA ".length))); } catch { /* ignore */ }
+      try { messages.push(JSON.parse(trimmed.slice("FRIDA ".length))); } catch { }
     }
   }
   return { messages, summary };

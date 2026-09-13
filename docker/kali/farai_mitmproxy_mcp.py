@@ -772,7 +772,6 @@ async def proxy_replay_correlated(
     if not isinstance(headers, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
         return json.dumps({"ok": False, "error": "headers_json must encode a string-to-string object."})
 
-    # Upstream treats None as "reuse the captured body"; an empty string omits it.
     resolved_body = "" if body == "__omit__" else body
     variables = getattr(server.controller, "session_variables", {})
     resolver = getattr(server, "_resolve_template", None)

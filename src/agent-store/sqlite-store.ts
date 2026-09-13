@@ -981,8 +981,63 @@ export class SqliteStore {
     return next;
   }
 
+  settleTurn(turnId: string, status: Exclude<TurnStatus, "running">, reason: TurnStopReason, errorSummary?: string): Turn {
+    const db = this.database();
+    const settled = db.transaction(() => {
+      const current = this.loadTurn(turnId);
+      if (current.status !== "running") return { turn: current, event: undefined };
+      const updatedAt = nowIso();
+      const next: Turn = {
+        ...current,
+        status,
+        stopReason: reason,
+        ...(errorSummary ? { errorSummary } : {}),
+        updatedAt
+      };
+      const update = db.query(
+        `update turns set status = $status, stop_reason = $stop, error_summary = $error, updated_at = $updated where id = $id and status = 'running'`
+      ).run({
+        $status: next.status,
+        $stop: reason,
+        $error: next.errorSummary ? assertPersistedText(next.errorSummary, PERSISTENCE_LIMITS.documentTextBytes, "turn error summary") : null,
+        $updated: next.updatedAt,
+        $id: next.id
+      });
+      if (update.changes !== 1) return { turn: this.loadTurn(turnId), event: undefined };
+      const event: SessionEvent = {
+        id: id(),
+        sessionId: next.sessionId,
+        type: "loop_stop",
+        payload: { turnId: next.id, status, reason, ...(errorSummary ? { errorSummary } : {}) },
+        createdAt: updatedAt
+      };
+      const sequence = db.query("select coalesce(max(sequence), 0) + 1 as sequence from events where session_id = $session")
+        .get({ $session: event.sessionId }) as { sequence?: number } | null;
+      event.sequence = Number(sequence?.sequence ?? 1);
+      db.query(
+        `insert into events (id, session_id, sequence, type, payload_json, created_at)
+         values ($id, $session, $sequence, $type, $payload, $created)`
+      ).run({
+        $id: event.id,
+        $session: event.sessionId,
+        $sequence: event.sequence,
+        $type: event.type,
+        $payload: stringifyPersistedJson(event.payload, PERSISTENCE_LIMITS.eventJsonBytes, "turn stop event payload"),
+        $created: event.createdAt
+      });
+      db.query("update sessions set updated_at = $updated where id = $session").run({
+        $updated: event.createdAt,
+        $session: event.sessionId
+      });
+      return { turn: next, event };
+    })();
+    if (settled.event) this.emit({ kind: "event", sessionId: settled.event.sessionId, event: settled.event });
+    if (settled.event) this.emit({ kind: "turn", sessionId: settled.turn.sessionId, turn: settled.turn });
+    return settled.turn;
+  }
+
   cancelTurn(turnId: string, reason = "cancelled by user"): Turn {
-    return this.updateTurn(turnId, { status: "cancelled", stopReason: "cancelled", errorSummary: reason });
+    return this.settleTurn(turnId, "cancelled", "cancelled", reason);
   }
 
   latestCompactionBoundary(sessionId: string): CompactionBoundary | undefined {

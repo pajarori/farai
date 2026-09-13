@@ -148,6 +148,34 @@ test("compaction commit rolls back the boundary and session summary when event p
   expect(store.listEvents(session.id).some((event) => event.type === "compaction")).toBe(false);
 });
 
+test("terminal turn transitions roll back state when the stop event cannot be persisted", async () => {
+  const store = new SqliteStore(join(root(), ".farai"));
+  const session = await store.createSession({ workspace: "/tmp", model: "model-a" });
+  const turn = store.createTurn(session.id, "request");
+  store.database().exec(`create trigger fail_turn_stop before insert on events
+    when new.type = 'loop_stop'
+    begin
+      select raise(abort, 'forced turn stop event failure');
+    end`);
+
+  expect(() => store.settleTurn(turn.id, "completed", "final_response")).toThrow("forced turn stop event failure");
+  expect(store.loadTurn(turn.id).status).toBe("running");
+  expect(store.listEvents(session.id).some((event) => event.type === "loop_stop")).toBe(false);
+});
+
+test("terminal turn transitions are idempotent after the first settlement", async () => {
+  const store = new SqliteStore(join(root(), ".farai"));
+  const session = await store.createSession({ workspace: "/tmp", model: "model-a" });
+  const turn = store.createTurn(session.id, "request");
+
+  const settled = store.settleTurn(turn.id, "cancelled", "cancelled", "user cancel");
+  const repeated = store.settleTurn(turn.id, "failed", "planner_error", "late failure");
+
+  expect(settled.status).toBe("cancelled");
+  expect(repeated).toEqual(settled);
+  expect(store.listEvents(session.id).filter((event) => event.type === "loop_stop")).toHaveLength(1);
+});
+
 test("stale compaction commits are rejected without replacing the winning boundary", async () => {
   const store = new SqliteStore(join(root(), ".farai"));
   const session = await store.createSession({ workspace: "/tmp", model: "model-a" });

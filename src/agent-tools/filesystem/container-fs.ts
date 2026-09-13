@@ -101,7 +101,7 @@ export async function containerWriteFile(context: ToolContext, path: string, con
   try {
     await runInContainer(context, `mkdir -p -- "$(dirname ${shQuote(p)})" && base64 -d > ${shQuote(tmp)} << 'FARAI_FS_B64_EOF'\n${base64Heredoc(content)}\nFARAI_FS_B64_EOF\n mv -f -- ${shQuote(tmp)} ${shQuote(p)}`);
   } finally {
-    try { await runInContainer(context, `rm -f -- ${shQuote(tmp)}`); } catch { /* best effort cleanup */ }
+    try { await runInContainer(context, `rm -f -- ${shQuote(tmp)}`); } catch { }
   }
 }
 

@@ -1056,7 +1056,7 @@ export class AgentRuntime {
   }
 
   cancelTurn(turnId: string, reason = "cancelled by user"): Turn {
-    const turn = this.store.cancelTurn(turnId, reason);
+    const turn = this.store.settleTurn(turnId, "cancelled", "cancelled", reason);
     this.responseContinuations.delete(turn.id);
     const session = this.store.loadSession(turn.sessionId);
     if (session.campaignRunId) {
@@ -1071,7 +1071,6 @@ export class AgentRuntime {
       for (const c of controllers) { try { c.abort(reason); } catch {  } }
       this.turnControllers.delete(turnId);
     }
-    this.event(turn.sessionId, "loop_stop", { turnId: turn.id, status: "cancelled", reason: "cancelled", errorSummary: reason });
     return turn;
   }
 
@@ -3002,11 +3001,10 @@ export class AgentRuntime {
     });
   }
 
-  private stopTurn(turn: Turn, status: Turn["status"], reason: NonNullable<Turn["stopReason"]>, errorSummary?: string): Turn {
+  private stopTurn(turn: Turn, status: Exclude<Turn["status"], "running">, reason: NonNullable<Turn["stopReason"]>, errorSummary?: string): Turn {
     const current = this.store.loadTurn(turn.id);
     if (current.status !== "running") return current;
-    this.event(turn.sessionId, "loop_stop", { turnId: turn.id, status, reason, ...(errorSummary ? { errorSummary } : {}) });
-    const updated = this.store.updateTurn(turn.id, { status, stopReason: reason, ...(errorSummary ? { errorSummary } : {}) });
+    const updated = this.store.settleTurn(turn.id, status, reason, errorSummary);
     this.modelCallsByTurn.delete(turn.id);
     this.responseContinuations.delete(turn.id);
     this.deleteStreamingParts(turn.id);
