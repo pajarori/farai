@@ -20,7 +20,7 @@ export function buildDnsProbeCommand(args: Record<string, unknown>): string {
   const requested = optionalStringList(args.recordTypes, "recordTypes", DNS_RECORD_TYPES.length);
   const recordTypes = requested.length ? requested : ["a", "aaaa", "cname"];
   if (recordTypes.some((value) => !DNS_RECORD_TYPES.includes(value as typeof DNS_RECORD_TYPES[number]))) throw new Error("recordTypes contains an unsupported DNS record type");
-  const command = ["-json", "-silent", "-nc", "-duc", "-omit-raw", "-timeout", `${integer(args.timeoutSeconds, 5, 1, 30)}s`, "-rl", String(integer(args.rateLimit, 500, 1, 10_000))];
+  const command = ["-json", "-silent", "-nc", "-duc", "-omit-raw", "-resp", "-timeout", `${integer(args.timeoutSeconds, 5, 1, 30)}s`, "-rl", String(integer(args.rateLimit, 500, 1, 10_000))];
   for (const type of recordTypes) command.push(`-${type}`);
   if (args.includeAsn === true) command.push("-asn");
   const resolvers = optionalStringList(args.resolvers, "resolvers", 100);
@@ -35,8 +35,8 @@ export function parseDnsProbeOutput(raw: string): { records: DnsProbeRecord[]; m
 }
 
 export const dnsProbeTool: ToolDefinition = {
-  name: "dns_probe",
-  description: "Resolve and enrich one or many hostnames with ProjectDiscovery dnsx using selected DNS record types, optional custom resolvers, ASN enrichment, and automatic wildcard filtering. Use this to validate candidates from subdomain_enum before HTTP or port probing; it is not a passive discovery source.",
+  name: "dns_resolve",
+  description: "Resolve and enrich one or many hostnames with ProjectDiscovery dnsx using selected DNS record types, optional custom resolvers, ASN enrichment, and automatic wildcard filtering. Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
   inputSchema: {
     type: "object",
     required: ["names"],
@@ -61,11 +61,11 @@ export const dnsProbeTool: ToolDefinition = {
     assertObject(args, "args");
     const kali = backend(context);
     const result = await kali.exec(buildDnsProbeCommand(args), 175_000, context.signal, 16_000_000);
-    const converted = timeoutBackgroundResult("dns_probe", kali, result);
+    const converted = timeoutBackgroundResult("dns_resolve", kali, result);
     if (converted) return converted;
     const parsed = parseDnsProbeOutput(result.stdout);
     return projectDiscoveryResult(context, {
-      tool: "dns_probe",
+      tool: "dns_resolve",
       backend: "dnsx",
       result,
       records: parsed.records,

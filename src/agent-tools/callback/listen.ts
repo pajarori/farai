@@ -17,7 +17,7 @@ function asPort(value: unknown): number {
 export const callbackListenTool: ToolDefinition = {
   name: "callback_listen",
   description:
-    "Start a raw TCP listener on the host machine for reverse shells or callbacks that must traverse the host's lab VPN. Choose LHOST with callback_host_info first; poll the returned process with session_poll, send shell input through that poll tool, and stop it with callback_stop or session_stop.",
+    "Start a raw TCP listener on the host machine for reverse shells or callbacks that must traverse the host's lab VPN. Choose LHOST with callback_host_info first; poll the returned process with command_poll, send shell input through that poll tool, and stop it with callback_stop or command_stop.",
   inputSchema: {
     type: "object",
     required: ["port"],

@@ -9,7 +9,7 @@ import { readBoundedFileBytesSync } from "../../file-read";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 export const imageViewTool: ToolDefinition = {
-  name: "image_view",
+  name: "image_read",
   description: "Load a PNG, JPEG, GIF, or WebP image from the active workspace for visual inspection by the multimodal model, returning format, dimensions, OCR text when available, and the image attachment. Use this for existing local images, not remote URLs or PDF pages.",
   inputSchema: {
     type: "object",

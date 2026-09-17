@@ -2,6 +2,9 @@ import type { MessageWithParts, ToolCallRecord } from "../types";
 import { canonicalToolName } from "../tool-names";
 import { estimateConversationEntriesTokens, type ConversationEntry } from "./provider";
 import { ensureToolResultsPaired, fitToolResultText } from "./loop/history";
+import { spotlightUntrusted } from "./context-builder";
+
+export type ProjectionOverlay = Map<string, { anchor: boolean; summary: string; chunkId: string; lane: string }>;
 
 export type HistoryProjection = {
   entries: ConversationEntry[];
@@ -18,7 +21,9 @@ export function projectConversationHistory(messages: MessageWithParts[], options
   recentFullToolResults?: number;
   fullToolResultMaxBytes?: number;
   full?: boolean;
+  overlay?: ProjectionOverlay;
 } = {}): HistoryProjection {
+  const overlay = options.overlay;
   const providerToolCallIds = new Map<string, string>();
   for (const message of messages) {
     for (const part of message.parts) {
@@ -42,10 +47,12 @@ export function projectConversationHistory(messages: MessageWithParts[], options
       continue;
     }
     if (message.role === "user") {
+      let partIndex = 0;
       for (const part of message.parts) {
-        if (part.type !== "text") continue;
+        if (part.type !== "text") { partIndex += 1; continue; }
         const text = (part.payload as { text?: unknown }).text;
-        if (typeof text === "string" && text) entries.push({ role: "user", text });
+        if (typeof text === "string" && text) entries.push({ role: "user", text, nodeId: `msg:${message.id}#${partIndex}`, lane: "user" });
+        partIndex += 1;
       }
       continue;
     }
@@ -53,17 +60,31 @@ export function projectConversationHistory(messages: MessageWithParts[], options
     let pendingText: string | undefined;
     let pendingToolCalls: Array<{ id: string; tool: string; args: unknown }> = [];
     let lastText: string | undefined;
+    let groupIndex = 0;
     const flush = () => {
       if (pendingText !== undefined || pendingToolCalls.length > 0) {
         entries.push({
           role: "assistant",
           ...(pendingText !== undefined ? { text: pendingText } : {}),
-          ...(pendingToolCalls.length ? { toolCalls: pendingToolCalls } : {})
+          ...(pendingToolCalls.length ? { toolCalls: pendingToolCalls } : {}),
+          nodeId: `msg:${message.id}#${groupIndex}`,
+          lane: "assistant"
         });
       }
+      groupIndex += 1;
       pendingText = undefined;
       pendingToolCalls = [];
       lastText = undefined;
+    };
+    const emitSummaryAnchor = (nodeId: string) => {
+      const ov = overlay?.get(nodeId);
+      if (!ov?.anchor) return;
+      entries.push({
+        role: "context",
+        text: `summarized older ${ov.lane} results (untrusted data below). open exact raw with context_expand chunk=${ov.chunkId}.\n${spotlightUntrusted(ov.summary)}`,
+        nodeId,
+        lane: `${ov.lane}-summary`
+      });
     };
     for (const part of message.parts) {
       if (part.type === "text") {
@@ -75,10 +96,12 @@ export function projectConversationHistory(messages: MessageWithParts[], options
       } else if (part.type === "tool_call") {
         const record = (part.payload as { record?: ToolCallRecord }).record;
         const tool = canonicalToolName(record?.tool);
-        if (record && tool) pendingToolCalls.push({ id: record.providerToolCallId ?? record.id, tool, args: record.args });
+        if (record && tool && !overlay?.has(record.id)) pendingToolCalls.push({ id: record.providerToolCallId ?? record.id, tool, args: record.args });
       } else if (part.type === "tool_result") {
         flush();
         const payload = part.payload as { toolCallId?: string; tool?: unknown; result?: unknown; toolResult?: { attachments?: import("../types").ToolAttachment[] } };
+        const nodeId = payload.toolCallId ?? "";
+        if (nodeId && overlay?.has(nodeId)) { emitSummaryAnchor(nodeId); continue; }
         const raw = typeof payload.result === "string" ? payload.result : JSON.stringify(payload.result ?? "");
         const tool = canonicalToolName(payload.tool) || "unknown";
         const text = fitToolResultText(raw, options.fullToolResultMaxBytes ?? 8 * 1024);
@@ -88,6 +111,8 @@ export function projectConversationHistory(messages: MessageWithParts[], options
           toolCallId: (payload.toolCallId ? providerToolCallIds.get(payload.toolCallId) : undefined) ?? payload.toolCallId ?? tool,
           tool,
           text,
+          ...(nodeId ? { nodeId } : {}),
+          lane: "tool",
           ...(payload.toolResult?.attachments?.length ? { attachments: payload.toolResult.attachments } : {})
         });
       } else if (part.type === "error") {
@@ -95,11 +120,14 @@ export function projectConversationHistory(messages: MessageWithParts[], options
         const errorText = payload.error ?? payload.text ?? "Tool call failed with an unrecorded error.";
         if (payload.toolCallId) {
           flush();
+          if (overlay?.has(payload.toolCallId)) { emitSummaryAnchor(payload.toolCallId); continue; }
           entries.push({
             role: "tool",
             toolCallId: providerToolCallIds.get(payload.toolCallId) ?? payload.toolCallId,
             tool: canonicalToolName(payload.tool) || "unknown",
-            text: `status: error\nsummary: ${errorText}`
+            text: `status: error\nsummary: ${errorText}`,
+            nodeId: payload.toolCallId,
+            lane: "tool"
           });
         } else {
           pendingText = pendingText ? `${pendingText}\n${errorText}` : errorText;

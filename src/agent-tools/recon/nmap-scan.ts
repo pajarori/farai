@@ -1,1 +1,1 @@
-export { nmapScanTool, parseNaabuOutput, portScanTool } from "./port-scan";
+export { networkScanTool, parseNaabuOutput, parseNmapOpenPorts, buildNaabuCommand, buildNmapCommand } from "./port-scan";

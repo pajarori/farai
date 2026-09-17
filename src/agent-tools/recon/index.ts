@@ -1,8 +1,7 @@
 import type { ToolDefinition } from "../../types";
-import { nmapScanTool, portScanTool } from "./nmap-scan";
+import { networkScanTool } from "./port-scan";
 import { httpRequestTool } from "./http-request";
 import { dirEnumTool } from "./dir-enum";
-import { exploitSearchTool } from "./exploit-search";
 import { subdomainEnumTool } from "./subdomain-enum";
 import { dnsProbeTool } from "./dns-probe";
 import { httpProbeTool } from "./http-probe";
@@ -13,8 +12,7 @@ import { vulnerabilityScanTool } from "./vulnerability-scan";
 import { webCrawlTool } from "./web-crawl";
 
 export const reconTools: ToolDefinition[] = [
-  portScanTool,
-  nmapScanTool,
+  networkScanTool,
   subdomainEnumTool,
   dnsProbeTool,
   httpProbeTool,
@@ -24,6 +22,5 @@ export const reconTools: ToolDefinition[] = [
   vulnerabilityScanTool,
   vulnerabilityLookupTool,
   httpRequestTool,
-  dirEnumTool,
-  exploitSearchTool
+  dirEnumTool
 ];

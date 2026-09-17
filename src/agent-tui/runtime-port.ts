@@ -212,7 +212,7 @@ export interface TuiRuntimePort {
   loadSnapshot(sessionId: string): Promise<SessionSnapshot>;
   loadFindings(sessionId: string): Promise<FindingsSnapshot>;
   loadActivityState(sessionId: string): Promise<ActivityState>;
-  prompt(sessionId: string, input: string): Promise<AgentPromptResult>;
+  prompt(sessionId: string, input: string, signal?: AbortSignal): Promise<AgentPromptResult>;
   answerUserInput(sessionId: string, input: string): Promise<UserInputAnswer>;
   answerUserInputStructured(sessionId: string, answer: UserInputAnswer): Promise<UserInputAnswer>;
   cancelUserInput(sessionId: string): Promise<PendingUserInput>;
@@ -798,10 +798,10 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
         queuedPrompts: runtime.listQueuedFollowupInputs(sessionId)
       };
     },
-    async prompt(sessionId, input) {
+    async prompt(sessionId, input, signal) {
       const session = runtime.loadSession(sessionId);
       try {
-        return await runtime.prompt(session, input);
+        return await runtime.prompt(session, input, signal ? { signal } : {});
       } finally {
         flush();
       }

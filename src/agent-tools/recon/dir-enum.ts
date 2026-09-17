@@ -16,11 +16,16 @@ export function summarizeFfufOutput(raw: string): string {
   }
 }
 
-export function buildDirEnumCommand(url: string, wordlist: string): string {
+export function buildDirEnumCommand(url: string, wordlist: string, options: { timeoutSeconds?: number; threads?: number; rateLimit?: number; maxTimeSeconds?: number } = {}): string {
+  if (!url.includes("FUZZ")) throw new Error("url must contain the FUZZ marker");
+  const timeoutSeconds = Math.max(1, Math.min(30, Math.floor(options.timeoutSeconds ?? 3)));
+  const threads = Math.max(1, Math.min(100, Math.floor(options.threads ?? 40)));
+  const rateLimit = Math.max(0, Math.min(10_000, Math.floor(options.rateLimit ?? 0)));
+  const maxTimeSeconds = Math.max(1, Math.min(120, Math.floor(options.maxTimeSeconds ?? 30)));
   return [
     'output="$(mktemp /tmp/farai-ffuf.XXXXXX)" || exit 1',
     'trap \'rm -f "$output"\' EXIT',
-    `ffuf -u ${JSON.stringify(url)} -w ${JSON.stringify(wordlist)} -o "$output" -of json -noninteractive >/dev/null`,
+    `ffuf -u ${JSON.stringify(url)} -w ${JSON.stringify(wordlist)} -t ${threads} -timeout ${timeoutSeconds} -maxtime ${maxTimeSeconds}${rateLimit ? ` -rate ${rateLimit}` : ""} -o "$output" -of json -noninteractive >/dev/null`,
     'status=$?',
     'if [ -s "$output" ]; then cat "$output"; fi',
     'exit "$status"'
@@ -28,15 +33,23 @@ export function buildDirEnumCommand(url: string, wordlist: string): string {
 }
 
 export const dirEnumTool: ToolDefinition = {
-  name: "dir_enum",
-  description: "Enumerate hidden web paths with ffuf against a URL containing the FUZZ marker, using a supplied wordlist or the default common directory list. Use this for content discovery on an authorized target; use exec_command when custom ffuf matchers, filters, recursion, headers, or multiple injection points are required.",
+  name: "web_directory",
+  description: "Run bounded web content discovery with ffuf against a URL containing the FUZZ marker. The tool applies request timeout, thread, rate, and wall-clock budgets; use command_run only for custom matchers, filters, recursion, headers, or multiple injection points.",
   inputSchema: {
     type: "object",
     required: ["url"],
-    properties: { url: { type: "string" }, wordlist: { type: "string" } }
+    properties: {
+      url: { type: "string" },
+      wordlist: { type: "string" },
+      timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 },
+      threads: { type: "integer", minimum: 1, maximum: 100 },
+      rateLimit: { type: "integer", minimum: 0, maximum: 10_000 },
+      maxTimeSeconds: { type: "integer", minimum: 1, maximum: 120 }
+    },
+    additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 300_000,
+  timeoutMs: 130_000,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -44,10 +57,15 @@ export const dirEnumTool: ToolDefinition = {
     assertObject(args, "args");
     const url = asString(args.url, "url");
     const wordlist = typeof args.wordlist === "string" ? args.wordlist : "/usr/share/wordlists/dirb/common.txt";
-    const command = buildDirEnumCommand(url, wordlist);
+    const maxTimeSeconds = typeof args.maxTimeSeconds === "number" && Number.isInteger(args.maxTimeSeconds) ? Math.max(1, Math.min(120, args.maxTimeSeconds)) : 30;
+    const options: { timeoutSeconds?: number; threads?: number; rateLimit?: number; maxTimeSeconds: number } = { maxTimeSeconds };
+    if (typeof args.timeoutSeconds === "number") options.timeoutSeconds = args.timeoutSeconds;
+    if (typeof args.threads === "number") options.threads = args.threads;
+    if (typeof args.rateLimit === "number") options.rateLimit = args.rateLimit;
+    const command = buildDirEnumCommand(url, wordlist, options);
     const kali = backend(context);
-    const result = await kali.exec(command);
-    const converted = timeoutBackgroundResult("dir_enum", kali, result);
+    const result = await kali.exec(command, maxTimeSeconds * 1_000 + 5_000, context.signal, 8_000_000);
+    const converted = timeoutBackgroundResult("web_directory", kali, result);
     if (converted) return converted;
     return summarizeOrSpool(context, {
       title: "directory enumeration",

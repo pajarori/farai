@@ -4,13 +4,13 @@ import type { CampaignRun, FileStateStore, Session, ToolDefinition } from "../ty
 import { canonicalToolName } from "../tool-names";
 import { renderSkillCatalog } from "../agent-skills/registry";
 import { activeBackgroundJobs } from "./loop/background";
-import { autoCompactThreshold, buildCompactedHistory } from "./loop/compaction";
+import { autoCompactThreshold, buildCompactedHistory } from "../agent-context/summary-runner";
 import { buildToolsPayload, estimateProviderMessagesTokens, toProviderMessages, type ConversationEntry } from "./provider";
 import type { ProviderToolDef } from "./provider/protocol";
 import { buildSystemPrompt } from "./provider/system-prompt";
 import { ContextBuilderCache, spotlightUntrusted, workspaceRelativeReference, type PlannerContextBlock } from "./context-builder";
 import type { KnowledgeQuery } from "../agent-knowledge/types";
-import { projectConversationHistory, type HistoryProjection } from "./history-projection";
+import { projectConversationHistory, type HistoryProjection, type ProjectionOverlay } from "./history-projection";
 import { selectCapabilities } from "./capability-admission";
 import { ContextSearchIndex } from "./context-index";
 import { takeBytes } from "../agent-tools/shared/output-bound";
@@ -60,6 +60,8 @@ export type ContextManifest = {
     omittedEntries: number;
     fullToolResults: number;
     receiptToolResults: number;
+    summarizedChunks: number;
+    summarizedNodes: number;
   };
   breakdown: Record<string, number>;
   stored: Record<string, number>;
@@ -90,6 +92,7 @@ export type ContextRequest = {
   fullHistory?: boolean;
   historyOverride?: ConversationEntry[];
   throughMessageRowId?: number;
+  overlay?: ProjectionOverlay;
 };
 
 export class ContextEngine {
@@ -125,7 +128,8 @@ export class ContextEngine {
     const directToolNames = toolCatalog.map((tool) => tool.name);
     const history = projectConversationHistory(messages, {
       fullToolResultMaxBytes: 8 * 1024,
-      full: true
+      full: true,
+      ...(input.overlay ? { overlay: input.overlay } : {})
     });
     history.entries = input.historyOverride ?? [...retainedHistory, ...history.entries];
     history.estimatedTokens = estimateProviderMessagesTokens(toProviderMessages(history.entries));
@@ -173,7 +177,9 @@ export class ContextEngine {
         entries: history.entries.length,
         omittedEntries: history.omittedEntries,
         fullToolResults: history.fullToolResults,
-        receiptToolResults: history.receiptToolResults
+        receiptToolResults: history.receiptToolResults,
+        summarizedChunks: input.overlay ? new Set([...input.overlay.values()].map((entry) => entry.chunkId)).size : 0,
+        summarizedNodes: input.overlay?.size ?? 0
       },
       breakdown,
       stored: this.store.sessionEntityCounts(input.session.id)
@@ -276,7 +282,7 @@ export class ContextEngine {
       title: "Kali Capability Inventory",
       source: "Farai curated image manifest",
       content: [
-        "The curated Kali command map is preloaded here so exact available commands can be selected and called directly with exec_command. The managed image installs only the manifest-selected packages and Farai runtime extras, records its actual PATH inventory at build time, and is rejected when its capability contract is stale or incomplete. Do not run which, command -v, or kali_tool_search before a manifest-listed command. Prefer a purpose-built Farai tool when it covers the workflow. kali_tool_search is only a recovery path after an unexpected exit 127, runtime package changes, or genuine command ambiguity. Capabilities absent from this map are not part of the default image; choose an available alternative instead of assuming the full Kali distribution is installed.",
+        "The curated Kali command map is preloaded here so exact available commands can be selected and called directly with command_run. The managed image installs only the manifest-selected packages and Farai runtime extras, records its actual PATH inventory at build time, and is rejected when its capability contract is stale or incomplete. Do not run which, command -v, or kali_search before a manifest-listed command. Prefer a purpose-built Farai tool when it covers the workflow. kali_search is only a recovery path after an unexpected exit 127, runtime package changes, or genuine command ambiguity. Capabilities absent from this map are not part of the default image; choose an available alternative instead of assuming the full Kali distribution is installed.",
         renderKaliCommandCatalog()
       ].join("\n\n"),
       mandatory: true,
@@ -336,10 +342,13 @@ export class ContextEngine {
       stable: false,
       priority: 60,
       relevance: query ? 0.75 : 0,
-      retrievalRef: "knowledge_search, knowledge_read"
+      retrievalRef: "knowledge_manage.search, knowledge_manage.read"
     }));
 
-    const canLoadSkills = !session.toolScope?.length || session.toolScope.some((name) => canonicalToolName(name) === "skill_load");
+    const canLoadSkills = !session.toolScope?.length || session.toolScope.some((name) => {
+      const tool = canonicalToolName(name);
+      return tool === "skill_load" || tool === "knowledge_manage";
+    });
     const skills = this.skillsEnabled && canLoadSkills ? renderSkillCatalog(workspace, skillCatalogBudget(contextWindow)) : undefined;
     if (skills) candidates.push(candidate({
       id: "skill-catalog",
@@ -425,7 +434,7 @@ function sameProviderTool(left: ProviderToolDef, right: ProviderToolDef): boolea
 export function formatContextManifest(manifest: ContextManifest): string {
   const rows = [
     `Projected request: ${manifest.estimatedTokens} / ${manifest.requestBudget} estimated tokens${manifest.overBudget ? " (over budget)" : ""}`,
-    `History: ${manifest.history.tokens} tokens, ${manifest.history.entries} entries, ${manifest.history.receiptToolResults} receipts, ${manifest.history.omittedEntries} entries omitted`,
+    `History: ${manifest.history.tokens} tokens, ${manifest.history.entries} entries, ${manifest.history.receiptToolResults} receipts, ${manifest.history.omittedEntries} entries omitted, ${manifest.history.summarizedChunks} summarized chunks (${manifest.history.summarizedNodes} nodes)`,
     `Tools: ${manifest.tools.direct.length} direct, ${manifest.tools.schemaTokens} schema tokens`,
     "Breakdown:",
     ...Object.entries(manifest.breakdown).map(([name, tokens]) => `- ${name}: ${tokens} tokens`),
@@ -532,7 +541,7 @@ function renderWorkingFiles(fileState: FileStateStore | undefined, sessionId: st
   for (const entry of entries) {
     const body = takeBytes(entry.content, WORKING_FILE_MAX_BYTES, "head");
     const truncated = Buffer.byteLength(entry.content, "utf8") > Buffer.byteLength(body, "utf8");
-    blocks.push(`--- ${workspaceRelative(entry.path)} ---\n${body}${truncated ? "\n...[truncated — use fs_read with offset/limit for more]" : ""}`);
+    blocks.push(`--- ${workspaceRelative(entry.path)} ---\n${body}${truncated ? "\n...[truncated — use file_read with offset/limit for more]" : ""}`);
   }
   return takeBytes(blocks.join("\n\n"), WORKING_FILES_TOTAL_MAX_BYTES, "head");
 }
@@ -618,7 +627,7 @@ function buildWorkspaceOutline(workspace: string, query: string, recentPaths: st
     .slice(0, 24)
     .map((item) => item.file);
   if (!files.length) return undefined;
-  const lines = ["Ranked file/symbol outline; inspect implementation with fs_read/fs_grep."];
+  const lines = ["Ranked file/symbol outline; inspect implementation with file_read/file_search."];
   for (const file of files) {
     const symbols = cache.extractSymbols(workspace, file);
     lines.push(`- ${file}${symbols.length ? `: ${symbols.join(", ")}` : ""}`);

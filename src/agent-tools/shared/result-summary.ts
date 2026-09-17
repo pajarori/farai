@@ -23,7 +23,7 @@ export function summarizeOrSpool(
   return {
     ok: opts.ok,
     summary: `${opts.title}: ${opts.ok ? "completed" : "failed"}`,
-    output: `${compact}\n\n[full output stored as artifact ${artifact.id}; read it with tool_output_read]`,
+    output: `${compact}\n\n[full output stored as artifact ${artifact.id}; read it with output_read]`,
     outputArtifactId: artifact.id,
     metadata: {
       fullOutputArtifactId: artifact.id,

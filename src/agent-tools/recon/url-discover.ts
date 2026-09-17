@@ -36,7 +36,7 @@ export function parseUrlDiscoverOutput(raw: string): { records: UrlDiscoverRecor
 
 export const urlDiscoverTool: ToolDefinition = {
   name: "url_discover",
-  description: "Discover historical and passive URLs associated with one or many domains through ProjectDiscovery urlfinder using public AlienVault, Common Crawl, and Wayback Archive sources. This does not request every discovered URL; use it to build an endpoint corpus, then validate selected URLs with http_probe, web_crawl, browser tools, or http_request.",
+  description: "Discover historical and passive URLs associated with one or many domains through ProjectDiscovery urlfinder using public AlienVault, Common Crawl, and Wayback Archive sources. Use limit to bound returned records. This does not request every discovered URL; validate selected URLs with service_probe, web_crawl, browser tools, or http_request.",
   inputSchema: {
     type: "object",
     required: ["domains"],
@@ -46,7 +46,8 @@ export const urlDiscoverTool: ToolDefinition = {
       scope: { type: "string", enum: ["fqdn", "registrable_domain", "none"] },
       timeoutSeconds: { type: "integer", minimum: 1, maximum: 120 },
       maxMinutes: { type: "integer", minimum: 1, maximum: 60 },
-      rateLimit: { type: "integer", minimum: 1, maximum: 1_000 }
+      rateLimit: { type: "integer", minimum: 1, maximum: 1_000 },
+      limit: { type: "integer", minimum: 1, maximum: 10_000 }
     },
     additionalProperties: false
   },
@@ -63,17 +64,21 @@ export const urlDiscoverTool: ToolDefinition = {
     const converted = timeoutBackgroundResult("url_discover", kali, result);
     if (converted) return converted;
     const parsed = parseUrlDiscoverOutput(result.stdout);
+    const limit = args.limit === undefined ? undefined : integer(args.limit, 1_000, 1, 10_000);
+    const records = limit === undefined ? parsed.records : parsed.records.slice(0, limit);
     return projectDiscoveryResult(context, {
       tool: "url_discover",
       backend: "urlfinder",
       result,
-      records: parsed.records,
+      records,
       malformed: parsed.malformed,
       noun: "URL",
-      outputLines: parsed.records.map((item) => `${item.url}${item.sources.length ? ` · ${item.sources.join(", ")}` : ""}`),
+      outputLines: records.map((item) => `${item.url}${item.sources.length ? ` · ${item.sources.join(", ")}` : ""}`),
       metadata: {
-        uniqueUrls: new Set(parsed.records.map((item) => item.url)).size,
-        sources: [...new Set(parsed.records.flatMap((item) => item.sources))]
+        uniqueUrls: new Set(records.map((item) => item.url)).size,
+        discoveredUrls: parsed.records.length,
+        ...(limit === undefined ? {} : { resultLimit: limit, resultsLimited: parsed.records.length > records.length }),
+        sources: [...new Set(records.flatMap((item) => item.sources))]
       }
     });
   }

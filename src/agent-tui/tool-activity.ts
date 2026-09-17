@@ -1,33 +1,27 @@
 import type { ToolResult } from "../types";
-import { canonicalToolName } from "../tool-names";
 import { parseDirectoryResults, parseNmap, splitHttpResponse } from "./tool-renderers";
 import { truncateTerminal } from "./terminal-text";
 import { isActiveToolStatus, toolDefinition, toolTitle } from "./tool-presentation";
+import { resolveToolLifecycle, type ToolLifecycleFamily, type ToolLifecycleInput, type ToolLifecyclePolicy } from "./tool-lifecycle";
 
-export type ToolActivityFamily =
-  | "command"
-  | "workspace"
-  | "browser"
-  | "http"
-  | "proxy"
-  | "recon"
-  | "knowledge"
-  | "campaign"
-  | "agent"
-  | "mcp"
-  | "media"
-  | "email"
-  | "generic";
+export type ToolActivityFamily = ToolLifecycleFamily;
 
 export type ToolActivityPresentation = {
   family: ToolActivityFamily;
   title: string;
   compact: string;
+  noun: string;
   outcome?: string;
   preview: string[];
   groupKey?: string;
   groupPast?: string;
   groupActive?: string;
+  groupMutations?: boolean;
+  groupItem?: string;
+  groupNoun?: string;
+  groupMaxItems?: number;
+  detail?: ToolLifecyclePolicy["detail"];
+  showOutcome?: boolean;
   standalone: boolean;
   warning: boolean;
 };
@@ -42,61 +36,61 @@ export type ToolActivityInput = {
   toolResult?: ToolResult;
 };
 
-const BROWSER_TOOLS = new Set([
-  "browser_navigate",
-  "browser_snapshot",
-  "browser_find",
-  "browser_click",
-  "browser_fill_form",
-  "browser_type",
-  "browser_press_key",
-  "browser_wait_for",
-  "browser_tabs",
-  "browser_network_requests",
-  "browser_network_request"
-]);
-
-const WORKSPACE_TOOLS = new Set(["fs_read", "fs_list", "fs_grep", "fs_write", "fs_edit", "patch_apply", "notebook_edit", "git_status", "git_diff", "lsp_inspect", "tool_output_read", "code_write_script"]);
-const RECON_TOOLS = new Set(["port_scan", "nmap_scan", "subdomain_enum", "dns_probe", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "dir_enum", "exploit_search", "kali_tool_search"]);
-const HTTP_TOOLS = new Set(["http_request", "internet_search", "internet_fetch"]);
-
 function isCommandTool(tool: string): boolean {
-  return tool === "exec_command" || tool === "shell_exec";
+  return tool === "command_run";
 }
 
 function commandText(tool: string, args: Record<string, unknown>): string | undefined {
-  return stringValue(tool === "exec_command" ? args.cmd : args.command);
+  return stringValue(tool === "command_run" ? args.cmd : args.command);
 }
 
 export function presentToolActivity(input: ToolActivityInput): ToolActivityPresentation {
-  const tool = canonicalToolName(input.tool) || "tool";
-  const args = inputObject(input.args);
+  const definition = toolDefinition(input.tool);
+  const lifecycleInput: ToolLifecycleInput = {
+    tool: input.tool,
+    args: input.args,
+    status: input.status,
+    metadata: input.toolResult?.metadata ?? {},
+    ...(input.toolResult ? { result: input.toolResult } : {}),
+    warning: hasWarning(input.toolResult, input.result ?? input.fullResult ?? ""),
+    ...(definition ? { definitionMutates: definition.mutates } : {})
+  };
+  const lifecycle = resolveToolLifecycle(lifecycleInput);
+  const tool = lifecycle.tool;
+  const args = lifecycle.args;
   const active = isActiveToolStatus(input.status);
   const text = active ? input.liveOutput ?? input.result ?? "" : input.result ?? input.fullResult ?? "";
   const metadata = input.toolResult?.metadata ?? {};
-  const family = toolFamily(tool);
+  const family = lifecycle.family;
   const title = tool === "email_wait" && !active && metadata.timedOut === true
     ? emailWaitTimeoutTitle(args)
     : toolTitle(tool, args, input.status, 240);
   const warning = hasWarning(input.toolResult, text);
   const preview = toolPreview(tool, args, text, metadata, active);
   const outcome = toolOutcome(tool, args, text, metadata, input.toolResult, active);
-  const grouping = activityGrouping(tool, family, args, metadata);
-  const standalone = toolStandalone(tool, input, warning, family);
   return {
     family,
     title,
     compact: compactActivityLabel(tool, args, title),
+    noun: lifecycle.noun,
     ...(outcome ? { outcome } : {}),
     preview,
-    ...(grouping ? grouping : {}),
-    standalone,
+    ...(lifecycle.groupKey ? { groupKey: lifecycle.groupKey } : {}),
+    ...(lifecycle.groupPast ? { groupPast: lifecycle.groupPast } : {}),
+    ...(lifecycle.groupActive ? { groupActive: lifecycle.groupActive } : {}),
+    ...(lifecycle.groupMutations !== undefined ? { groupMutations: lifecycle.groupMutations } : {}),
+    ...(lifecycle.groupItem ? { groupItem: lifecycle.groupItem } : {}),
+    ...(lifecycle.groupNoun ? { groupNoun: lifecycle.groupNoun } : {}),
+    ...(lifecycle.groupMaxItems !== undefined ? { groupMaxItems: lifecycle.groupMaxItems } : {}),
+    ...(lifecycle.detail ? { detail: lifecycle.detail } : {}),
+    ...(lifecycle.showOutcome !== undefined ? { showOutcome: lifecycle.showOutcome } : {}),
+    standalone: lifecycle.standalone,
     warning
   };
 }
 
 export function activityStatus(items: readonly ToolActivityInput[]): "running" | "error" | "done" {
-  if (items.some((item) => isActiveToolStatus(item.status))) return "running";
+  if (items.some((item) => isActiveToolStatus(item.status) || item.toolResult?.status === "running_background")) return "running";
   if (items.some((item) => item.status === "error" || item.toolResult?.ok === false)) return "error";
   return "done";
 }
@@ -115,65 +109,6 @@ export function formatActivityDuration(durationMs: number | undefined): string |
   }
   const seconds = Math.round(durationMs / 1_000);
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
-}
-
-function toolFamily(tool: string): ToolActivityFamily {
-  if (isCommandTool(tool) || tool === "write_stdin" || tool === "session_poll" || tool === "session_stop") return "command";
-  if (WORKSPACE_TOOLS.has(tool)) return "workspace";
-  if (tool === "browser_context" || BROWSER_TOOLS.has(tool)) return "browser";
-  if (HTTP_TOOLS.has(tool)) return "http";
-  if (tool.startsWith("proxy_")) return "proxy";
-  if (RECON_TOOLS.has(tool)) return "recon";
-  if (tool.startsWith("knowledge_") || tool.startsWith("memory_") || tool.startsWith("notes_") || tool.startsWith("evidence_")) return "knowledge";
-  if (tool.startsWith("campaign_") || tool.startsWith("report_")) return "campaign";
-  if (tool.startsWith("agent_")) return "agent";
-  if (tool.startsWith("mcp_")) return "mcp";
-  if (tool === "image_view") return "media";
-  if (tool.startsWith("email_")) return "email";
-  return "generic";
-}
-
-function activityGrouping(
-  tool: string,
-  family: ToolActivityFamily,
-  args: Record<string, unknown>,
-  metadata: Record<string, unknown>
-): Pick<ToolActivityPresentation, "groupKey" | "groupPast" | "groupActive"> | undefined {
-  if (isCommandTool(tool)) return { groupKey: "command", groupPast: "ran", groupActive: "running" };
-  if (family === "workspace") return { groupKey: "workspace", groupPast: "inspected", groupActive: "inspecting" };
-  if (family === "browser" && tool !== "browser_context") {
-    const context = stringValue(metadata.browserContextName) ?? stringValue(args.browser) ?? "default";
-    return { groupKey: `browser:${context}`, groupPast: `browsed · ${context}`, groupActive: `browsing · ${context}` };
-  }
-  if (tool === "http_request") {
-    const origin = urlOrigin(stringValue(args.url));
-    return { groupKey: `http:${origin ?? "requests"}`, groupPast: origin ? `probed · ${origin}` : "probed endpoints", groupActive: origin ? `probing · ${origin}` : "probing endpoints" };
-  }
-  if (family === "proxy" && !toolDefinition(tool)?.mutates) {
-    const host = stringValue(metadata.host) ?? stringValue(args.host) ?? stringValue(args.filter) ?? "traffic";
-    return { groupKey: `proxy:${host}`, groupPast: `inspected proxy · ${host}`, groupActive: `inspecting proxy · ${host}` };
-  }
-  if (family === "knowledge" && !toolDefinition(tool)?.mutates) return { groupKey: "knowledge", groupPast: "queried knowledge", groupActive: "querying knowledge" };
-  if (family === "mcp" && !toolDefinition(tool)?.mutates) {
-    const server = stringValue(args.server) ?? "mcp";
-    return { groupKey: `mcp:${server}`, groupPast: `queried ${server}`, groupActive: `querying ${server}` };
-  }
-  if (family === "email" && tool !== "email_create") {
-    const emailId = stringValue(args.emailId) ?? stringValue(metadata.emailId) ?? "email";
-    return { groupKey: `email:${emailId}`, groupPast: "checked email", groupActive: "checking email" };
-  }
-  return undefined;
-}
-
-function toolStandalone(tool: string, input: ToolActivityInput, warning: boolean, family: ToolActivityFamily): boolean {
-  if (input.status === "error" || input.toolResult?.ok === false || input.status === "running_background") return true;
-  if (input.toolResult?.attachments?.length || input.toolResult?.evidence?.length || input.toolResult?.outputArtifactId) return true;
-  if (warning) return true;
-  if (family === "recon" || family === "campaign" || family === "agent" || family === "media" || family === "email") return true;
-  if (tool === "browser_context" || tool === "internet_search" || tool === "internet_fetch") return true;
-  if (family === "browser") return false;
-  const definition = toolDefinition(tool);
-  return definition?.mutates === true && !isCommandTool(tool);
 }
 
 function compactActivityLabel(tool: string, args: Record<string, unknown>, title: string): string {
@@ -202,13 +137,13 @@ function toolOutcome(
 ): string | undefined {
   if (active) return liveOutcome(text);
   if (result?.ok === false) return firstMeaningfulLine(text) ?? result.summary;
-  if (tool === "port_scan" || tool === "nmap_scan" || (isCommandTool(tool) && /^\s*(?:sudo\s+)?nmap\b/i.test(commandText(tool, args) ?? ""))) {
+  if (tool === "network_scan" || (isCommandTool(tool) && /^\s*(?:sudo\s+)?nmap\b/i.test(commandText(tool, args) ?? ""))) {
     const ports = parseNmap(text);
     if (ports.length > 0) return ports.slice(0, 6).map((row) => `${row.port}/${row.service}`).join(", ") + (ports.length > 6 ? ` · +${ports.length - 6}` : "");
     const discovered = numberValue(metadata.recordCount) ?? arrayValue(metadata.discoveredPorts).length;
     if (discovered > 0) return `${discovered} open port${discovered === 1 ? "" : "s"}`;
   }
-  if (tool === "subdomain_enum") {
+  if (tool === "asset_subdomains") {
     const names = arrayValue(metadata.discoveredSubdomains);
     const sources = arrayValue(metadata.sources);
     const warnings = sources.filter((value) => objectValue(value)?.status !== "ok").length;
@@ -216,7 +151,7 @@ function toolOutcome(
   }
   const structuredRecon = structuredReconOutcome(tool, metadata);
   if (structuredRecon) return structuredRecon;
-  if (tool === "dir_enum") {
+  if (tool === "web_directory") {
     const dirs = parseDirectoryResults(text);
     if (dirs.length > 0) return `${dirs.length} path${dirs.length === 1 ? "" : "s"}`;
     const summarized = text.split("\n").filter((line) => /^\d{3}\s+https?:\/\//.test(line.trim()));
@@ -226,12 +161,12 @@ function toolOutcome(
     const http = splitHttpResponse(text);
     if (http.status) return http.status.replace(/^HTTP\/\S+\s+/, "").toLowerCase();
   }
-  if (tool === "internet_search") {
+  if (tool === "web_search") {
     const results = arrayValue(metadata.results);
     const provider = stringValue(metadata.provider);
     return `${results.length} result${results.length === 1 ? "" : "s"}${provider ? ` · ${provider}` : ""}`;
   }
-  if (tool === "internet_fetch") {
+  if (tool === "web_fetch") {
     const contentType = stringValue(metadata.contentType)?.split(";", 1)[0];
     const bytes = numberValue(metadata.bytes);
     return [contentType, bytes !== undefined ? formatBytes(bytes) : undefined].filter(Boolean).join(" · ") || result?.summary;
@@ -251,12 +186,12 @@ function toolOutcome(
     const message = objectValue(metadata.message);
     return message ? `${String(message.from ?? "sender")} · ${String(message.subject ?? "email")}` : cleanSummary(result?.summary);
   }
-  if (tool === "fs_read") return cleanSummary(result?.summary) ?? `${semanticLines(text, Number.MAX_SAFE_INTEGER).length} lines`;
-  if (tool === "fs_list") {
+  if (tool === "file_read") return cleanSummary(result?.summary) ?? `${semanticLines(text, Number.MAX_SAFE_INTEGER).length} lines`;
+  if (tool === "file_list") {
     const count = semanticLines(text, Number.MAX_SAFE_INTEGER).length;
     return `${count} ${count === 1 ? "entry" : "entries"}`;
   }
-  if (tool === "fs_grep") {
+  if (tool === "file_search") {
     const count = semanticLines(text, Number.MAX_SAFE_INTEGER).filter((line) => line !== "No matches").length;
     return `${count} match${count === 1 ? "" : "es"}`;
   }
@@ -272,7 +207,7 @@ function toolOutcome(
   }
   if (tool.startsWith("browser_")) return browserOutcome(text, metadata) ?? cleanSummary(result?.summary);
   if (tool.startsWith("proxy_")) return proxyOutcome(metadata, result?.summary, text);
-  if (tool === "image_view") return result?.summary?.replace(/^image\s+/i, "") ?? firstMeaningfulLine(text);
+  if (tool === "image_read") return result?.summary?.replace(/^image\s+/i, "") ?? firstMeaningfulLine(text);
   if (isCommandTool(tool)) {
     const first = firstMeaningfulLine(text);
     if (first) return first;
@@ -290,11 +225,11 @@ function toolPreview(
   active: boolean
 ): string[] {
   if (!text && !Object.keys(metadata).length) return [];
-  if (tool === "port_scan" || tool === "nmap_scan" || (isCommandTool(tool) && /^\s*(?:sudo\s+)?nmap\b/i.test(commandText(tool, args) ?? ""))) {
+  if (tool === "network_scan" || (isCommandTool(tool) && /^\s*(?:sudo\s+)?nmap\b/i.test(commandText(tool, args) ?? ""))) {
     const rows = parseNmap(text);
     if (rows.length > 0) return withMore(rows.slice(0, 5).map((row) => `${row.port}/${row.proto}  ${row.service}${row.version ? `  ${row.version}` : ""}`), rows.length, 5);
   }
-  if (tool === "subdomain_enum") {
+  if (tool === "asset_subdomains") {
     const names = arrayValue(metadata.discoveredSubdomains).map(String);
     const errors = arrayValue(metadata.sources).flatMap((value) => {
       const source = objectValue(value);
@@ -304,11 +239,11 @@ function toolPreview(
   }
   const structuredRecon = structuredReconPreview(tool, metadata);
   if (structuredRecon.length) return structuredRecon;
-  if (tool === "dir_enum") {
+  if (tool === "web_directory") {
     const rows = parseDirectoryResults(text);
     if (rows.length > 0) return withMore(rows.slice(0, 5).map((row) => `${row.status}  ${row.url}`), rows.length, 5);
   }
-  if (tool === "internet_search") {
+  if (tool === "web_search") {
     const results = arrayValue(metadata.results);
     const lines = results.slice(0, 5).flatMap((value) => {
       const result = objectValue(value);
@@ -331,11 +266,11 @@ function toolPreview(
 
 function structuredReconOutcome(tool: string, metadata: Record<string, unknown>): string | undefined {
   const records = numberValue(metadata.recordCount) ?? arrayValue(metadata.records).length;
-  if (tool === "dns_probe") {
+  if (tool === "dns_resolve") {
     const resolved = numberValue(metadata.resolvedNames) ?? records;
     return `${resolved} resolved name${resolved === 1 ? "" : "s"}`;
   }
-  if (tool === "http_probe") {
+  if (tool === "service_probe") {
     const live = numberValue(metadata.liveServices) ?? records;
     const failed = numberValue(metadata.failedTargets) ?? 0;
     return `${live} live service${live === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`;
@@ -351,7 +286,7 @@ function structuredReconOutcome(tool: string, metadata: Record<string, unknown>)
     const counts = severity ? ["critical", "high", "medium", "low", "info"].flatMap((name) => numberValue(severity[name]) ? [`${name} ${numberValue(severity[name])}`] : []) : [];
     return `${records} finding${records === 1 ? "" : "s"}${counts.length ? ` · ${counts.join(", ")}` : ""}`;
   }
-  if (tool === "tls_probe") {
+  if (tool === "tls_inspect") {
     const successful = numberValue(metadata.successfulProbes) ?? records;
     const expiring = numberValue(metadata.expiringCertificates) ?? 0;
     return `${successful} tls endpoint${successful === 1 ? "" : "s"}${expiring ? ` · ${expiring} expiring soon` : ""}`;
@@ -375,16 +310,16 @@ function structuredReconPreview(tool: string, metadata: Record<string, unknown>)
 }
 
 function formatStructuredReconRecord(tool: string, item: Record<string, unknown>): string {
-  if (tool === "port_scan" || tool === "nmap_scan") return `${String(item.host ?? "host")}:${String(item.port ?? "?")}/${String(item.protocol ?? "tcp")}${item.service ? ` · ${String(item.service)}` : ""}`;
-  if (tool === "dns_probe") {
+  if (tool === "network_scan") return `${String(item.host ?? "host")}:${String(item.port ?? "?")}/${String(item.protocol ?? "tcp")}${item.service ? ` · ${String(item.service)}` : ""}`;
+  if (tool === "dns_resolve") {
     const recordMap = objectValue(item.records);
     const answers = recordMap ? Object.entries(recordMap).flatMap(([type, values]) => arrayValue(values).map((value) => `${type.toUpperCase()} ${String(value)}`)).slice(0, 4) : [];
     return `${String(item.name ?? "name")}${answers.length ? ` · ${answers.join(" · ")}` : " · no answers"}`;
   }
-  if (tool === "http_probe") return [item.statusCode ?? "?", item.finalUrl ?? item.url ?? item.input, item.title, item.webServer].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "service_probe") return [item.statusCode ?? "?", item.finalUrl ?? item.url ?? item.input, item.title, item.webServer].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
   if (tool === "web_crawl") return [item.method ?? "GET", item.url, item.statusCode, item.tag].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
   if (tool === "vulnerability_scan") return [String(item.severity ?? "unknown").toUpperCase(), item.templateId, item.name, item.matchedAt].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
-  if (tool === "tls_probe") return [`${String(item.host ?? "host")}${item.port ? `:${String(item.port)}` : ""}`, item.version, item.cipher, item.commonName].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "tls_inspect") return [`${String(item.host ?? "host")}${item.port ? `:${String(item.port)}` : ""}`, item.version, item.cipher, item.commonName].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
   if (tool === "url_discover") return [item.url, arrayValue(item.sources).join(", ")].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
   if (tool === "vulnerability_lookup") return [item.id, String(item.severity ?? "").toUpperCase(), item.title, item.cvssScore !== undefined ? `cvss ${String(item.cvssScore)}` : undefined].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
   return Object.values(item).filter((value) => typeof value === "string" || typeof value === "number").slice(0, 4).map(String).join(" · ");
@@ -488,10 +423,6 @@ function cleanSummary(summary: string | undefined): string | undefined {
   return summary.trim().replace(/\bprocessId=[^\s]+/g, "").replace(/\bjobId=[^\s]+/g, "").replace(/\s+/g, " ").trim();
 }
 
-function inputObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -506,11 +437,6 @@ function stringValue(value: unknown): string | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function urlOrigin(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  try { return new URL(value).host; } catch { return undefined; }
 }
 
 function hostFromUrl(value: string | undefined): string | undefined {

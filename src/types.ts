@@ -28,6 +28,13 @@ export type EvidenceLevel = "signal" | "differential_observed" | "reproduced" | 
 export type ToolVisibility = "core" | "workspace" | "recon" | "verification" | "callback" | "external";
 export type ToolConcurrencyScope = "runtime" | "workspace" | "session";
 
+export type ToolProvenance = {
+  source: "builtin" | "mcp" | "overlay";
+  provider?: string;
+  server?: string;
+  version?: string;
+};
+
 export type ToolStatus = "pending" | "running" | "running_background" | "done" | "error";
 export type JobKind = "process" | "agent";
 export type JobStatus = "created" | "starting" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled" | "lost";
@@ -323,6 +330,19 @@ export type CompactionBoundary = {
   summary: string;
   preCompactTokens?: number;
   postCompactTokens?: number;
+  createdAt: string;
+};
+
+export type ContextSummaryChunk = {
+  id: string;
+  sessionId: string;
+  lane: string;
+  coveredNodeIds: string[];
+  anchorNodeId: string;
+  throughMessageRowId: number;
+  summary: string;
+  sourceCount: number;
+  sourceBytes: number;
   createdAt: string;
 };
 
@@ -671,6 +691,7 @@ export type ToolContext = {
     loadSession?: (sessionId: string) => Session;
     saveOutputArtifact: (input: { sessionId: string; toolCallId?: string; content: string }) => OutputArtifact;
     readOutputArtifact?: (artifactId: string, options?: OutputArtifactReadOptions) => OutputArtifactReadResult | undefined;
+    expandContextSummaryChunk?: (sessionId: string, chunkId: string) => { lane: string; raws: Array<{ toolCallId: string; tool: string; text: string }> } | undefined;
     loadJob?: (jobId: string) => BackgroundJob;
     findJobByProcessId?: (processId: string) => BackgroundJob | undefined;
     addNote: (note: Note) => void;
@@ -720,6 +741,8 @@ export type ToolDefinition<TArgs = unknown> = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  provenance?: ToolProvenance;
   mutates: boolean;
   timeoutMs: number;
   parallel: boolean;

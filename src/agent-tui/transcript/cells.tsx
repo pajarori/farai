@@ -10,6 +10,7 @@ import { ArtifactRow, FindingRow, McpInventoryRow } from "./cells/artifact-cell"
 import { PlanRow } from "./cells/plan-cell";
 import { TodoListRow } from "./cells/todo-list-cell";
 import { PhaseRow, ProgressRow } from "./cells/progress-cell";
+import { ContextRow } from "./cells/context-cell";
 
 type FaraiRowProps = {
   row: TimelineRow;
@@ -29,6 +30,7 @@ const ROW_COMPONENTS = {
   plan: ((props) => <PlanRow row={props.row as Extract<TimelineRow, { kind: "plan" }>} animated={props.animated} />),
   todo_list: ((props) => <TodoListRow row={props.row as Extract<TimelineRow, { kind: "todo_list" }>} />),
   mcp_inventory: ((props) => <McpInventoryRow row={props.row as Extract<TimelineRow, { kind: "mcp_inventory" }>} />),
+  context: ((props) => <ContextRow row={props.row as Extract<TimelineRow, { kind: "context" }>} />),
   artifact: ((props) => <ArtifactRow row={props.row as Extract<TimelineRow, { kind: "artifact" }>} />),
   finding: ((props) => <FindingRow row={props.row as Extract<TimelineRow, { kind: "finding" }>} />),
   progress: ((props) => <ProgressRow row={props.row as Extract<TimelineRow, { kind: "progress" }>} animated={props.animated} />),

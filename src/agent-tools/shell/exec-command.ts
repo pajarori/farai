@@ -10,7 +10,7 @@ import { ensureMcpProxyReady, managedProxyForSession } from "../mcp-manager";
 import { proxiedShellCommand, upstreamTlsVerificationFailed } from "./exec";
 
 export const execCommandTool: ToolDefinition = {
-  name: "exec_command", description: "Execute a shell command in the managed workspace with bounded output; use write_stdin with the returned processId for long-running sessions.",
+  name: "command_run_legacy", description: "Execute a shell command in the managed workspace with bounded output; use command_input with the returned processId for long-running sessions.",
   inputSchema: { type: "object", required: ["cmd"], properties: { cmd: { type: "string" }, workdir: { type: "string" }, yield_time_ms: { type: "number" }, tty: { type: "boolean" }, max_output_tokens: { type: "number" }, network: { type: "string", enum: ["direct", "proxy"] } } },
   mutates: true, timeoutMs: 120000, parallel: false, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,
   run: async (args, context) => {
@@ -20,8 +20,8 @@ export const execCommandTool: ToolDefinition = {
     const requestedNetwork = args.network === "proxy" || args.network === "direct" ? args.network : undefined;
     const routed = await routeCommand(cmd, requestedNetwork, context);
     const command = commandInWorkdir(routed, args.workdir);
-    const result = await sessionManager.start(backend(context), "exec_command", command, yieldMs, context.signal, { kind: "shell", pty: args.tty === true });
-    if (result.session.status === "running") return backgroundToolResult("exec_command", result, "shell", maxOutputTokens);
+    const result = await sessionManager.start(backend(context), "command_run", command, yieldMs, context.signal, { kind: "shell", pty: args.tty === true });
+    if (result.session.status === "running") return backgroundToolResult("command_run", result, "shell", maxOutputTokens);
     const output = processOutput(result.output, "", maxOutputTokens);
     if (requestedNetwork === "proxy" && upstreamTlsVerificationFailed(output)) {
       return {

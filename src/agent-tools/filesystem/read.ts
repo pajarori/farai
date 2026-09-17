@@ -5,8 +5,8 @@ import { containerListDir, containerPathKind, containerReadFile, containerRelati
 import { page } from "./shared";
 
 export const fsReadTool: ToolDefinition = {
-  name: "fs_read",
-  description: "Read a text file, extract selected PDF pages, or list one directory inside the active workspace, with bounded output and optional line pagination. Use fs_list for recursive file discovery and fs_grep to search content across many files.",
+  name: "file_read",
+  description: "Read a text file, extract selected PDF pages, or list one directory inside the active workspace, with bounded output and optional line pagination. Use file_list for recursive file discovery and file_search to search content across many files.",
   inputSchema: {
     type: "object",
     required: ["path"],

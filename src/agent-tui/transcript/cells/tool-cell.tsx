@@ -21,6 +21,7 @@ import { TranscriptMarker } from "./transcript-marker";
 import { createPrimaryClickGesture } from "../../input/mouse";
 import { loadToolAttachmentBytes } from "../../../tool-attachment";
 import { fitTerminalPair } from "../../terminal-text";
+import { humanizeToolOutput } from "../../../agent-tools/shared/renderers";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 5;
 
@@ -47,7 +48,7 @@ type ToolResultProps = ToolInputProps & {
 export function ToolRow(props: ToolRowProps): JSX.Element {
   return (
     <Show
-      when={["agent_task", "agent_spawn", "agent_followup"].includes(props.row.tool)}
+      when={["agent_manage", "agent_task", "agent_spawn", "agent_followup"].includes(props.row.tool)}
       fallback={<StandardToolRow row={props.row} animated={props.animated} />}
     >
       <AgentTaskRow row={props.row} animated={props.animated} />
@@ -79,14 +80,16 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
   const hasInput = () => Object.keys(input()).length > 0;
   const header = () => {
     const title = isMcp() ? `${active() ? "calling" : "called"} ${mcpInvocation()}` : presentation().title;
-    const right = [presentation().outcome, formatActivityDuration(props.row.durationMs)].filter(Boolean).join(" · ");
+    const right = [presentation().showOutcome !== false ? presentation().outcome : undefined, formatActivityDuration(props.row.durationMs)].filter(Boolean).join(" · ");
     return fitTerminalPair(title, right, Math.max(1, dims().width - 4), 8, 2);
   };
   const headerColor = () => active() ? COLOR.accent : toolColor(props.row.status);
   const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   const previewClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   const semanticPreview = () => presentation().preview.filter((line) => line.trim() !== presentation().outcome?.trim());
-  const visibleOutputLines = () => presentation().preview.length > 0
+  const visibleOutputLines = () => presentation().detail === "summary"
+    ? []
+    : presentation().preview.length > 0
     ? semanticPreview()
     : active()
       ? tailLines(visibleOutput(), 3)
@@ -122,7 +125,7 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
       </Show>
 
       <Show when={expanded()}>
-        <ExpandedPanel>
+        <ExpandedPanel onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
           <text fg={COLOR.dim}>{active() ? "live output" : "result"}</text>
           <Show when={detailOutput()} fallback={<text fg={COLOR.dim}>{toolEmptyState(props.row.status)}</text>}>
             {(output) => <ToolResult tool={props.row.tool} input={input()} text={output()} width={dims().width} />}
@@ -161,7 +164,7 @@ export function ActivityRow(props: ActivityRowProps): JSX.Element {
         <box style={{ flexDirection: "column", paddingLeft: 2 }} {...toggleClick}>
           <For each={props.row.items}>{(item, index) => {
             const presentation = () => item.presentation ?? presentToolActivity(item);
-            const pair = () => fitTerminalPair(presentation().compact, presentation().outcome ?? "", width(), 8, 3);
+            const pair = () => fitTerminalPair(presentation().compact, presentation().showOutcome !== false ? presentation().outcome ?? "" : "", width(), 8, 3);
             return (
               <box style={{ flexDirection: "row" }}>
                 <text fg={COLOR.dim}>{index() === 0 ? "└ " : "  "}</text>
@@ -173,7 +176,7 @@ export function ActivityRow(props: ActivityRowProps): JSX.Element {
         </box>
       </Show>
       <Show when={expanded()}>
-        <ExpandedPanel>
+        <ExpandedPanel onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
           <For each={props.row.items}>{(item, index) => {
             const itemInput = () => args(item.args);
             const output = () => item.fullResult ?? item.result ?? item.liveOutput ?? "";
@@ -309,7 +312,7 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
         <text fg={COLOR.dim}>{truncateLine([lane(), mode(), duration()].filter(Boolean).join(" · "), width())}</text>
       </box>
       <Show when={expanded()}>
-        <ExpandedPanel>
+        <ExpandedPanel onClick={toggle}>
           <text fg={COLOR.dim}>{active() ? "live result" : "result"}</text>
           <Show when={result()} fallback={<text fg={COLOR.dim}>{active() ? "work is still in progress" : "no result available"}</text>}>
             {(value) => (
@@ -535,6 +538,6 @@ function mcpContentLine(part: unknown): string {
   if (record.type === "resource_link" || record.type === "resourceLink") {
     return typeof record.uri === "string" ? `link: ${record.uri}` : "link";
   }
-  try { return JSON.stringify(record); }
+  try { return humanizeToolOutput(JSON.stringify(record)); }
   catch { return String(record); }
 }

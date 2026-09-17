@@ -5,8 +5,8 @@ import { safePathInside } from "../filesystem/shared";
 import { containerRelativePath, containerWriteFile } from "../filesystem/container-fs";
 
 export const writeScriptTool: ToolDefinition = {
-  name: "code_write_script",
-  description: "Create a reusable helper script beneath the workspace helpers directory from complete supplied content. Use this for task-specific automation or data processing; use fs_write for files elsewhere and exec_command for commands that do not need a persisted script.",
+  name: "script_write",
+  description: "Create a reusable helper script beneath the workspace helpers directory from complete supplied content. Use this for task-specific automation or data processing; use file_write for files elsewhere and command_run for commands that do not need a persisted script.",
   inputSchema: {
     type: "object",
     required: ["filename", "content"],

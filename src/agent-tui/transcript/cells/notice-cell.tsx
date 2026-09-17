@@ -49,7 +49,7 @@ export function NoticeRow(props: NoticeRowProps): JSX.Element {
       </Show>
       <Show when={expanded() && body()}>
         {(content) => (
-          <ExpandedPanel>
+          <ExpandedPanel onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
             <MarkdownView content={content()} fg={props.row.kind === "error" ? COLOR.error : COLOR.dim} />
           </ExpandedPanel>
         )}

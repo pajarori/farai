@@ -15,5 +15,10 @@ export function firstResultLine(value: string): string {
 }
 
 export function args(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const input = value as Record<string, unknown>;
+  if (input.args && typeof input.args === "object" && !Array.isArray(input.args)) {
+    return { ...(input.args as Record<string, unknown>), ...(input.operation !== undefined ? { operation: input.operation } : {}) };
+  }
+  return input;
 }

@@ -67,7 +67,7 @@ export class SessionManager {
     await this.reapIdle();
     if (this.stopAllTask) throw new Error("Background sessions are stopping");
     if (this.runningCount() + this.starting >= this.maxConcurrent) {
-      throw new Error(`Too many background sessions running (max ${this.maxConcurrent}). Stop one with session_stop before starting another.`);
+      throw new Error(`Too many background sessions running (max ${this.maxConcurrent}). Stop one with command_stop before starting another.`);
     }
     const generation = this.startGeneration;
     this.starting += 1;

@@ -160,7 +160,7 @@ export function BottomPane(): JSX.Element {
         <Match when={surface() === "email_account_wizard"}>
           <EmailAccountWizard />
         </Match>
-        <Match when={surface() === "request_user_input"}>
+        <Match when={surface() === "user_input"}>
           <Show when={tui.store.snapshot.pendingUserInput} keyed>
             {(request) => <RequestUserInput request={request} />}
           </Show>

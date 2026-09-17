@@ -34,7 +34,7 @@ export type FooterItem = {
 };
 
 export type BottomPaneSlot = "list_overlay" | "center_surface" | "proxy_tab" | "findings_tab" | "composer";
-export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "mcp_server_removal" | "mcp_server_wizard" | "email_account_removal" | "email_account_wizard" | "request_user_input";
+export type BottomPaneSurface = BottomPaneSlot | "model_provider_removal" | "model_provider_wizard" | "mcp_server_removal" | "mcp_server_wizard" | "email_account_removal" | "email_account_wizard" | "user_input" | "request_user_input";
 
 export function activityStatusVisible(activeMainTab: MainTab): boolean {
   return activeMainTab === "chat";
@@ -70,7 +70,7 @@ export function bottomPaneSurface(input: {
   if (input.hasMcpServerWizard) return "mcp_server_wizard";
   if (input.hasEmailAccountRemoval) return "email_account_removal";
   if (input.hasEmailAccountWizard) return "email_account_wizard";
-  if (input.hasRequestUserInput) return "request_user_input";
+  if (input.hasRequestUserInput) return "user_input";
   return bottomPaneSlot(input);
 }
 

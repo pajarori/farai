@@ -4,11 +4,13 @@ import { sessionManager } from "../shared/session-manager";
 import { defaultModelRenderer } from "../shared/renderers";
 
 export const sessionStopTool: ToolDefinition = {
-  name: "session_stop",
-  description: "Cancel background work by jobId, or stop a legacy command session by processId. Use this for commands, listeners, and detached jobs that should no longer run; use agent_interrupt or agent_close when controlling a child agent directly.",
+  name: "command_stop",
+  description: "Cancel background work by jobId, or stop a command session by processId. Use this for commands, listeners, and detached jobs that should no longer run; use agent_manage operation=interrupt or operation=close when controlling a child agent directly.",
   inputSchema: {
     type: "object",
-    properties: { jobId: { type: "string" }, processId: { type: "string" } }
+    properties: { jobId: { type: "string" }, processId: { type: "string" } },
+    anyOf: [{ required: ["jobId"] }, { required: ["processId"] }],
+    additionalProperties: false
   },
   mutates: true,
   timeoutMs: 5_000,

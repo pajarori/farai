@@ -10,7 +10,7 @@ import { processOutput } from "../shared/process-output";
 
 export const httpRequestTool: ToolDefinition = {
   name: "http_request",
-  description: "Send one exact HTTP request from the managed Kali container and return raw response headers plus body. Requests use Farai's managed capture proxy by default, except HTTP/3 which stays direct; set network=direct to bypass capture in explicit mode. Use this for custom methods, headers, bodies, redirects, exact paths, or protocol tests; use internet_fetch for public-page research and browser tools for interactive state.",
+  description: "Send one exact HTTP request from the managed Kali container and return raw response headers plus body. Requests use Farai's managed capture proxy by default, except HTTP/3 which stays direct; set network=direct to bypass capture in explicit mode. Use this for custom methods, headers, bodies, redirects, exact paths, or protocol tests; use web_fetch for public-page research and browser tools for interactive state.",
   inputSchema: {
     type: "object",
     required: ["url"],

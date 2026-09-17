@@ -47,7 +47,8 @@ async function performBrowserOperation(
   invoke: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
   context?: BrowserContextActivity
 ): Promise<ToolResult> {
-  const result = await invoke(operation, args);
+  const operationArgs = operation === "browser_evaluate" ? browserEvaluateArguments(args) : args;
+  const result = await invoke(operation, operationArgs);
   let output = renderBrowserResult(result);
   if (isMcpErrorResult(result)) {
     const normalized = normalizeBrowserOutput(output);
@@ -115,6 +116,11 @@ async function performBrowserOperation(
       ...(snapshotError ? { snapshotError } : {})
     }
   };
+}
+
+function browserEvaluateArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const { script, ...remaining } = args;
+  return { ...remaining, function: script };
 }
 
 function upstreamTlsVerificationFailed(output: string): boolean {
@@ -421,12 +427,12 @@ export const browserTools: ToolDefinition[] = [
   browserTool({
     name: "browser_eval",
     operation: "browser_evaluate",
-    description: "Execute a JavaScript function directly in the selected browser page and return its serializable result. Use this for DOM inspection or page-side behavior that has no dedicated browser tool; the function runs in the page, not in Node, and should not be used to bypass browser interaction evidence.",
+    description: "Execute the JavaScript function expression provided in script directly in the selected browser page and return its serializable result. Use this for DOM inspection or page-side behavior that has no dedicated browser tool; the function runs in the page, not in Node. Return a value explicitly when console output alone would produce undefined.",
     inputSchema: objectSchema({
-      function: { type: "string", description: "JavaScript function expression, for example () => document.title." },
+      script: { type: "string", description: "JavaScript function expression, for example () => document.title or () => { console.log('hello'); return 'hello'; }." },
       element: { type: "string", description: "Optional human-readable description of the target element." },
       ref: { type: "string", description: "Optional exact target reference from the current browser snapshot." }
-    }, ["function"]),
+    }, ["script"]),
     mutates: true
   })
 ];

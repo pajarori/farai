@@ -98,8 +98,8 @@ export function normalizeSubdomainNames(values: string[], domain: string): strin
 }
 
 export const subdomainEnumTool: ToolDefinition = {
-  name: "subdomain_enum",
-  description: "Enumerate subdomains for a registrable domain across independent passive sources, then validate the suffix, deduplicate names, and report each source failure separately. Use this for passive DNS, certificate-transparency, and initial asset discovery without writing ad-hoc curl or amass loops.",
+  name: "asset_subdomains",
+  description: "Enumerate subdomains for a registrable domain with a fast passive source, then validate the suffix and deduplicate names. Additional certificate-transparency or Amass sources can be selected explicitly when broader coverage is worth the extra latency.",
   inputSchema: {
     type: "object",
     required: ["domain"],
@@ -120,7 +120,7 @@ export const subdomainEnumTool: ToolDefinition = {
     assertObject(args, "args");
     const domain = normalizeDomainInput(asString(args.domain, "domain"));
     const requested = Array.isArray(args.sources) ? args.sources.filter((source): source is SubdomainSource => SUBDOMAIN_SOURCES.includes(source as SubdomainSource)) : [];
-    const sources = [...new Set(requested.length ? requested : ["subfinder", "certspotter", "crtsh"] as SubdomainSource[])];
+    const sources = [...new Set(requested.length ? requested : ["subfinder"] as SubdomainSource[])];
     const timeoutMs = typeof args.timeoutMs === "number" && Number.isInteger(args.timeoutMs) ? Math.max(5_000, Math.min(90_000, args.timeoutMs)) : 45_000;
     const limit = typeof args.limit === "number" && Number.isInteger(args.limit) ? Math.max(1, Math.min(1_000, args.limit)) : 200;
     const { onOutputChunk: _onOutputChunk, ...quietContext } = context;

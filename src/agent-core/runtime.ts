@@ -19,6 +19,7 @@ import { runCapturedProcess } from "../agent-tools/backends/captured-process";
 import { INTERNAL_PROCESS_OUTPUT_MAX_BYTES } from "../agent-tools/backends/output-buffer";
 import { renderModelToolResultEnvelope } from "./context-builder";
 import { sanitizeToolOutput } from "../agent-tools/shared/output-sanitize";
+import { humanizeToolOutput } from "../agent-tools/shared/renderers";
 import { buildChatRequest, ChatProviderPlanner, createChatProviderForSession, createPlannerForSessionAsync, PlannerHttpError, sanitizePlannerActions, type ConversationEntry, type PlanStreamEvent, type PlannerAction, type PlannerInput, type PlannerProvider } from "./provider";
 import { isProviderIncompleteFinishReason, type ChatProvider, type ProviderToolDef } from "./provider/protocol";
 import { BoundedTextAccumulator, PROVIDER_TOOL_PREVIEW_MAX_BYTES, providerResponseLimits, utf8Prefix } from "./provider/stream-bounds";
@@ -29,8 +30,9 @@ import { sessionManager } from "../agent-tools/shared/session-manager";
 import { oastEvidenceForSession, parseOastEvents } from "../agent-tools/callback/oast-parser";
 import { activeBackgroundJobs, processIdFromArgs, stableValue, type ActiveBackgroundJob } from "./loop/background";
 import { DEFAULT_SESSION_TITLE, isDefaultSessionTitle, sessionDisplayName, titleFromPrompt, titleFromModelText, SESSION_TITLE_PROMPT } from "../session-title";
-import { insertCompactionContext } from "./loop/compaction";
-import { compactSessionHistory, type CompactionOptions } from "./compaction-service";
+import { insertCompactionContext } from "../agent-context/summary-runner";
+import { ContextManager, type CompactionOptions } from "../agent-context/context-manager";
+import { SummarizeLanePolicy } from "../agent-context/lanes";
 import { loadHooks, runHooks, type HookRunner } from "./hooks/host";
 import type { HookDefinition, HookEvent } from "./hooks/types";
 import { callMcpServerTool } from "./../agent-tools/mcp-manager";
@@ -43,7 +45,8 @@ import { SessionMailbox } from "./session-mailbox";
 import { mailboxInputText, queuedInputAction, SessionInputQueue, type QueuedInputAction } from "./session-input-queue";
 import { SessionMailboxDispatcher } from "./session-mailbox-dispatcher";
 import { JobManager } from "./jobs/manager";
-import { ContextEngine, formatContextManifest, type ContextManifest, type ContextProjection, type ContextRequest } from "./context-engine";
+import { ContextEngine, type ContextManifest, type ContextProjection, type ContextRequest } from "./context-engine";
+import { buildContextReport } from "./context-report";
 import { FileStateCache } from "./file-state";
 import { projectConversationHistory } from "./history-projection";
 import { loadConfig, type FaraiConfig } from "./config";
@@ -75,6 +78,10 @@ import { normalizeToolResult } from "./tool-result-normalization";
 import { atomicWriteFile } from "./atomic-file";
 import { ToolCallJournal, type ToolErrorState } from "./tool-call-journal";
 import { CampaignSupervisor } from "./campaign-supervisor";
+import { ToolCatalog } from "../agent-tools/catalog";
+import { repositories, type FaraiRepositories } from "../agent-store/repositories";
+import { ThreadManager } from "./thread-manager";
+import { TurnEngine } from "./turn-engine";
 
 export { activeBackgroundJobs } from "./loop/background";
 export type { ActiveBackgroundJob } from "./loop/background";
@@ -88,7 +95,7 @@ const TOOL_HUMAN_RESULT_MAX_BYTES = 24 * 1024;
 const LOOP_SUPERVISION_NO_PROGRESS_STEPS = 12;
 const LOOP_SUPERVISION_STEER_INTERVAL = 5;
 const LOOP_PATTERN_MAX_PERIOD = 8;
-const PROGRESS_ACTION_TOOLS = new Set(["http_request", "subdomain_enum", "dns_probe", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "dir_enum", "port_scan", "nmap_scan", "fs_edit", "fs_write", "patch_apply", "code_write_script", "campaign_verify", "campaign_test", "callback_oast", "exploit_search"]);
+const PROGRESS_ACTION_TOOLS = new Set(["http_request", "asset_subdomains", "dns_resolve", "service_probe", "tls_inspect", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "web_directory", "network_scan", "file_replace", "file_write", "file_patch", "script_write", "campaign_manage", "callback_manage", "finding_manage"]);
 const WRAPUP_MODEL_TIMEOUT_MS = 15_000;
 const WRAPUP_CONTINUATION_ATTEMPTS = 3;
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 2_000;
@@ -277,9 +284,12 @@ export class AgentRuntime {
   private readonly inputQueue: SessionInputQueue;
   private readonly mailboxDispatcher: SessionMailboxDispatcher;
   private readonly jobs: JobManager;
+  private readonly threads: ThreadManager;
+  private readonly turnEngine: TurnEngine;
   private readonly fileState = new FileStateCache();
   private readonly lsp: LspManager;
   private readonly contextEngine: ContextEngine;
+  private readonly contextManager: ContextManager;
   private readonly maxSteps: number;
   private readonly maxTurnMs: number;
   private readonly maxCostUsd: number | undefined;
@@ -305,6 +315,18 @@ export class AgentRuntime {
     this.inheritConfig = options.inheritConfig !== false;
     const config: FaraiConfig = this.inheritConfig ? loadConfig(workspace) : {};
     this.store = new SqliteStore(join(workspace, ".farai"));
+    const selectedModel = defaultModelSelection();
+    this.threads = new ThreadManager(this.store, {
+      workspace,
+      ...(selectedModel ? { defaultModel: selectedModel } : {}),
+      beforeCreate: async () => {
+        this.assertAcceptingWork();
+        await this.recover();
+        this.assertAcceptingWork();
+      },
+      cancelTurn: (turnId, reason) => this.cancelTurn(turnId, reason)
+    });
+    this.turnEngine = new TurnEngine((session, input, options) => this.promptInternal(session, input, options));
     this.campaignSupervisor = new CampaignSupervisor(
       this.store,
       workspace,
@@ -329,6 +351,15 @@ export class AgentRuntime {
     }));
     this.registerSessionCatalog = options.registerSessionCatalog !== false;
     this.contextEngine = new ContextEngine(workspace, this.store, this.fileState, () => this.knowledge(), options.enableSkills !== false, options.enableProjectInstructions !== false);
+    this.contextManager = new ContextManager(this.store, (current, planner, historyOverride, throughRowId) => this.assembleContext({
+      session: current,
+      availableTools: listToolsForSession(current),
+      contextWindow: resolveContextWindow(planner.contextWindow),
+      maxOutputTokens: resolveMaxOutputTokens(planner.maxOutputTokens),
+      ...this.contextBudgetInput(),
+      ...(historyOverride ? { historyOverride } : {}),
+      ...(throughRowId !== undefined ? { throughMessageRowId: throughRowId } : {})
+    })).registerLane(new SummarizeLanePolicy());
     this.lsp = new LspManager(workspace, config.lsp, {
       backendFactory: (sessionId, sessionWorkspace) => this.executionBackend instanceof KaliContainerBackend
         ? this.executionBackend
@@ -370,6 +401,26 @@ export class AgentRuntime {
     });
     if (plannerOrProvider && "stream" in plannerOrProvider) this.chatProviderOverride = plannerOrProvider;
     else this.planner = plannerOrProvider;
+  }
+
+  getJobManager(): JobManager {
+    return this.jobs;
+  }
+
+  getToolCatalog(session?: Session): ToolCatalog {
+    return new ToolCatalog(session);
+  }
+
+  getRepositories(): FaraiRepositories {
+    return repositories(this.store);
+  }
+
+  getThreadManager(): ThreadManager {
+    return this.threads;
+  }
+
+  getTurnEngine(): TurnEngine {
+    return this.turnEngine;
   }
 
   private knowledge(): KnowledgeStore | undefined {
@@ -654,7 +705,7 @@ export class AgentRuntime {
     }
     return {
       result: renderedResult,
-      humanResult: takeBytes(sanitizeToolOutput(humanResult), TOOL_HUMAN_RESULT_MAX_BYTES, "head"),
+      humanResult: takeBytes(humanizeToolOutput(sanitizeToolOutput(humanResult)), TOOL_HUMAN_RESULT_MAX_BYTES, "head"),
       modelResult: renderModelToolResultEnvelope(toolCall, renderedResult, renderedForModel)
     };
   }
@@ -727,10 +778,15 @@ export class AgentRuntime {
       ? String((job.result as { output?: unknown }).output ?? "")
       : "";
     let tool: string | undefined;
+    let toolArgs: unknown;
     if (job.toolCallId) {
-      try { tool = this.store.loadToolCall(job.toolCallId).tool; } catch {  }
+      try {
+        const toolCall = this.store.loadToolCall(job.toolCallId);
+        tool = toolCall.tool;
+        toolArgs = toolCall.args;
+      } catch {  }
     }
-    if (tool === "callback_oast" && output) {
+    if (isCallbackOastCall(tool, toolArgs) && output) {
       const events = parseOastEvents(output);
       if (events.length) {
         for (const evidence of oastEvidenceForSession(job.sessionId, events)) this.store.saveEvidence(evidence, JSON.stringify(events));
@@ -818,24 +874,15 @@ export class AgentRuntime {
   }
 
   async createSession(options: Partial<Pick<Session, "title" | "provider" | "model" | "campaignId">> = {}): Promise<Session> {
-    this.assertAcceptingWork();
-    await this.recover();
-    this.assertAcceptingWork();
-    const model = defaultModelSelection();
-    const session = await this.store.createSession({
-      workspace: this.workspace,
-      ...(model ? { model } : {}),
-      ...options
-    });
-    return session;
+    return await this.threads.create(options);
   }
 
   listSessions(includeArchived = false): Session[] {
-    return this.store.listSessions(100, { includeArchived });
+    return this.threads.list(includeArchived);
   }
 
   loadSession(sessionId: string): Session {
-    return this.store.loadSession(sessionId);
+    return this.threads.get(sessionId);
   }
 
   injectUserInput(sessionId: string, text: string): boolean {
@@ -948,7 +995,8 @@ export class AgentRuntime {
     if (pinned) this.providerCatalogs.set(cacheKey, pinned);
     const projection = this.contextEngine.assemble({
       ...input,
-      ...(pinned ? { advertisedTools: pinned } : {})
+      ...(pinned ? { advertisedTools: pinned } : {}),
+      ...(input.overlay ? {} : { overlay: this.contextManager.buildOverlay(input.session.id) })
     });
     if (catalogMessage) {
       const tools = structuredClone(projection.toolCatalog);
@@ -1065,6 +1113,7 @@ export class AgentRuntime {
         if (run.rootSessionId === session.id && ["running", "waiting", "ready", "rate_limited", "time_limited"].includes(run.status)) this.campaignSupervisor.pause(run.id);
       } catch {  }
     }
+    this.compactionControllers.get(turn.sessionId)?.abort(reason);
     this.inputQueue.restorePendingSteersAfterCancellation(turn.sessionId);
     const controllers = this.turnControllers.get(turnId);
     if (controllers) {
@@ -1084,6 +1133,10 @@ export class AgentRuntime {
           controller.abort(new ModelCallDeadlineError());
         }, Math.max(0, timeoutMs));
     if (this.shuttingDown) controller.abort("runtime shutdown");
+    if (turnId) {
+      const turn = this.store.loadTurn(turnId);
+      if (turn.status === "cancelled") controller.abort(turn.errorSummary ?? "turn cancelled");
+    }
     if (!turnId) return {
       signal: controller.signal,
       timedOut: () => deadlineReached,
@@ -1450,6 +1503,10 @@ export class AgentRuntime {
   }
 
   async prompt(session: Session, input: string, options: PromptOptions = {}): Promise<AgentPromptResult> {
+    return await this.turnEngine.execute(session, input, options);
+  }
+
+  private async promptInternal(session: Session, input: string, options: PromptOptions = {}): Promise<AgentPromptResult> {
     this.assertAcceptingWork();
     options.signal?.throwIfAborted();
     if (input.trim() === "/clear") {
@@ -1558,20 +1615,26 @@ export class AgentRuntime {
     const lower = input.toLowerCase();
     let response = "";
 
-    if (source === "user" && input.trimStart().startsWith("!")) {
+    if (this.store.loadTurn(turn.id).status === "cancelled") {
+      response = "";
+    } else if (source === "user" && input.trimStart().startsWith("!")) {
       const command = input.trimStart().slice(1).trim();
       if (!command) {
         response = "Usage: !<command>";
       } else {
-        await this.runTool(session, "shell_exec", { command }, { turn, assistantMessage });
-        response = "Shell command submitted.";
+        await this.runTool(session, "command_run", { command }, { turn, assistantMessage });
+        if (this.store.loadTurn(turn.id).status === "running") response = "Shell command submitted.";
       }
-      this.persistTextPart(session.id, turn.id, assistantMessage.id, response);
-      this.stopTurn(turn, "completed", "final_response");
+      if (this.store.loadTurn(turn.id).status === "running") {
+        this.persistTextPart(session.id, turn.id, assistantMessage.id, response);
+        this.stopTurn(turn, "completed", "final_response");
+      }
     } else if (source === "user" && lower.startsWith("/")) {
       response = await this.handleSlash(session, turn, assistantMessage, input);
-      this.persistTextPart(session.id, turn.id, assistantMessage.id, response);
-      this.stopTurn(turn, "completed", "final_response");
+      if (this.store.loadTurn(turn.id).status === "running") {
+        if (response.trim()) this.persistTextPart(session.id, turn.id, assistantMessage.id, response);
+        this.stopTurn(turn, "completed", "final_response");
+      }
     } else {
       response = await this.runAgentLoop(session, turn, contextMessage, assistantMessage, input, source === "user", options.mailboxItems, options.signal);
       const settledRun = activeCampaignRun ?? this.campaignSupervisor.activeRunForSession(session.id);
@@ -1702,7 +1765,9 @@ export class AgentRuntime {
         responses.push(...await this.forceStepLimitWrapUp(session, turn, assistantMessage, planner, maxSteps));
         break;
       }
+      void this.contextManager.maintain(session, planner);
       const compactResult = await this.maybeAutoCompact(session, planner, forceCompaction);
+      if (this.store.loadTurn(turn.id).status === "cancelled") return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
       forceCompaction = false;
       if (compactResult.status === "failed") {
         const text = `Auto-compaction failed: ${compactResult.error}`;
@@ -1730,6 +1795,7 @@ export class AgentRuntime {
           recoverable: true
         });
       });
+      if (this.store.loadTurn(turn.id).status === "cancelled") return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
       const injectedSlot = this.drainPendingUserInput(session, turn);
       if (injectedSlot) {
         ({ contextMessage, assistantMessage } = injectedSlot);
@@ -1759,7 +1825,7 @@ export class AgentRuntime {
       }
       const availableTools = listToolsForSession(session);
       const backgroundCompletion = step === 0 && input && !userAuthored
-        ? `${input}\n\nThis completion is already terminal and was delivered automatically. Do not call session_poll for this job or process. Briefly report the outcome only when useful; otherwise return no visible text.`
+        ? `${input}\n\nThis completion is already terminal and was delivered automatically. Do not call command_poll for this job or process. Briefly report the outcome only when useful; otherwise return no visible text.`
         : undefined;
       const passiveCompletions = step === 0 && userAuthored && mailboxItems.length > 0
         ? renderMailboxItems(mailboxItems)
@@ -1823,6 +1889,7 @@ export class AgentRuntime {
         toolCatalog: context.toolCatalog,
         toolChoice: "auto"
       };
+      if (this.store.loadTurn(turn.id).status === "cancelled") return responses.map(sanitizeVisibleResponse).filter(Boolean).join("\n");
       resumeAfterCompaction = false;
       const autoContinue = { streak: autoContinueStreak };
       const remainingTurnMs = Number.isFinite(maxTurnMs)
@@ -1891,9 +1958,8 @@ export class AgentRuntime {
 
   private turnHasTranscriptOwnedActivity(sessionId: string, turnId: string): boolean {
     return this.store.listToolCalls(sessionId, 10_000).some((call) => {
-      if (call.turnId !== turnId || !["agent_task", "agent_spawn", "agent_followup"].includes(call.tool)) return false;
-      if (!call.args || typeof call.args !== "object" || Array.isArray(call.args)) return false;
-      return (call.args as Record<string, unknown>).mode === "detached";
+      if (call.turnId !== turnId) return false;
+      return isDetachedAgentCall(call.tool, call.args);
     });
   }
 
@@ -2038,6 +2104,7 @@ export class AgentRuntime {
     let lastError = "";
     this.deleteStreamingParts(turn.id);
     try {
+      if (signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") return { cancelled: true, shouldContinue: false };
       for (let attempt = 1; ; attempt += 1) {
         this.emitPlannerAttempt(session, turn, assistantMessage, plannerName, attempt, plannerInput, context);
         const dispatched: Array<Promise<ToolActionOutcome>> = [];
@@ -2630,7 +2697,7 @@ export class AgentRuntime {
       if (gateController.signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") {
         return { shouldContinue: false, cancelled: true };
       }
-      const detachedAgent = ["agent_spawn", "agent_followup"].includes(action.tool) && record.status === "running_background";
+      const detachedAgent = isDetachedAgentCall(action.tool, action.args) && record.status === "running_background";
       return {
         shouldContinue: !detachedAgent && (record.status === "done" || record.status === "error" || record.status === "running_background"),
         resetAutoContinue: !detachedAgent && (record.status === "done" || record.status === "error" || record.status === "running_background")
@@ -2762,20 +2829,15 @@ export class AgentRuntime {
     | { status: "failed"; error: string }
   > {
     const manifest = this.activeContextManifest(session, planner);
-    const estimated = manifest.estimatedTokens;
     const latestUsage = this.store.latestUsage(session.id, session.model);
     const boundary = this.store.latestCompactionBoundary(session.id);
     const actual = latestUsage && (!boundary || latestUsage.createdAt > boundary.createdAt) ? latestUsage.inputTokens : 0;
-    const threshold = manifest.requestBudget;
-    if (!force && Math.max(estimated, actual) < threshold) return { status: "ok" };
+    if (!force && Math.max(manifest.estimatedTokens, actual) < manifest.requestBudget) return { status: "ok" };
     const controller = new AbortController();
     this.compactionControllers.set(session.id, controller);
     try {
       this.event(session.id, "compaction", { stage: "started", trigger: "auto" });
-      await this.compactSessionWithPlanner(session, planner, { trigger: "auto", signal: controller.signal });
-      return { status: "compacted" };
-    } catch (error) {
-      return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+      return await this.contextManager.maybeAutoCompact(session, planner, manifest, { force: true, signal: controller.signal });
     } finally {
       if (this.compactionControllers.get(session.id) === controller) this.compactionControllers.delete(session.id);
     }
@@ -2918,6 +2980,7 @@ export class AgentRuntime {
     this.deleteStreamingParts(turn.id);
     const onStreamEvent = (event: PlanStreamEvent) => this.applyStreamEvent(session, turn, assistantMessage, event);
     try {
+      if (signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") return [];
       for (let attempt = 1; ; attempt += 1) {
         const attemptPayload = this.plannerAttemptPayload(turn, planner.name, attempt, input, context);
         this.event(session.id, "planner_attempt", attemptPayload);
@@ -3190,6 +3253,8 @@ export class AgentRuntime {
       const list = this.turnControllers.get(turnId) ?? [];
       list.push(controller);
       this.turnControllers.set(turnId, list);
+      const currentTurn = this.store.loadTurn(turnId);
+      if (currentTurn.status === "cancelled") controller.abort(currentTurn.errorSummary ?? "turn cancelled");
     }
     let liveRawOutputBuffer = "";
     let lastLiveFlush = 0;
@@ -3277,7 +3342,7 @@ export class AgentRuntime {
           lease.assertActive();
           const child = this.store.loadSession(childSessionId);
           if (child.parentId !== session.id) throw new Error(`subagent session ${childSessionId} does not belong to this parent`);
-          if (!this.injectUserInput(childSessionId, text)) throw new Error(`subagent session ${childSessionId} is not currently running; use agent_followup to start a new turn`);
+          if (!this.injectUserInput(childSessionId, text)) throw new Error(`subagent session ${childSessionId} is not currently running; use agent_manage operation=followup to start a new turn`);
           return "delivered";
         },
         interrupt: async (childSessionId, reason = "interrupted by parent agent") => {
@@ -3742,13 +3807,13 @@ export class AgentRuntime {
     if (command === "/scan") {
       const target = rest[0];
       if (!target) return "Usage: /scan <target>";
-      await this.runTool(session, "port_scan", { target }, { turn, assistantMessage });
+      await this.runTool(session, "network_scan", { target }, { turn, assistantMessage });
       return `Scan requested for ${target}.`;
     }
     if (command === "/shell") {
       const commandText = rest.join(" ");
       if (!commandText) return "Usage: /shell <command>";
-      await this.runTool(session, "shell_exec", { command: commandText }, { turn, assistantMessage });
+      await this.runTool(session, "command_run", { command: commandText }, { turn, assistantMessage });
       return "Shell command submitted.";
     }
     if (command === "/note") {
@@ -3806,7 +3871,11 @@ export class AgentRuntime {
       });
       return text;
     }
-    if (command === "/context") return formatContextManifest(this.inspectContext(session));
+    if (command === "/context") {
+      const report = buildContextReport(this.inspectContext(session), session.model ?? "");
+      this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "artifact", payload: { kind: "context_report", report } });
+      return "";
+    }
     if (command === "/status") return this.summary(session);
     if (command === "/campaign") {
       return this.handleCampaignCommand(session, rest);
@@ -3937,15 +4006,7 @@ export class AgentRuntime {
     planner: PlannerProvider,
     options: CompactionOptions = {}
   ): Promise<Session> {
-    return compactSessionHistory(this.store, session.id, planner, (current, historyOverride, throughMessageRowId) => this.assembleContext({
-      session: current,
-      availableTools: listToolsForSession(current),
-      contextWindow: resolveContextWindow(planner.contextWindow),
-      maxOutputTokens: resolveMaxOutputTokens(planner.maxOutputTokens),
-      ...this.contextBudgetInput(),
-      ...(historyOverride ? { historyOverride } : {}),
-      ...(throughMessageRowId !== undefined ? { throughMessageRowId } : {})
-    }), options);
+    return this.contextManager.compact(session, planner, options);
   }
 
   contextSummary(session: Session): string {
@@ -4141,7 +4202,24 @@ function positiveFinite(value: number | undefined): number | undefined {
 
 function isWorkspaceTransitionTool(tool: ToolDefinition): boolean {
   const name = canonicalToolName(tool.name);
-  return name === "worktree_enter" || name === "worktree_exit";
+  return name === "worktree_manage";
+}
+
+function isCallbackOastCall(tool: string | undefined, args: unknown): boolean {
+  if (tool === "callback_oast") return true;
+  if (tool !== "callback_manage" || !args || typeof args !== "object" || Array.isArray(args)) return false;
+  return (args as Record<string, unknown>).operation === "oast";
+}
+
+function isDetachedAgentCall(tool: string, args: unknown): boolean {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+  const input = args as Record<string, unknown>;
+  if (tool === "agent_manage") {
+    if (input.operation !== "spawn" && input.operation !== "followup") return false;
+    if (!input.args || typeof input.args !== "object" || Array.isArray(input.args)) return false;
+    return (input.args as Record<string, unknown>).mode === "detached";
+  }
+  return (tool === "agent_spawn" || tool === "agent_followup" || tool === "agent_task") && input.mode === "detached";
 }
 
 async function runHostGit(cwd: string, args: string[]): Promise<string> {

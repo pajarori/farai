@@ -17,6 +17,7 @@ import type {
   CampaignSearchResult,
   TestAttempt,
   CompactionBoundary,
+  ContextSummaryChunk,
   Evidence,
   Finding,
   Message,
@@ -1047,6 +1048,76 @@ export class SqliteStore {
     return Number(row?.max_rowid ?? 0);
   }
 
+  listContextSummaryChunks(sessionId: string): ContextSummaryChunk[] {
+    return (this.database()
+      .query("select * from context_summary_chunks where session_id = $session order by rowid asc")
+      .all({ $session: sessionId }) as Row[]).map(contextSummaryChunkFromRow);
+  }
+
+  countContextSummaryChunks(sessionId: string): number {
+    const row = this.database()
+      .query("select count(*) as count from context_summary_chunks where session_id = $session")
+      .get({ $session: sessionId }) as { count?: number } | null;
+    return Number(row?.count ?? 0);
+  }
+
+  commitContextSummaryChunk(input: Omit<ContextSummaryChunk, "id" | "createdAt">): ContextSummaryChunk {
+    const db = this.database();
+    const chunk: ContextSummaryChunk = { id: id(), createdAt: nowIso(), ...input };
+    const persisted = db.transaction(() => {
+      const existing = db.query("select covered_node_ids_json from context_summary_chunks where session_id = $session")
+        .all({ $session: chunk.sessionId }) as Row[];
+      const claimed = new Set<string>();
+      for (const row of existing) {
+        for (const nodeId of JSON.parse(String(row.covered_node_ids_json)) as string[]) claimed.add(nodeId);
+      }
+      for (const nodeId of chunk.coveredNodeIds) {
+        if (claimed.has(nodeId)) throw new Error(`context summary conflict: node ${nodeId} already covered`);
+      }
+      db.query(`insert into context_summary_chunks
+        (id, session_id, lane, covered_node_ids_json, anchor_node_id, through_message_rowid, summary, source_count, source_bytes, created_at)
+        values ($id, $session, $lane, $covered, $anchor, $through, $summary, $count, $bytes, $created)`)
+        .run({
+          $id: chunk.id,
+          $session: chunk.sessionId,
+          $lane: chunk.lane,
+          $covered: JSON.stringify(chunk.coveredNodeIds),
+          $anchor: chunk.anchorNodeId,
+          $through: chunk.throughMessageRowId,
+          $summary: assertPersistedText(chunk.summary, PERSISTENCE_LIMITS.summaryBytes, "context summary"),
+          $count: chunk.sourceCount,
+          $bytes: chunk.sourceBytes,
+          $created: chunk.createdAt
+        });
+      return chunk;
+    }).immediate();
+    return persisted;
+  }
+
+  deleteContextSummaryChunks(sessionId: string): void {
+    this.database().query("delete from context_summary_chunks where session_id = $session").run({ $session: sessionId });
+  }
+
+  expandContextSummaryChunk(sessionId: string, chunkId: string): { lane: string; raws: Array<{ toolCallId: string; tool: string; text: string }> } | undefined {
+    const chunk = this.listContextSummaryChunks(sessionId).find((item) => item.id === chunkId);
+    if (!chunk) return undefined;
+    const order = new Map(chunk.coveredNodeIds.map((nodeId, index) => [nodeId, index]));
+    const raws: Array<{ toolCallId: string; tool: string; text: string; order: number }> = [];
+    for (const type of ["tool_result", "error"] as const) {
+      for (const part of this.listPartsByType(sessionId, type, 100_000)) {
+        const payload = part.payload as { toolCallId?: unknown; tool?: unknown; result?: unknown; error?: unknown; text?: unknown };
+        const toolCallId = typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+        if (!toolCallId || !order.has(toolCallId)) continue;
+        const text = type === "tool_result"
+          ? (typeof payload.result === "string" ? payload.result : JSON.stringify(payload.result ?? ""))
+          : `status: error\nsummary: ${typeof payload.error === "string" ? payload.error : typeof payload.text === "string" ? payload.text : "tool call failed"}`;
+        raws.push({ toolCallId, tool: typeof payload.tool === "string" ? payload.tool : "unknown", text, order: order.get(toolCallId)! });
+      }
+    }
+    raws.sort((a, b) => a.order - b.order);
+    return { lane: chunk.lane, raws: raws.map(({ order: _order, ...rest }) => rest) };
+  }
+
   commitCompaction(input: {
     sessionId: string;
     trigger: CompactionBoundary["trigger"];
@@ -1108,6 +1179,7 @@ export class SqliteStore {
         });
       db.query("update sessions set summary = $summary, summary_updated_at = $created, updated_at = $created where id = $session")
         .run({ $summary: assertPersistedText(boundary.summary, PERSISTENCE_LIMITS.summaryBytes, "session summary"), $created: boundary.createdAt, $session: boundary.sessionId });
+      db.query("delete from context_summary_chunks where session_id = $session").run({ $session: boundary.sessionId });
       return this.appendEventInTransaction(db, event, "compaction event payload");
     }).immediate();
     this.emit({ kind: "event", sessionId: event.sessionId, event: persistedEvent });
@@ -2911,6 +2983,19 @@ export class SqliteStore {
         created_at text not null
       );
       create index if not exists compaction_boundaries_session_idx on compaction_boundaries(session_id, created_at);
+      create table if not exists context_summary_chunks (
+        id text primary key,
+        session_id text not null,
+        lane text not null,
+        covered_node_ids_json text not null,
+        anchor_node_id text not null,
+        through_message_rowid integer not null,
+        summary text not null,
+        source_count integer not null,
+        source_bytes integer not null,
+        created_at text not null
+      );
+      create index if not exists context_summary_chunks_session_idx on context_summary_chunks(session_id, created_at);
       create table if not exists memory_items (
         id text primary key,
         session_id text not null,
@@ -3258,6 +3343,21 @@ function compactionBoundaryFromRow(row: Row): CompactionBoundary {
     ...(typeof row.replacement_history_json === "string" ? { replacementHistory: JSON.parse(row.replacement_history_json) as NonNullable<CompactionBoundary["replacementHistory"]> } : {}),
     ...(typeof row.pre_compact_tokens === "number" ? { preCompactTokens: row.pre_compact_tokens } : {}),
     ...(typeof row.post_compact_tokens === "number" ? { postCompactTokens: row.post_compact_tokens } : {}),
+    createdAt: String(row.created_at)
+  };
+}
+
+function contextSummaryChunkFromRow(row: Row): ContextSummaryChunk {
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    lane: String(row.lane),
+    coveredNodeIds: JSON.parse(String(row.covered_node_ids_json)) as string[],
+    anchorNodeId: String(row.anchor_node_id),
+    throughMessageRowId: Number(row.through_message_rowid),
+    summary: String(row.summary),
+    sourceCount: Number(row.source_count),
+    sourceBytes: Number(row.source_bytes),
     createdAt: String(row.created_at)
   };
 }

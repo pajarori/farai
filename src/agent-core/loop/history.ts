@@ -29,7 +29,7 @@ export function ensureToolResultsPaired(entries: ConversationEntry[]): Conversat
 
 export function fitToolResultText(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-  const marker = "\n...[middle truncated — full output saved as an artifact; read it with tool_output_read]...\n";
+  const marker = "\n...[middle truncated — full output saved as an artifact; read it with output_read]...\n";
   const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"));
   const headBytes = Math.floor(budget * 0.6);
   const tailBytes = budget - headBytes;

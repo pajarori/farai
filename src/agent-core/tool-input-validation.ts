@@ -11,6 +11,13 @@ const draft2020 = new Ajv2020({ allErrors: false, strict: false, validateFormats
 export function validateToolArgs(schema: Record<string, unknown> | undefined, args: unknown): string | undefined {
   if (!schema || typeof schema !== "object") return undefined;
   if (!args || typeof args !== "object" || Array.isArray(args)) return "expected an object of arguments";
+  const selectedBranch = selectDiscriminatedBranch(schema, args as Record<string, unknown>);
+  if (selectedBranch?.error) return selectedBranch.error;
+  if (selectedBranch?.schema) return validateAgainstSchema(selectedBranch.schema, args);
+  return validateAgainstSchema(schema, args);
+}
+
+function validateAgainstSchema(schema: Record<string, unknown>, args: unknown): string | undefined {
   let validate: ValidateFunction;
   try {
     validate = compiledValidator(schema);
@@ -21,6 +28,30 @@ export function validateToolArgs(schema: Record<string, unknown> | undefined, ar
   const error = validate.errors?.[0];
   if (!error) return "arguments do not match the tool input schema";
   return `${formatValidationError(error, schema)}${compositionShapes(error, schema)}`;
+}
+
+function selectDiscriminatedBranch(schema: Record<string, unknown>, args: Record<string, unknown>): { schema?: Record<string, unknown>; error?: string } | undefined {
+  if (!Array.isArray(schema.oneOf)) return undefined;
+  const branches = schema.oneOf.filter((branch): branch is Record<string, unknown> => Boolean(branch) && typeof branch === "object" && !Array.isArray(branch));
+  const operations = branches.flatMap((branch) => {
+    if (!branch || typeof branch !== "object" || Array.isArray(branch)) return [];
+    const properties = (branch as Record<string, unknown>).properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) return [];
+    const operation = (properties as Record<string, unknown>).operation;
+    if (!operation || typeof operation !== "object" || Array.isArray(operation)) return [];
+    const value = (operation as Record<string, unknown>).const;
+    return typeof value === "string" ? [value] : [];
+  });
+  if (!operations.length) return undefined;
+  if (typeof args.operation !== "string") return { error: "missing required field \"operation\"" };
+  if (!operations.includes(args.operation)) return { error: `field \"operation\" must be one of: ${operations.join(", ")}` };
+  const branch = branches.find((candidate) => {
+    const properties = candidate.properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) return false;
+    const operation = (properties as Record<string, unknown>).operation;
+    return Boolean(operation) && typeof operation === "object" && !Array.isArray(operation) && (operation as Record<string, unknown>).const === args.operation;
+  });
+  return branch ? { schema: branch } : undefined;
 }
 
 function compiledValidator(schema: Record<string, unknown>): ValidateFunction {
@@ -109,6 +140,13 @@ function describeBranch(branch: unknown): string | undefined {
   if (!branch || typeof branch !== "object" || Array.isArray(branch)) return undefined;
   const record = branch as Record<string, unknown>;
   const required = Array.isArray(record.required) ? record.required.map(String) : [];
+  const properties = record.properties;
+  if (properties && typeof properties === "object" && !Array.isArray(properties)) {
+    const operation = (properties as Record<string, unknown>).operation;
+    if (operation && typeof operation === "object" && !Array.isArray(operation) && typeof (operation as Record<string, unknown>).const === "string") {
+      return `{ operation: ${(operation as Record<string, unknown>).const}, args }`;
+    }
+  }
   if (required.length > 0) return `{ ${required.join(", ")} }`;
   if (typeof record.type === "string") return `a ${record.type}`;
   if (typeof record.const !== "undefined") return JSON.stringify(record.const);

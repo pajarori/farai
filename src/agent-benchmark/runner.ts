@@ -610,7 +610,7 @@ function activitySummary(toolCalls: ToolCallRecord[], events: SessionEvent[], jo
   return {
     modelRequests: events.filter((event) => event.type === "planner_attempt").length,
     toolCalls: toolCalls.length,
-    commands: toolCalls.filter((call) => call.tool === "exec_command" || call.tool === "shell_exec").length,
+    commands: toolCalls.filter((call) => call.tool === "command_run" || call.tool === "command_run").length,
     toolErrors: toolCalls.filter((call) => call.status === "error").length,
     plannerErrors: events.filter((event) => event.type === "planner_error").length,
     loopSupervisions: events.filter((event) => event.type === "loop_supervision").length,

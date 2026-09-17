@@ -9,8 +9,8 @@ import { loadConfig, resolveProxyConfig } from "../../agent-core/config";
 import { ensureMcpProxyReady, managedProxyForSession } from "../mcp-manager";
 
 export const execTool: ToolDefinition = {
-  name: "shell_exec",
-  description: "Run an exact shell command inside the managed Kali container and return stdout, stderr, and exit status. Shell traffic stays direct in explicit proxy mode; set network=proxy for proxy-aware HTTP clients when their traffic should be captured. Use this for workflows not covered by a purpose-built tool; use background=true for interactive or long-running work, then continue with session_poll.",
+  name: "command_run",
+  description: "Run an exact shell command inside the managed Kali container and return stdout, stderr, and exit status. Shell traffic stays direct in explicit proxy mode; set network=proxy for proxy-aware HTTP clients when their traffic should be captured. Use this for workflows not covered by a purpose-built tool; use background=true for interactive or long-running work, then continue with command_poll.",
   inputSchema: {
     type: "object",
     required: ["command"],
@@ -52,15 +52,15 @@ export const execTool: ToolDefinition = {
     if (args.background === true || shouldAutoBackgroundShellCommand(command)) {
       const yieldMs = args.background === true ? clampYieldMs(args.yieldMs) : clampYieldMs(args.yieldMs ?? 1_000);
       const kind = shouldAutoBackgroundShellCommand(command) ? "shell" : "generic";
-      const started = await sessionManager.start(backend(context), "shell_exec", routedCommand, yieldMs, context.signal, {
+      const started = await sessionManager.start(backend(context), "command_run", routedCommand, yieldMs, context.signal, {
         kind,
         pty: kind === "shell"
       });
-      return backgroundToolResult("shell_exec", started, kind);
+      return backgroundToolResult("command_run", started, kind);
     }
     const kali = backend(context);
     const result = await kali.exec(routedCommand);
-    const converted = timeoutBackgroundResult("shell_exec", kali, result);
+    const converted = timeoutBackgroundResult("command_run", kali, result);
     if (converted) return converted;
     const output = processOutput(result.stdout, result.stderr);
     if (requestedNetwork === "proxy" && upstreamTlsVerificationFailed(output)) {

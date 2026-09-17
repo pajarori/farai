@@ -365,10 +365,9 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   async startPersistent(): Promise<ContainerExecResult> {
-    const previous = containerStartLocks.get(this.containerName) ?? Promise.resolve(undefined);
-    const task = previous
-      .catch(() => undefined)
-      .then(() => this.startPersistentUnlocked());
+    const existing = containerStartLocks.get(this.containerName);
+    if (existing) return await existing;
+    const task = this.startPersistentUnlocked();
     containerStartLocks.set(this.containerName, task);
     try {
       return await task;

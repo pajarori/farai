@@ -94,7 +94,7 @@ test("failed auto compaction preserves history instead of replacing it with a lo
   }
   const runtime = new AgentRuntime(workspace, new MalformedPlanner());
   const created = await runtime.createSession();
-  const session = runtime.updateSession(created.id, { toolScope: ["fs_read"] });
+  const session = runtime.updateSession(created.id, { toolScope: ["file_read"] });
   await runtime.prompt(session, `continue this task ${"context ".repeat(1200)}`);
 
   const before = runtime.store.listContextMessages(session.id);
@@ -126,7 +126,7 @@ test("an expanding auto-compaction fails closed instead of compacting forever", 
   const planner = new ExpandingPlanner();
   const runtime = new AgentRuntime(workspace, planner);
   const created = await runtime.createSession();
-  const session = runtime.updateSession(created.id, { toolScope: ["fs_read"] });
+  const session = runtime.updateSession(created.id, { toolScope: ["file_read"] });
   const result = await runtime.prompt(session, `trigger compaction ${"context ".repeat(4_000)}`);
   const turn = runtime.store.listTurns(session.id)[0];
   const boundaryCount = runtime.store.database().query("select count(*) as count from compaction_boundaries where session_id = $session")
@@ -370,7 +370,7 @@ test("provider overflow triggers compaction even when the local estimate fits", 
     }
   };
   const runtime = new AgentRuntime(workspace, planner);
-  const session = runtime.updateSession((await runtime.createSession()).id, { toolScope: ["fs_read"] });
+  const session = runtime.updateSession((await runtime.createSession()).id, { toolScope: ["file_read"] });
   const result = await runtime.prompt(session, "continue this task ".repeat(6000));
   expect(result.response).toContain("recovered");
   expect(compactCalls).toBe(1);
@@ -383,7 +383,7 @@ test("persisted replacement history is stable across repeated compaction and res
   dirs.push(workspace);
   const planner: PlannerProvider = { name: "summary", plan: async () => [{ kind: "respond", text: "handoff" }] };
   let runtime = new AgentRuntime(workspace, planner);
-  const session = runtime.updateSession((await runtime.createSession()).id, { toolScope: ["fs_read"] });
+  const session = runtime.updateSession((await runtime.createSession()).id, { toolScope: ["file_read"] });
   await runtime.prompt(session, "OLD-DROPPED-USER");
   await runtime.prompt(session, "latest user ".repeat(12000));
   await runtime.compactSessionWithPlanner(session, planner);
@@ -418,7 +418,7 @@ test("streaming provider overflow uses the same compaction request and resumes w
     }
   };
   const runtime = new AgentRuntime(workspace, provider);
-  const session = runtime.updateSession((await runtime.createSession()).id, { toolScope: ["fs_read"] });
+  const session = runtime.updateSession((await runtime.createSession()).id, { toolScope: ["file_read"] });
   const result = await runtime.prompt(session, "continue the work ".repeat(7000));
   expect(result.response).toContain("stream recovered");
   expect(requests).toHaveLength(3);

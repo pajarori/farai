@@ -18,18 +18,16 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     id: "explore",
     description: "read-only workspace exploration and codebase analysis",
     prompt: "Explore the workspace without modifying it. Return only the evidence, file references, conclusions, and unresolved questions needed by the parent.",
-    tools: ["fs_list", "fs_grep", "fs_read", "git_status", "git_diff", "lsp_inspect", "tool_output_read"]
+    tools: ["file_list", "file_search", "file_read", "git_status", "git_diff", "code_diagnostics", "output_read", "agent_manage"]
   },
   {
     id: "recon",
     description: "bounded infrastructure and attack-surface reconnaissance",
     prompt: "Perform only the delegated reconnaissance scope. Prefer typed discovery tools, preserve evidence, avoid duplicate probes, and return deduplicated assets with source status and uncertainty.",
     tools: [
-      "subdomain_enum", "dns_probe", "port_scan", "nmap_scan", "http_probe", "tls_probe", "url_discover", "web_crawl",
-      "vulnerability_scan", "vulnerability_lookup", "dir_enum", "exploit_search", "kali_tool_search", "exec_command", "write_stdin",
-      "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_eval", "browser_network_requests", "browser_network_request",
-      "campaign_asset", "campaign_observe", "campaign_hypothesis", "campaign_search", "notes_add", "evidence_save",
-      "session_poll", "session_stop", "tool_output_read"
+      "asset_subdomains", "dns_resolve", "network_scan", "service_probe", "tls_inspect", "url_discover", "web_crawl",
+      "vulnerability_scan", "vulnerability_lookup", "web_directory", "kali_search", "command_run", "command_input",
+      "browser_manage", "campaign_manage", "knowledge_manage", "command_poll", "command_stop", "output_read", "agent_manage"
     ]
   },
   {
@@ -37,12 +35,10 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     description: "web application exploration and verification",
     prompt: "Audit only the delegated web scope. Use browser, HTTP, and shell capabilities as appropriate, preserve exact evidence, and return proven findings separately from uncertainty.",
     tools: [
-      "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_click", "browser_fill_form", "browser_type",
-      "browser_press_key", "browser_wait_for", "browser_tabs", "browser_eval", "browser_network_requests", "browser_network_request",
-      "email_list", "email_create", "email_inbox", "email_read", "email_wait",
-      "http_request", "http_probe", "tls_probe", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup",
-      "dir_enum", "exploit_search", "kali_tool_search", "exec_command", "write_stdin", "campaign_observe",
-      "campaign_hypothesis", "campaign_test", "notes_add", "evidence_save", "session_poll", "session_stop", "tool_output_read"
+      "browser_manage", "mail_manage",
+      "http_request", "service_probe", "tls_inspect", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup",
+      "web_directory", "kali_search", "command_run", "command_input",
+      "campaign_manage", "knowledge_manage", "command_poll", "command_stop", "output_read", "agent_manage"
     ]
   },
   {
@@ -50,8 +46,8 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     description: "isolated software implementation, debugging, and review",
     prompt: "Handle only the delegated code task. Inspect before editing, preserve unrelated changes, make the smallest coherent patch, and return changed files, validation, and residual risk.",
     tools: [
-      "fs_list", "fs_grep", "fs_read", "fs_write", "fs_edit", "patch_apply", "git_status", "git_diff",
-      "lsp_inspect", "code_write_script", "exec_command", "write_stdin", "update_plan", "todo_add", "todo_update", "todo_list", "tool_output_read"
+      "file_list", "file_search", "file_read", "file_write", "file_replace", "file_patch", "git_status", "git_diff",
+      "code_diagnostics", "script_write", "command_run", "command_input", "task_manage", "output_read", "agent_manage"
     ]
   },
   {
@@ -59,9 +55,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
     description: "independent verification of evidence and candidate findings",
     prompt: "Independently verify only the delegated claim. Establish a baseline, run the smallest discriminating test, save evidence, and return proven, disproven, or inconclusive with exact reasoning.",
     tools: [
-      "browser_context", "browser_navigate", "browser_snapshot", "browser_find", "browser_eval", "browser_network_requests", "browser_network_request",
-      "http_request", "http_probe", "tls_probe", "vulnerability_scan", "vulnerability_lookup", "exec_command", "write_stdin", "campaign_search", "campaign_test", "campaign_verify", "evidence_save",
-      "report_add_finding", "report_update_finding", "tool_output_read"
+      "browser_manage", "http_request", "service_probe", "tls_inspect", "vulnerability_scan", "vulnerability_lookup", "command_run", "command_input", "campaign_manage", "finding_manage", "knowledge_manage", "output_read", "agent_manage"
     ]
   }
 ];

@@ -84,59 +84,27 @@ export function buildNmapCommand(targets: string[], options: { ports?: number[];
   return command.map(shellQuote).join(" ");
 }
 
-async function runPortScan(args: unknown, context: Parameters<NonNullable<ToolDefinition["run"]>>[1], label: string, forceDeep = false): Promise<ToolResult> {
+async function runNetworkScan(args: unknown, context: Parameters<NonNullable<ToolDefinition["run"]>>[1]): Promise<ToolResult> {
   assertObject(args, "args");
   const target = asString(args.target, "target");
   const versionDetection = args.versionDetection !== false;
-  const mode = forceDeep ? "deep" : args.mode === "fast" || args.mode === "deep" ? args.mode : "service";
+  const mode = args.mode === "nmap" || args.mode === "deep" ? args.mode : "discover";
   const kali = backend(context);
 
-  if (mode === "deep") {
+  if (mode === "nmap" || mode === "deep") {
     const portSelection = normalizePortSelection(args.ports);
     const ports = portSelection ? expandPorts(portSelection, 65_535) : undefined;
-    const result = await kali.exec(buildNmapCommand([target], { ...(ports ? { ports } : {}), versionDetection, deep: true }), 595_000, context.signal, 32_000_000);
-    const converted = timeoutBackgroundResult(label, kali, result);
+    const result = await kali.exec(buildNmapCommand([target], { ...(ports ? { ports } : {}), versionDetection, deep: mode === "deep" }), 595_000, context.signal, 32_000_000);
+    const converted = timeoutBackgroundResult("network_scan", kali, result);
     if (converted) return converted;
-    return portResult(context, label, "nmap", mode, target, result, parseNmapOpenPorts(processOutput(result.stdout, result.stderr), target), false);
+    return portResult(context, "network_scan", "nmap", mode, target, result, parseNmapOpenPorts(processOutput(result.stdout, result.stderr), target), false);
   }
 
   const naabuResult = await kali.exec(buildNaabuCommand(args), 295_000, context.signal, 16_000_000);
-  const converted = timeoutBackgroundResult(label, kali, naabuResult);
+  const converted = timeoutBackgroundResult("network_scan", kali, naabuResult);
   if (converted) return converted;
   const discovered = parseNaabuOutput(naabuResult.stdout, target);
-  if (mode === "fast" || !discovered.length || naabuResult.exitCode !== 0) {
-    return portResult(context, label, "naabu", mode, target, naabuResult, discovered, false);
-  }
-
-  const hosts = [...new Set(discovered.map((item) => item.host))];
-  const ports = [...new Set(discovered.map((item) => item.port))];
-  if (hosts.length > 256 || ports.length > 2_000) {
-    return portResult(context, label, "naabu", mode, target, naabuResult, discovered, false, "service enrichment skipped because the discovered target set exceeded safe nmap bounds");
-  }
-  const nmapResult = await kali.exec(buildNmapCommand(hosts, { ports, versionDetection, deep: false }), 595_000, context.signal, 32_000_000);
-  const nmapConverted = timeoutBackgroundResult(label, kali, nmapResult);
-  if (nmapConverted) return nmapConverted;
-  const nmapOutput = processOutput(nmapResult.stdout, nmapResult.stderr);
-  const enriched = parseNmapOpenPorts(nmapOutput, target);
-  const serviceEnriched = nmapResult.exitCode === 0 && !nmapResult.timedOut && enriched.length > 0;
-  const combined: BackendExecResult = {
-    exitCode: nmapResult.exitCode,
-    stdout: [`NAABU:\n${naabuResult.stdout}`, `NMAP:\n${nmapOutput}`].join("\n\n"),
-    stderr: [naabuResult.stderr, nmapResult.stderr].filter(Boolean).join("\n"),
-    durationMs: naabuResult.durationMs + nmapResult.durationMs,
-    timedOut: naabuResult.timedOut || nmapResult.timedOut
-  };
-  return portResult(
-    context,
-    label,
-    "naabu+nmap",
-    mode,
-    target,
-    combined,
-    serviceEnriched ? enriched : discovered,
-    serviceEnriched,
-    serviceEnriched ? undefined : "nmap service enrichment failed; returning verified naabu discoveries"
-  );
+  return portResult(context, "network_scan", "naabu", mode, target, naabuResult, discovered, false);
 }
 
 function portResult(
@@ -197,7 +165,7 @@ const portScanSchema = {
   required: ["target"],
   properties: {
     target: { type: "string" },
-    mode: { type: "string", enum: ["fast", "service", "deep"] },
+    mode: { type: "string", enum: ["discover", "nmap", "deep"] },
     ports: { type: "string" },
     topPorts: { type: "string", enum: ["100", "1000", "full"] },
     versionDetection: { type: "boolean" },
@@ -209,9 +177,9 @@ const portScanSchema = {
   additionalProperties: false
 } as Record<string, unknown>;
 
-export const portScanTool: ToolDefinition = {
-  name: "port_scan",
-  description: "Discover open TCP ports with ProjectDiscovery naabu, then enrich only the discovered ports with targeted Nmap service detection by default. mode=fast returns verified naabu results without Nmap, mode=service is the bounded default, and mode=deep runs Nmap directly. Use explicit ports for focused checks and exec_command for UDP, custom NSE, evasion, or specialized Nmap workflows.",
+export const networkScanTool: ToolDefinition = {
+  name: "network_scan",
+  description: "Discover open TCP ports with naabu. The default mode is fast TCP discovery; mode=nmap and mode=deep are explicit Nmap scans for service identification. Use service_probe for HTTP inventory and command_run for UDP, custom NSE, evasion, or specialized workflows.",
   inputSchema: portScanSchema,
   mutates: false,
   timeoutMs: 900_000,
@@ -219,27 +187,5 @@ export const portScanTool: ToolDefinition = {
   visibility: "recon",
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
-  run: (args, context) => runPortScan(args, context, "port_scan")
-};
-
-export const nmapScanTool: ToolDefinition = {
-  name: "nmap_scan",
-  description: "Run an explicit Nmap TCP scan with optional service/version detection and an optional bounded port list. This compatibility tool always uses direct Nmap; prefer port_scan for faster naabu discovery followed by targeted service enrichment, and use exec_command for UDP or custom NSE workflows.",
-  inputSchema: {
-    type: "object",
-    required: ["target"],
-    properties: {
-      target: { type: "string" },
-      ports: { type: "string" },
-      versionDetection: { type: "boolean" }
-    },
-    additionalProperties: false
-  },
-  mutates: false,
-  timeoutMs: 600_000,
-  parallel: true,
-  visibility: "recon",
-  renderHuman: defaultHumanRenderer,
-  renderModel: defaultModelRenderer,
-  run: (args, context) => runPortScan(args, context, "nmap_scan", true)
+  run: runNetworkScan
 };

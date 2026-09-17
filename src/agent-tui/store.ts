@@ -305,7 +305,7 @@ export function isAgentBusy(store: FaraiTuiStore): boolean {
 }
 
 export function isAgentCancelable(store: FaraiTuiStore): boolean {
-  return Boolean(store.ui.compacting || store.snapshot.runningTurnId);
+  return Boolean(store.ui.submitting || store.ui.compacting || store.snapshot.runningTurnId);
 }
 
 function emptySnapshot(): StoreSnapshot {

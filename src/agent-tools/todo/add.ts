@@ -4,7 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 import { priority } from "./shared";
 
 export const todoAddTool: ToolDefinition = {
-  name: "todo_add",
+  name: "task_add_internal",
   description: "Create one concrete, actionable todo for the current session with an optional priority. Use todos to track multi-step work that must persist across turns; do not add vague status notes or duplicate an existing item.",
   inputSchema: {
     type: "object",

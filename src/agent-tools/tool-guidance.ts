@@ -61,7 +61,7 @@ const PROPERTY_HINTS: Record<string, string> = {
   oldString: "exact existing text block to replace; include enough context to make the match unique",
   omitBody: "do not resend the captured request body when true",
   operation: "operation from the declared enum; required fields depend on the selected operation",
-  options: "compatibility alias for choices in request_user_input; do not send it together with choices",
+  options: "compatibility alias for choices in user_input; do not send it together with choices",
   oracle: "objective condition that decides whether a test passed or failed",
   output: "bounded output text or destination selected by this operation",
   pages: "PDF page number or inclusive range such as 2-8",
@@ -120,50 +120,46 @@ const PROPERTY_HINTS: Record<string, string> = {
 };
 
 const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
-  fs_write: {
+  file_write: {
     path: "workspace-relative destination such as reports/result.md; use /workspace/result.md only when the runtime explicitly exposes that container root, never host paths such as /Users/...",
-    content: "complete file content encoded as one valid JSON string; for large or structured edits prefer patch_apply or fs_edit to avoid malformed arguments"
+    content: "complete file content encoded as one valid JSON string; for large or structured edits prefer file_patch or file_replace to avoid malformed arguments"
   },
-  fs_edit: {
+  file_replace: {
     path: "workspace-relative file path; read the file first so oldString is copied exactly",
     oldString: "exact unique block copied from the file, including whitespace and line endings",
     newString: "replacement block; use an empty string only when intentionally deleting the match"
   },
-  patch_apply: {
+  file_patch: {
     patch: "reviewable Farai patch with explicit file paths and contextual hunks; use this for multi-file or multi-hunk changes, not a JSON document"
   },
-  code_write_script: {
+  script_write: {
     filename: "filename beneath the workspace helpers directory, not an absolute host path",
-    content: "complete script content; keep it valid source text and execute it later with exec_command when needed"
+    content: "complete script content; keep it valid source text and execute it later with command_run when needed"
   },
-  exec_command: {
+  command_run: {
     cmd: "command executed inside the managed Kali workspace; use purpose-built recon, browser, web, or proxy tools when they provide stronger semantics",
     workdir: "workspace-relative or container-absolute working directory for this command",
     yield_time_ms: "milliseconds to wait for initial output before returning a process id",
     max_output_tokens: "positive output budget for this response",
     network: "direct leaves shell traffic uncaptured; proxy injects Farai's managed HTTP(S) proxy variables and records eligible traffic"
   },
-  write_stdin: {
-    session_id: "process id returned by exec_command; never use a child-agent session id",
+  command_input: {
+    session_id: "process id returned by command_run; never use a child-agent session id",
     chars: "optional stdin bytes for an interactive process; omit to poll without writing",
     yield_time_ms: "milliseconds to wait for new output before returning",
     max_output_tokens: "positive output budget for this poll response"
   },
-  update_plan: {
-    plan: "complete ordered replacement plan with at most one in_progress step"
+  task_manage: {
+    operation: "add, update, list, or replace the durable task plan",
+    args: "operation-specific arguments"
   },
-  shell_exec: {
-    command: "legacy command adapter; prefer exec_command for new work",
-    background: "return immediately with a job id for listeners, servers, interactive shells, or commands expected to exceed the turn",
-    network: "direct leaves shell traffic uncaptured; proxy injects Farai's managed HTTP(S) proxy variables and records eligible traffic"
-  },
-  session_poll: {
-    jobId: "job id returned by a legacy background tool, callback, or another background operation",
-    processId: "legacy process id returned by an older background command; do not use a child agent sessionId here",
+  command_poll: {
+    jobId: "job id returned by a background command, callback, or another background operation",
+    processId: "process id returned by command_run; do not use a child agent sessionId here",
     input: "stdin sent to an interactive process only; omit for a read-only poll"
   },
-  request_user_input: {
-    questions: "one to three objects, each with id, question, and recommended; use choices or the compatibility alias options, never both",
+  user_input: {
+    questions: "one to three objects, each with id, question, and recommended; use choices for selectable answers",
     recommended: "exact fallback answer label or text; it is selected automatically if the timeout expires"
   },
   agent_spawn: {
@@ -193,17 +189,18 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
     pathAsIs: "required for exact-path tests where URL normalization would change the request",
     httpVersion: "select auto, 1.0, 1.1, 2, or 3 only when protocol behavior is part of the question"
   },
-  internet_search: {
-    query: "public discovery query; use this before internet_fetch when looking for sources or current information",
+  web_search: {
+    query: "public discovery query; use this before web_fetch when looking for sources or current information",
     limit: "maximum ranked results to return; select a result URL before fetching its contents"
   },
-  internet_fetch: {
+  web_fetch: {
     url: "one selected public URL to read; this does not search, execute JavaScript, or preserve browser cookies",
     maxChars: "bounded readable extraction size; request a larger value only when the source requires it"
   },
-  http_probe: {
-    targets: "hosts, IPs, or URLs to probe with httpx; use the returned live service records as inputs to later testing",
-    redirects: "none, same_host, or all; same_host is the safe default for inventory",
+  service_probe: {
+    targets: "hosts, IPs, or URLs to probe with the fast concurrent service engine; use detail mode only when httpx enrichment is needed",
+    mode: "fast is the default bounded inventory; choose detail only when technology, ASN, CDN/WAF, redirect, or TLS enrichment is needed",
+    redirects: "none, same_host, or all; none is the fast default and same_host is for redirect-aware inventory",
     includeTls: "include certificate metadata when true; disable only when TLS data is unnecessary"
   },
   vulnerability_scan: {
@@ -296,7 +293,8 @@ const ENUM_HINTS: Record<string, Record<string, string>> = {
   mode: {
     attached: "wait for the operation or child result in the current turn",
     detached: "return immediately and continue in the background",
-    fast: "bounded quick discovery without service enrichment",
+    discover: "bounded quick discovery without service enrichment",
+    nmap: "direct Nmap service scan for the target",
     service: "discover ports then enrich them with targeted service detection",
     deep: "direct deeper service scan with more network activity",
     protocol_test: "preserve exact protocol/path behavior for one request",
@@ -349,55 +347,60 @@ const ENUM_HINTS: Record<string, Record<string, string>> = {
 };
 
 const EXACT_GUIDANCE: Record<string, string> = {
-  exec_command: "run a real command in the managed Kali workspace when no purpose-built tool models the task. use write_stdin with the returned process id for listeners, servers, and interactive commands. choose network=proxy only when shell HTTP traffic must be captured; direct is deliberate bypass.",
-  write_stdin: "poll only a process id returned by exec_command. pass chars only to an interactive process waiting for stdin; do not start another command or use a child-agent session id.",
-  update_plan: "replace the complete ordered execution plan. keep at most one step in_progress and mark steps completed only after verification.",
-  shell_exec: "legacy compatibility adapter for recorded prompts and custom scopes. prefer exec_command and write_stdin for new work.",
-  session_poll: "poll only an id returned by a background tool. pass input only to an interactive process waiting for stdin; do not start another command or use a child session id.",
-  session_stop: "stop one background job or legacy process by its returned id. use agent_interrupt or agent_close for child agents.",
-  port_scan: "use for TCP discovery with naabu followed by bounded Nmap enrichment. use explicit ports for focused checks; use exec_command for UDP, custom NSE, or specialized scan behavior.",
-  nmap_scan: "run an explicit TCP Nmap scan for compatibility or a focused service check. prefer port_scan for normal discovery and enrichment.",
-  subdomain_enum: "perform passive subdomain discovery from independent certificate, DNS, and archive sources. validate returned names with dns_probe or http_probe before testing them.",
-  dns_probe: "resolve discovered names and inspect selected DNS records with wildcard filtering. this validates candidates; it is not a passive discovery source.",
-  http_probe: "use ProjectDiscovery httpx to inventory live HTTP services and normalize status, final URL, title, technologies, IP, CDN, and optional TLS metadata. use browser tools for stateful interaction.",
-  tls_probe: "use ProjectDiscovery tlsx for TLS inventory. enable version or cipher enumeration only for a focused assessment because it creates additional handshakes.",
-  url_discover: "build a passive historical URL corpus from public archives. validate selected URLs later; this tool does not request every discovered URL.",
+  agent_manage: "set operation to spawn, list, wait, message, followup, interrupt, or close and pass operation-specific fields.",
+  browser_manage: "set operation to the browser action and pass its fields inside args; eval requires args.script containing a JavaScript function expression, for example () => document.title. keep one browser context stable for a workflow.",
+  callback_manage: "set operation to host_info, listen, oast, or stop and pass operation-specific fields.",
+  campaign_manage: "set operation to the campaign lifecycle action and pass operation-specific fields while preserving durable evidence.",
+  finding_manage: "set operation to calculate, add_finding, or update_finding and include evidence for scored security claims.",
+  knowledge_manage: "set operation to search, read, resolve, neighbors, prioritize, notes, evidence, hypothesis, failed, or skill_load and pass fields inside args. skill_load accepts args.name or args.skill with an exact catalog name.",
+  mail_manage: "set operation to list, create, inbox, read, or wait and pass operation-specific fields using exact Farai UUIDs.",
+  mobile_manage: "set operation to the Android device, app, static-analysis, UI, or Frida action and pass operation-specific fields.",
+  mcp_resource: "set operation to list or read; read requires the exact server and URI returned by list.",
+  proxy_manage: "set operation to scope, policy, flows, flow_get, sitemap, replay, intercept, or clear and pass operation-specific fields.",
+  task_manage: "set operation to add, update, list, or plan and pass operation-specific fields.",
+  worktree_manage: "set operation to enter or exit and pass operation-specific fields.",
+  command_run: "run a real command in the managed Kali workspace when no purpose-built tool models the task. use command_input with the returned process id for listeners, servers, and interactive commands. choose network=proxy only when shell HTTP traffic must be captured; direct is deliberate bypass.",
+  command_input: "poll only a process id returned by command_run. pass chars only to an interactive process waiting for stdin; do not start another command or use a child-agent session id.",
+  command_poll: "poll only an id returned by a background tool. pass input only to an interactive process waiting for stdin; do not start another command or use a child session id.",
+  command_stop: "stop one background job or process by its returned id. use agent_manage operation=interrupt or operation=close for child agents.",
+  network_scan: "use for fast TCP port discovery with naabu. choose mode=nmap or mode=deep only when explicit service identification is needed; use service_probe for HTTP inventory and command_run for UDP, custom NSE, evasion, or specialized scan behavior.",
+  asset_subdomains: "perform passive subdomain discovery from independent certificate, DNS, and archive sources. validate returned names with dns_resolve or service_probe before testing them.",
+  dns_resolve: "resolve discovered names and inspect selected DNS records with wildcard filtering. this validates candidates; it is not a passive discovery source.",
+  service_probe: "use the fast concurrent HTTP engine for live service inventory. choose mode=detail only when technology, ASN, CDN/WAF, redirect, or TLS enrichment is needed; use browser tools for stateful interaction.",
+  tls_inspect: "use ProjectDiscovery tlsx for TLS inventory. enable version or cipher enumeration only for a focused assessment because it creates additional handshakes.",
+  url_discover: "pass domains and optionally limit, sources, scope, timeoutSeconds, maxMinutes, or rateLimit to build a passive historical URL corpus. validate selected URLs later; this tool does not request every discovered URL.",
   web_crawl: "crawl authorized live targets with katana for breadth-first route and technology mapping. enable headless or JavaScript only when required; use browser tools for authenticated workflows.",
   vulnerability_scan: "run the pinned local Nuclei templates against authorized targets. treat matches as candidate evidence, not verified findings; enable oast only for an intentional callback test.",
-  vulnerability_lookup: "query ProjectDiscovery vulnerability intelligence by ids or filters. it informs prioritization and does not prove that a target is vulnerable.",
-  http_request: "send one exact request when method, headers, body, redirects, path spelling, or HTTP version matters. use internet_fetch for reading public pages and browser tools for cookies or forms.",
-  dir_enum: "run bounded ffuf content discovery against a URL containing FUZZ. use exec_command for custom matchers, recursion, or multiple injection points.",
-  exploit_search: "search the local offline Exploit-DB index. a matching title is not proof that an exploit applies or is safe to run.",
-  fs_read: "read one workspace file, bounded PDF pages, or one directory level. use fs_list for recursive discovery and fs_grep for content search.",
-  fs_list: "discover workspace paths recursively while excluding Farai state and dependency trees. use fs_read for the selected file.",
-  fs_grep: "search workspace text with a regular expression and bounded results. use include to narrow filenames.",
-  fs_write: "use only when the complete file is known. pass a workspace-relative path and one valid JSON string; for large or coordinated edits prefer fs_edit or patch_apply.",
-  fs_edit: "replace one exact text block after reading the file. the match must be unique unless replaceAll=true; use patch_apply for coordinated changes.",
-  patch_apply: "apply reviewable additions, updates, or deletions across one or more workspace files. this expects a patch format, not a JSON object or host path.",
-  notebook_edit: "edit one notebook cell by zero-based index without executing the notebook. use the operation-specific cellType and source fields.",
+  vulnerability_lookup: "query advisory intelligence by ids or filters, or set source=exploitdb for the local Exploit-DB index. it informs prioritization and does not prove that a target is vulnerable or exploitable.",
+  http_request: "send one exact request when method, headers, body, redirects, path spelling, or HTTP version matters. use web_fetch for reading public pages and browser tools for cookies or forms.",
+  web_directory: "run bounded ffuf content discovery against a URL containing FUZZ. use command_run for custom matchers, recursion, or multiple injection points.",
+  file_read: "read one workspace file, bounded PDF pages, or one directory level. use file_list for recursive discovery and file_search for content search.",
+  file_list: "discover workspace paths recursively while excluding Farai state and dependency trees. use file_read for the selected file.",
+  file_search: "search workspace text with a regular expression and bounded results. use include to narrow filenames.",
+  file_write: "use only when the complete file is known. pass a workspace-relative path and one valid JSON string; for large or coordinated edits prefer file_replace or file_patch.",
+  file_replace: "replace one exact text block after reading the file. the match must be unique unless replaceAll=true; use file_patch for coordinated changes.",
+  file_patch: "apply reviewable additions, updates, or deletions across one or more workspace files. this expects a patch format, not a JSON object or host path.",
+  notebook_cell: "edit one notebook cell by zero-based index without executing the notebook. use the operation-specific cellType and source fields.",
   git_status: "read the active workspace Git state before or after edits; it does not show full patch contents.",
   git_diff: "inspect exact unstaged or staged patch content, optionally for one path; use git_status for the file overview.",
   notes_add: "persist durable context or decisions that are not formal evidence, hypotheses, or failed attempts.",
   evidence_save: "persist bounded factual evidence before making a security claim, then link its returned UUID to campaign records or findings.",
   memory_add_hypothesis: "store a keyed session hypothesis with confidence so later turns can test it instead of repeating the same reasoning.",
   memory_mark_failed: "record a meaningful failed approach and its reason so later work avoids repeating it; do not use for a transient error that needs a retry.",
-  skill_load: "load one exact skill or its explicitly exposed resource when a prescribed workflow requires it.",
-  knowledge_search: "search Farai's local security corpus for reference material. use knowledge_read for a full record and internet_search for current public facts.",
+  skill_load: "load one exact skill or its explicitly exposed resource through knowledge_manage operation=skill_load when a prescribed workflow requires it.",
+  knowledge_search: "search Farai's local security corpus for reference material. use knowledge_read for a full record and web_search for current public facts.",
   knowledge_read: "read one exact local knowledge record returned by knowledge_search. treat it as reference material and verify target-specific claims.",
   knowledge_resolve: "resolve a CVE, CWE, CAPEC, ATT&CK id, alias, or name before traversing taxonomy relationships.",
   knowledge_neighbors: "traverse deterministic relationships from an exact resolved taxonomy node; do not guess node ids.",
   knowledge_prioritize: "return KEV and EPSS signals for one CVE to prioritize work; these signals do not prove target exposure.",
-  todo_add: "add one concrete actionable task that must persist across turns; avoid vague status notes or duplicates.",
-  todo_update: "update an existing todo by its exact todo id and mark completion only after the work is actually done.",
-  todo_list: "list current todos before adding work when duplication is possible.",
   cvss_calculate: "validate and score one complete CVSS:3.1 base vector using metric abbreviations AV, AC, PR, UI, S, C, I, A; the returned score and severity are authoritative.",
   report_add_finding: "persist a candidate finding after evidence exists. calculate CVSS first when uncertain; severity is derived from the vector and is not independently guessed.",
   report_update_finding: "update exactly one existing finding instead of duplicating it or changing the old record to not_applicable. changing CVSS requires evidence supporting the new metric.",
-  code_write_script: "write a reusable helper beneath the workspace helpers directory. use fs_write for other files and exec_command for one-off commands.",
+  script_write: "write a reusable helper beneath the workspace helpers directory. use file_write for other files and command_run for one-off commands.",
   callback_host_info: "inspect host interfaces before choosing a reverse-shell LHOST because the Kali container and host VPN use different network namespaces.",
   callback_listen: "start a host-side TCP listener for an authorized callback, then poll it and stop it with the returned service name or job id.",
   callback_oast: "start an Interactsh out-of-band session for an authorized blind interaction test, trigger the target, then poll the returned job.",
-  callback_stop: "stop one host-side callback listener by its returned service name; use session_stop for a generic background job.",
+  callback_stop: "stop one host-side callback listener by its returned service name; use command_stop for a generic background job.",
   campaign_create: "create a persistent multi-wave campaign only when the objective needs shared evidence, hypotheses, verification, or a report. the model decides when this boundary is useful.",
   campaign_asset: "upsert one canonical attack-surface asset using a stable identifier so repeated discoveries update instead of duplicate it.",
   campaign_observe: "record a factual observation from a tool result or investigation; use campaign_hypothesis for an explanatory claim.",
@@ -409,7 +412,7 @@ const EXACT_GUIDANCE: Record<string, string> = {
   campaign_test: "formalize a baseline-versus-mutation experiment and link its observation and evidence before calling campaign_verify.",
   campaign_requirement: "record a stable completion requirement and link evidence when satisfying or waiving it.",
   campaign_checkpoint: "record a wave decision: continue, waiting, blocked, or complete. complete is valid only when the objective and requirements are satisfied.",
-  tool_output_read: "read additional pages from a durable output artifact using the exact artifact id returned by a truncated result.",
+  output_read: "read additional pages from a durable output artifact using the exact artifact id returned by a truncated result.",
   lsp_inspect: "use semantic language-server navigation for definitions, references, hover, and symbols when text search is insufficient.",
   browser_context: "create, list, or close isolated browser identities. keep one context stable for each login or registration flow and pass it to every browser call.",
   browser_navigate: "navigate one selected context and use its returned accessibility snapshot for immediate interaction.",
@@ -423,8 +426,8 @@ const EXACT_GUIDANCE: Record<string, string> = {
   browser_tabs: "list, create, close, or select tabs within one context. tab indexes are context-local; separate contexts isolate cookies.",
   browser_network_requests: "inspect requests observed by one browser context after the relevant browser action, then use the returned index with browser_network_request.",
   browser_network_request: "inspect one request index from browser_network_requests; do not reuse it after the network log resets.",
-  browser_eval: "execute a serializable JavaScript function in the selected page context for DOM or page-state inspection; it runs in the browser, not Node, and should complement rather than replace evidence-producing browser actions.",
-  kali_tool_search: "search the actual command inventory in the managed Kali container when a command map is ambiguous or packages changed; it does not execute commands.",
+  browser_eval: "pass script as a JavaScript function expression and return a serializable value explicitly; console.log alone returns undefined. it runs in the browser, not Node, and should complement rather than replace evidence-producing browser actions.",
+  kali_search: "search the actual command inventory in the managed Kali container when a command map is ambiguous or packages changed; it does not execute commands.",
   agent_spawn: "start one bounded child context. use mode=detached for background work, pass non-overlapping claims for parallel tasks, and use session ids for child lifecycle calls.",
   agent_list: "list child lifecycle state with an empty object; use returned session ids for agent controls and job ids only for process polling.",
   agent_wait: "wait for owned child session ids with a bounded timeout; it synchronizes and does not send work.",
@@ -432,15 +435,11 @@ const EXACT_GUIDANCE: Record<string, string> = {
   agent_followup: "start another turn on an idle child by session id; use mode=detached only when that turn should run in the background.",
   agent_interrupt: "cancel the active child turn while preserving its session for a later follow-up.",
   agent_close: "stop outstanding child work and archive its context when it is no longer needed.",
-  session_rename: "set a concise human-facing title for the current session without changing task state.",
-  internet_search: "use first for public web discovery: return ranked titles, URLs, snippets, and attribution, then choose a result before internet_fetch.",
-  internet_fetch: "read one selected public URL as bounded text, JSON, HTML, or PDF. it does not search, execute JavaScript, or preserve browser state.",
-  image_view: "inspect an existing workspace image with dimensions and optional OCR; it does not fetch remote URLs.",
-  request_user_input: "ask only when a user decision is required. recommended values are selected after timeout; choices and options are aliases, not two fields to send together.",
-  mcp_resource_list: "list readable resources exposed by configured MCP servers; it does not list callable tools.",
-  mcp_resource_read: "read one exact MCP resource URI returned by mcp_resource_list.",
-  worktree_enter: "enter an isolated Git worktree beneath Farai state for risky or parallel edits; workspace-bound services reset during the switch.",
-  worktree_exit: "leave the isolated worktree and preserve it by default; remove=true is allowed only when it is clean and inactive.",
+  session_manage: "use operation=rename with args.title set to a concise non-empty human-facing title; do not call rename without title.",
+  web_search: "use first for public web discovery: return ranked titles, URLs, snippets, and attribution, then choose a result before web_fetch.",
+  web_fetch: "read one selected public URL as bounded text, JSON, HTML, or PDF. it does not search, execute JavaScript, or preserve browser state.",
+  image_read: "inspect an existing workspace image with dimensions and optional OCR; it does not fetch remote URLs.",
+  user_input: "ask only when a user decision is required. recommended values are selected after timeout; use choices when selectable answers are needed.",
   proxy_scope: "read or replace which domains are recorded by the managed proxy. scope controls storage and display, not routing.",
   proxy_policy: "read or update TLS verification and pass-through behavior. routing mode remains a Farai config choice.",
   proxy_flows: "list captured flow summaries and use returned ids with proxy_flow_get, proxy_replay, or proxy_intercept.",

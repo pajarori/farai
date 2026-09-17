@@ -18,7 +18,7 @@ type StorePromptControllerInput = {
 
 export function createStorePromptController(input: StorePromptControllerInput) {
   const { port, capabilities, store, actions, sessions } = input;
-  const submissions = new Map<string, { generation: number }>();
+  const submissions = new Map<string, { generation: number; controller: AbortController }>();
 
   function onSessionActivated(sessionId: string): void {
     const pending = submissions.get(sessionId);
@@ -39,13 +39,13 @@ export function createStorePromptController(input: StorePromptControllerInput) {
       return queuePrompt(text);
     }
     actions.promptHistoryAdd(text);
-    const submission = { generation: actions.promptSubmissionStarted() };
+    const submission = { generation: actions.promptSubmissionStarted(), controller: new AbortController() };
     submissions.set(sessionId, submission);
     void (async () => {
       try {
-        await port.prompt(sessionId, text);
+        await port.prompt(sessionId, text, submission.controller.signal);
       } catch (error) {
-        if (isActiveSession(sessionId)) actions.errorSet(errorMessage(error));
+        if (isActiveSession(sessionId) && !isCancellationError(error)) actions.errorSet(errorMessage(error));
       } finally {
         if (submissions.get(sessionId) !== submission) return;
         submissions.delete(sessionId);
@@ -200,13 +200,18 @@ export function createStorePromptController(input: StorePromptControllerInput) {
     }
     const owner = sessions.captureOwner();
     if (!owner) return;
+    const submission = submissions.get(owner.sessionId);
+    if (submission && !submission.controller.signal.aborted) submission.controller.abort("cancelled by user");
     if (store.ui.compacting) {
       port.cancelCompaction(owner.sessionId);
       actions.compactFinished();
       return;
     }
     const turnId = store.snapshot.runningTurnId ?? port.getRunningTurnId(owner.sessionId);
-    if (!turnId) return;
+    if (!turnId) {
+      if (submission) actions.promptSubmissionFinished(submission.generation);
+      return;
+    }
     try {
       await port.cancelTurn(turnId, "cancelled by user");
     } catch (error) {
@@ -248,4 +253,8 @@ function mergeQueuedPrompts(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isCancellationError(error: unknown): boolean {
+  return /abort|cancel/i.test(errorMessage(error));
 }

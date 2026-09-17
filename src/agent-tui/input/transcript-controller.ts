@@ -99,6 +99,12 @@ function transcriptRowMarkdown(row: TimelineRow): string {
       ].filter((line) => line.length > 0).join("\n");
     case "mcp_inventory":
       return row.text;
+    case "context": {
+      const report = row.report;
+      const lines = report.slices.map((slice) => `- ${slice.label}: ${slice.tokens} tokens`);
+      lines.push(`- free space: ${report.free} tokens`);
+      return `## context usage\n\n${report.used}/${report.window} tokens\n\n${lines.join("\n")}`;
+    }
     case "todo_list":
       return [
         `## ${row.title}`,

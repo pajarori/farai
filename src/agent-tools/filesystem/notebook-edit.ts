@@ -13,7 +13,7 @@ type NotebookCell = { id?: string; cell_type: string; source: string[]; metadata
 type Notebook = { cells: NotebookCell[]; metadata?: Record<string, unknown>; nbformat: number; nbformat_minor: number };
 
 export const notebookEditTool: ToolDefinition = {
-  name: "notebook_edit",
+  name: "notebook_cell",
   description: "Insert, replace, or delete one Jupyter notebook cell by zero-based index while preserving notebook structure and existing cell metadata. Use this instead of treating an .ipynb file as plain text; it edits cells but does not execute the notebook.",
   inputSchema: {
     type: "object",

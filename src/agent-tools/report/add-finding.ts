@@ -5,7 +5,7 @@ import { cvssAssessment } from "./shared";
 
 export const reportAddFindingTool: ToolDefinition = {
   name: "report_add_finding",
-  description: "Create and persist a candidate security finding for the current session; persisted findings immediately appear in Farai's Findings tab and reports. Provide a complete CVSS:3.1 base vector; Farai calculates the score and derives severity. This drafts a finding but does not verify it; campaign findings require campaign_verify and reproducible evidence before being treated as confirmed.",
+  description: "Create and persist a candidate security finding for the current session; persisted findings immediately appear in Farai's Findings tab and reports. Provide a complete CVSS:3.1 base vector; Farai calculates the score and derives severity. This drafts a finding but does not verify it; campaign findings require campaign_manage operation=verify and reproducible evidence before being treated as confirmed.",
   inputSchema: {
     type: "object",
     required: ["title", "cvssVector"],

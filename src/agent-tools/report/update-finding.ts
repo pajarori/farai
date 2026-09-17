@@ -22,7 +22,7 @@ function assertEvidenceAccess(context: Parameters<ToolDefinition["run"]>[1], fin
 
 export const reportUpdateFindingTool: ToolDefinition = {
   name: "report_update_finding",
-  description: "Update one existing finding by findingId without creating a duplicate. Use this to correct a CVSS:3.1 vector, title, target, evidence links, impact, reproduction, or remediation after new evidence. A changed cvssVector is recalculated and severity is derived automatically; update one finding at a time and never change AV or other metrics by guesswork or by applying a batch-wide assumption. Use campaign_verify for finding lifecycle status transitions.",
+  description: "Update one existing finding by findingId without creating a duplicate. Use this to correct a CVSS:3.1 vector, title, target, evidence links, impact, reproduction, or remediation after new evidence. A changed cvssVector is recalculated and severity is derived automatically; update one finding at a time and never change AV or other metrics by guesswork or by applying a batch-wide assumption. Use finding_manage or campaign_manage operation=verify for finding lifecycle status transitions.",
   inputSchema: {
     type: "object",
     required: ["findingId"],

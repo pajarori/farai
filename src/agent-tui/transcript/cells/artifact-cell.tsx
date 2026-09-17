@@ -42,7 +42,7 @@ export function ArtifactRow(props: ArtifactRowProps): JSX.Element {
       </box>
       <Show when={expanded() && props.row.body}>
         {(body) => (
-          <ExpandedPanel id={`${props.row.id}:expanded`}>
+          <ExpandedPanel id={`${props.row.id}:expanded`} onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
             <Show
               when={props.row.bodyFormat === "text"}
               fallback={<MarkdownView content={body()} fg={COLOR.text} />}
@@ -81,7 +81,7 @@ export function McpInventoryRow(props: McpInventoryRowProps): JSX.Element {
         <TranscriptMarker color={COLOR.dim} />
         <text fg={COLOR.text}>{"mcp tools"}</text>
       </box>
-      <box style={{ flexDirection: "column", paddingLeft: 2, ...(expanded() ? { marginTop: 1, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: COLOR.panelActive } : {}) }}>
+      <box {...toggleClick} style={{ flexDirection: "column", paddingLeft: 2, ...(expanded() ? { marginTop: 1, paddingRight: 2, paddingTop: 1, paddingBottom: 1, backgroundColor: COLOR.panelActive } : {}) }}>
         <For each={preview()}>
           {(line, index) => <text fg={index() === 0 ? COLOR.text : COLOR.dim}>{`${index() === 0 ? "└ " : "  "}${line}`}</text>}
         </For>
@@ -112,7 +112,7 @@ export function FindingRow(props: FindingRowProps): JSX.Element {
       </Show>
       <Show when={expanded() && props.row.body}>
         {(body) => (
-          <ExpandedPanel>
+          <ExpandedPanel onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
             <MarkdownView content={body()} fg={COLOR.text} />
           </ExpandedPanel>
         )}

@@ -2,7 +2,7 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { For, Show, createEffect, createMemo, type JSX } from "solid-js";
 import { useTuiStore } from "../context/store";
 import { formatPayload, truncateLine, type TimelineRow, type ToolTimelineRow } from "../renderers";
-import { formatCompactSummary } from "../../agent-core/loop/compaction";
+import { formatCompactSummary } from "../../agent-context/summary-runner";
 import { COLOR } from "../theme";
 import { FaraiRow } from "./cells";
 import { FARAI_BANNER_LINES } from "../../branding";
@@ -219,10 +219,17 @@ function presentationEqual(left: ToolTimelineRow["presentation"], right: ToolTim
   if (left.family !== right.family
     || left.title !== right.title
     || left.compact !== right.compact
+    || left.noun !== right.noun
     || left.outcome !== right.outcome
     || left.groupKey !== right.groupKey
     || left.groupPast !== right.groupPast
     || left.groupActive !== right.groupActive
+    || left.groupMutations !== right.groupMutations
+    || left.groupItem !== right.groupItem
+    || left.groupNoun !== right.groupNoun
+    || left.groupMaxItems !== right.groupMaxItems
+    || left.detail !== right.detail
+    || left.showOutcome !== right.showOutcome
     || left.standalone !== right.standalone
     || left.warning !== right.warning
     || left.preview.length !== right.preview.length) return false;

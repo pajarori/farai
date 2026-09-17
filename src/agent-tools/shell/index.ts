@@ -5,4 +5,4 @@ import { sessionStopTool } from "./session-stop";
 import { execCommandTool } from "./exec-command";
 import { writeStdinTool } from "./write-stdin";
 
-export const shellTools: ToolDefinition[] = [execTool, execCommandTool, writeStdinTool, sessionPollTool, sessionStopTool];
+export const shellTools: ToolDefinition[] = [execTool, writeStdinTool, sessionPollTool, sessionStopTool];

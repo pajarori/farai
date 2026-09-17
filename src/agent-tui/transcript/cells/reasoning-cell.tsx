@@ -32,7 +32,7 @@ export function ReasoningRow(props: ReasoningRowProps): JSX.Element {
         <text fg={COLOR.dim}>{label()}</text>
       </box>
       <Show when={expanded() && content().body.trim()}>
-        <ExpandedPanel>
+        <ExpandedPanel onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
           <MarkdownView id={`${props.row.id}:markdown`} content={content().body} streaming={props.row.streaming} fg={COLOR.dim} />
         </ExpandedPanel>
       </Show>

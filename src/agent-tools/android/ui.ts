@@ -130,7 +130,7 @@ export const androidUiHierarchyTool: ToolDefinition = {
 
 export const androidScreenshotTool: ToolDefinition = {
   name: "android_screenshot",
-  description: "Take a screenshot of the current screen and save it as a png in the workspace. Use android's image_view tool afterwards to inspect the saved file.",
+  description: "Take a screenshot of the current screen and save it as a png in the workspace. Use android's image_read tool afterwards to inspect the saved file.",
   inputSchema: {
     type: "object",
     properties: { serial: SERIAL_PROP },

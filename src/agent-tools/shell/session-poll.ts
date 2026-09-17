@@ -8,8 +8,8 @@ import { oastEvidence, parseOastEvents } from "../callback/oast-parser";
 const MAX_SESSION_POLL_TIMEOUT_MS = MAX_YIELD_MS + 5_000;
 
 export const sessionPollTool: ToolDefinition = {
-  name: "session_poll",
-  description: "Read new output from a background command, listener, OAST session, or detached job using its jobId or legacy processId. Optionally send input to interactive command sessions; omit input to poll without writing, and use agent_message instead for a running subagent.",
+  name: "command_poll",
+  description: "Read new output from a background command, listener, OAST session, or detached job using its jobId or processId. Optionally send input to interactive command sessions; omit input to poll without writing, and use agent_manage operation=message for a running subagent.",
   inputSchema: {
     type: "object",
     properties: {
@@ -17,7 +17,9 @@ export const sessionPollTool: ToolDefinition = {
       processId: { type: "string" },
       input: { type: "string" },
       yieldMs: { type: "number" }
-    }
+    },
+    anyOf: [{ required: ["jobId"] }, { required: ["processId"] }],
+    additionalProperties: false
   },
   mutates: true,
   timeoutMs: MAX_SESSION_POLL_TIMEOUT_MS,
@@ -36,7 +38,7 @@ export const sessionPollTool: ToolDefinition = {
     const input = typeof args.input === "string" ? args.input : undefined;
     if (job && job.sessionId !== context.session.id) throw new Error(`background job ${job.id} belongs to another session`);
     if (job?.kind === "agent") {
-      if (input) throw new Error("agent jobs do not accept session input; use agent_message for a running child or agent_followup for an idle child");
+      if (input) throw new Error("agent jobs do not accept command input; use agent_manage operation=message for a running child or operation=followup for an idle child");
       if (["succeeded", "failed", "cancelled", "lost"].includes(job.status)) {
         const artifact = job.outputArtifactId ? context.store.readOutputArtifact?.(job.outputArtifactId) : undefined;
         const output = artifact?.content ?? terminalJobOutput(job);

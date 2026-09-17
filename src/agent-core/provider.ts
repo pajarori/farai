@@ -65,10 +65,10 @@ export function sanitizePlannerActions(actions: PlannerAction[]): PlannerAction[
 }
 
 export type ConversationEntry =
-  | { role: "user"; text: string; attachments?: ToolAttachment[] }
-  | { role: "context"; text: string }
-  | { role: "assistant"; text?: string; toolCalls?: Array<{ id: string; tool: string; args: unknown }> }
-  | { role: "tool"; toolCallId: string; tool: string; text: string; attachments?: ToolAttachment[] };
+  | { role: "user"; text: string; attachments?: ToolAttachment[]; nodeId?: string; lane?: string }
+  | { role: "context"; text: string; nodeId?: string; lane?: string }
+  | { role: "assistant"; text?: string; toolCalls?: Array<{ id: string; tool: string; args: unknown }>; nodeId?: string; lane?: string }
+  | { role: "tool"; toolCallId: string; tool: string; text: string; attachments?: ToolAttachment[]; nodeId?: string; lane?: string };
 
 export type PlannerInput = {
   session: Session;

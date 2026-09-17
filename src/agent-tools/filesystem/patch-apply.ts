@@ -5,8 +5,8 @@ import { containerApplySimplePatch, containerReadFile, containerWorkspace, resol
 import { appendDiagnosticReports } from "../../agent-lsp";
 
 export const patchApplyTool: ToolDefinition = {
-  name: "patch_apply",
-  description: "Apply a Farai patch containing one or more file additions, contextual updates, or deletions inside the workspace. Use this for coordinated code edits and reviewable multi-hunk changes; use fs_edit for a single exact replacement.",
+  name: "file_patch",
+  description: "Apply a Farai patch containing one or more file additions, contextual updates, or deletions inside the workspace. Use this for coordinated code edits and reviewable multi-hunk changes; use file_replace for a single exact replacement.",
   inputSchema: {
     type: "object",
     required: ["patch"],

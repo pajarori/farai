@@ -6,8 +6,8 @@ import { occurrences, previewEdit } from "./shared";
 import { appendDiagnosticReport } from "../../agent-lsp";
 
 export const fsEditTool: ToolDefinition = {
-  name: "fs_edit",
-  description: "Replace an exact text block in one workspace file while preserving all other content. The match must be unique unless replaceAll=true; use patch_apply for multi-file or multi-hunk changes and fs_write only for deliberate full-file replacement.",
+  name: "file_replace",
+  description: "Replace an exact text block in one workspace file while preserving all other content. The match must be unique unless replaceAll=true; use file_patch for multi-file or multi-hunk changes and file_write only for deliberate full-file replacement.",
   inputSchema: {
     type: "object",
     required: ["path", "oldString", "newString"],

@@ -38,7 +38,8 @@ const TOOL_NAMESPACES = [
   "callback", "campaign", "evidence", "exploit", "memory", "session",
   "report", "notes", "shell", "skill", "patch", "code", "todo",
   "tool", "port", "nmap", "http", "dir", "git", "mcp", "fs",
-  "browser", "proxy", "web", "dns", "tls", "url", "vulnerability", "image", "notebook", "worktree", "agent", "email"
+  "browser", "proxy", "web", "dns", "tls", "url", "vulnerability", "image", "notebook", "worktree", "agent", "email",
+  "file", "command", "network", "service", "asset"
 ] as const;
 
 const PAST_ACTIONS: Record<string, string> = {
@@ -90,6 +91,16 @@ const ACTIVE_ACTIONS: Record<string, string> = {
 };
 
 const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
+  agent_manage: ["managed agents", "managing agents"],
+  browser_manage: ["managed browser", "managing browser"],
+  callback_manage: ["managed callbacks", "managing callbacks"],
+  campaign_manage: ["managed campaign", "managing campaign"],
+  finding_manage: ["managed finding", "managing finding"],
+  knowledge_manage: ["managed knowledge", "managing knowledge"],
+  mail_manage: ["managed mail", "managing mail"],
+  mobile_manage: ["managed mobile", "managing mobile"],
+  proxy_manage: ["managed proxy", "managing proxy"],
+  task_manage: ["managed tasks", "managing tasks"],
   agent_task: ["delegated", "delegating"],
   agent_spawn: ["spawned agent", "spawning agent"],
   agent_list: ["listed agents", "listing agents"],
@@ -103,14 +114,13 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
   callback_listen: ["started callback listener", "starting callback listener"],
   callback_oast: ["started oast session", "starting oast session"],
   callback_stop: ["stopped callback listener", "stopping callback listener"],
-  session_rename: ["renamed session", "renaming session"],
-  request_user_input: ["asked user", "asking user"],
-  internet_search: ["searched the web", "searching the web"],
-  internet_fetch: ["fetched page", "fetching page"],
-  image_view: ["viewed image", "viewing image"],
-  notebook_edit: ["edited notebook", "editing notebook"],
-  mcp_resource_list: ["listed MCP resources", "listing MCP resources"],
-  mcp_resource_read: ["read MCP resource", "reading MCP resource"],
+  session_manage: ["renamed session", "renaming session"],
+  user_input: ["asked user", "asking user"],
+  web_search: ["searched the web", "searching the web"],
+  web_fetch: ["fetched page", "fetching page"],
+  image_read: ["viewed image", "viewing image"],
+  notebook_cell: ["edited notebook", "editing notebook"],
+  mcp_resource: ["managed MCP resource", "managing MCP resource"],
   proxy_scope: ["updated proxy scope", "updating proxy scope"],
   proxy_policy: ["updated proxy policy", "updating proxy policy"],
   proxy_flows: ["listed proxy flows", "listing proxy flows"],
@@ -119,10 +129,9 @@ const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
   proxy_replay: ["replayed proxy flow", "replaying proxy flow"],
   proxy_intercept: ["managed interception", "managing interception"],
   proxy_clear: ["cleared proxy traffic", "clearing proxy traffic"],
-  worktree_enter: ["entered worktree", "entering worktree"],
-  worktree_exit: ["left worktree", "leaving worktree"],
-  session_poll: ["checked background work", "checking background work"],
-  session_stop: ["stopped background work", "stopping background work"],
+  worktree_manage: ["managed worktree", "managing worktree"],
+  command_poll: ["checked background work", "checking background work"],
+  command_stop: ["stopped background work", "stopping background work"],
   browser_context: ["managed", "managing"],
   browser_navigate: ["opened", "opening"],
   browser_snapshot: ["captured", "capturing"],
@@ -151,13 +160,12 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   agent_followup: ["sessionId", "prompt"],
   agent_interrupt: ["sessionId", "reason"],
   agent_close: ["sessionId"],
-  request_user_input: ["questions"],
-  internet_search: ["query"],
-  internet_fetch: ["url"],
-  image_view: ["path"],
-  notebook_edit: ["path", "operation", "index"],
-  mcp_resource_list: ["server"],
-  mcp_resource_read: ["uri", "server"],
+  user_input: ["questions"],
+  web_search: ["query"],
+  web_fetch: ["url"],
+  image_read: ["path"],
+  notebook_cell: ["path", "operation", "index"],
+  mcp_resource: ["operation", "server", "uri"],
   proxy_scope: ["allowedDomains"],
   proxy_policy: ["tls", "passThroughHosts"],
   proxy_flows: ["kind", "filter", "method"],
@@ -166,8 +174,7 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   proxy_replay: ["flowId", "method"],
   proxy_intercept: ["action", "flowId"],
   proxy_clear: ["confirm"],
-  worktree_enter: ["name", "ref", "branch"],
-  worktree_exit: ["remove"],
+  worktree_manage: ["operation", "name", "ref", "branch", "remove"],
   browser_context: ["action", "name", "browser"],
   browser_click: ["element", "target"],
   browser_type: ["element", "target", "text"],
@@ -182,9 +189,9 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   email_inbox: ["emailId"],
   email_read: ["messageId"],
   email_wait: ["emailId", "from", "subject"],
-  dns_probe: ["names", "recordTypes"],
-  http_probe: ["targets", "ports"],
-  tls_probe: ["targets", "ports"],
+  dns_resolve: ["names", "recordTypes"],
+  service_probe: ["targets", "ports"],
+  tls_inspect: ["targets", "ports"],
   url_discover: ["domains", "sources"],
   web_crawl: ["targets", "depth"],
   vulnerability_scan: ["targets", "severities", "tags", "templateIds"],
@@ -228,12 +235,14 @@ export function toolTitle(toolName: unknown, args: unknown, status: string, max 
   const active = isActiveToolStatus(status);
   const failed = status === "error";
   const canonical = canonicalToolName(toolName);
-  const inputObject = toolInputObject(args);
+  const inputObject = presentationInput(canonical, args);
+  const facadeTitle = inputObject ? facadeToolTitle(canonical, inputObject, active, failed) : undefined;
+  if (facadeTitle) return truncateLine(facadeTitle, max);
   const browserTitle = inputObject ? browserToolTitle(canonical, inputObject, active) : undefined;
   if (browserTitle) return truncateLine(browserTitle, max);
   const nativeTitle = inputObject ? nativeToolTitle(canonical, inputObject, active, failed) : undefined;
   if (nativeTitle) return truncateLine(nativeTitle, max);
-  if (canonical === "session_poll" || canonical === "session_stop") return truncateLine(toolActionLabel(canonical, active), max);
+  if (canonical === "command_poll" || canonical === "command_stop") return truncateLine(toolActionLabel(canonical, active), max);
   if (status === "running_background") {
     const input = summarizeToolInput(toolName, args, max);
     return `started background ${input || shortToolName(toolName)}`;
@@ -243,7 +252,7 @@ export function toolTitle(toolName: unknown, args: unknown, status: string, max 
 }
 
 export function summarizeToolInput(toolName: unknown, args: unknown, max = 80): string {
-  const obj = toolInputObject(args);
+  const obj = presentationInput(canonicalToolName(toolName), args);
   if (!obj) return "";
   const primary = primaryToolInput(toolName, obj);
   if (!primary) return "";
@@ -298,6 +307,51 @@ function orderedInputKeys(toolName: unknown, input: Record<string, unknown>): st
   const semantic = SEMANTIC_KEYS.filter((key) => properties.has(key) || key in input);
   const preferred = TOOL_INPUT_KEYS[canonicalToolName(toolName)] ?? [];
   return unique([...preferred, ...required, ...semantic, ...schemaKeys, ...Object.keys(input)]);
+}
+
+function presentationInput(tool: string, args: unknown): Record<string, unknown> | undefined {
+  const input = toolInputObject(args);
+  if (!input) return undefined;
+  const facade = new Set(["agent_manage", "browser_manage", "callback_manage", "campaign_manage", "finding_manage", "knowledge_manage", "mail_manage", "mobile_manage", "proxy_manage", "task_manage", "worktree_manage"]);
+  if (!facade.has(tool) || !input.args || typeof input.args !== "object" || Array.isArray(input.args)) return input;
+  return { ...(input.args as Record<string, unknown>), operation: input.operation };
+}
+
+function facadeToolTitle(tool: string, input: Record<string, unknown>, active: boolean, failed: boolean): string | undefined {
+  if (!new Set(["agent_manage", "browser_manage", "callback_manage", "campaign_manage", "finding_manage", "knowledge_manage", "mail_manage", "mobile_manage", "proxy_manage", "task_manage", "worktree_manage"]).has(tool)) return undefined;
+  const operation = typeof input.operation === "string" ? input.operation : "manage";
+  const verbs: Record<string, readonly [string, string]> = {
+    spawn: ["spawned agent", "spawning agent"],
+    list: ["listed", "listing"],
+    wait: ["waited for", "waiting for"],
+    message: ["messaged", "messaging"],
+    followup: ["continued", "continuing"],
+    interrupt: ["interrupted", "interrupting"],
+    close: ["closed", "closing"],
+    add: ["added", "adding"],
+    update: ["updated", "updating"],
+    plan: ["updated", "updating"],
+    enter: ["entered", "entering"],
+    exit: ["left", "leaving"],
+    scope: ["checked proxy scope", "checking proxy scope"],
+    policy: ["checked proxy policy", "checking proxy policy"],
+    flows: ["listed proxy flows", "listing proxy flows"],
+    flow_get: ["read proxy flow", "reading proxy flow"],
+    sitemap: ["listed proxy sitemap", "listing proxy sitemap"],
+    replay: ["replayed proxy request", "replaying proxy request"],
+    intercept: ["intercepted request", "intercepting request"],
+    clear: ["cleared proxy traffic", "clearing proxy traffic"],
+    asset: ["saved", "saving"],
+    create: ["created email", "creating email"],
+    inbox: ["checked inbox", "checking inbox"],
+    read: ["read email", "reading email"]
+  };
+  const pair = verbs[operation];
+  if (!pair) return undefined;
+  const noun = tool === "task_manage" ? "task" : tool === "worktree_manage" ? "worktree" : tool === "agent_manage" ? "agent" : tool === "proxy_manage" ? "" : tool === "mail_manage" ? "" : operation;
+  const verb = failed ? `failed to ${pair[1]}` : active ? pair[1] : pair[0];
+  const subject = typeof input.title === "string" ? ` ${input.title}` : typeof input.name === "string" ? ` ${input.name}` : "";
+  return `${verb}${noun ? ` ${noun}` : ""}${subject}`;
 }
 
 function schemaRequired(definition: ToolDefinition | undefined): string[] {
@@ -395,9 +449,9 @@ function browserToolTitle(tool: string, input: Record<string, unknown>, active: 
 }
 
 function nativeToolTitle(tool: string, input: Record<string, unknown>, active: boolean, failed = false): string | undefined {
-  if (tool === "dns_probe") return reconTitle(failed, active, "resolve dns", "resolving dns", "resolved dns", input.names);
-  if (tool === "http_probe") return reconTitle(failed, active, "probe http services", "probing http services", "probed http services", input.targets);
-  if (tool === "tls_probe") return reconTitle(failed, active, "inspect tls", "inspecting tls", "inspected tls", input.targets);
+  if (tool === "dns_resolve") return reconTitle(failed, active, "resolve dns", "resolving dns", "resolved dns", input.names);
+  if (tool === "service_probe") return reconTitle(failed, active, "probe http services", "probing http services", "probed http services", input.targets);
+  if (tool === "tls_inspect") return reconTitle(failed, active, "inspect tls", "inspecting tls", "inspected tls", input.targets);
   if (tool === "url_discover") return reconTitle(failed, active, "discover urls", "discovering urls", "discovered urls", input.domains);
   if (tool === "web_crawl") return reconTitle(failed, active, "crawl", "crawling", "crawled", input.targets);
   if (tool === "vulnerability_scan") return reconTitle(failed, active, "scan vulnerabilities", "scanning vulnerabilities", "scanned vulnerabilities", input.targets);
@@ -412,7 +466,7 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
   if (tool === "email_wait") return `${failed ? "failed waiting for" : active ? "waiting for" : "received"} email${typeof input.subject === "string" && input.subject.trim() ? ` · ${input.subject.trim()}` : ""}`;
   if (tool === "callback_host_info") return active ? "inspecting host network" : "inspected host network";
   if (tool === "callback_oast") return active ? "starting oast session" : "started oast session";
-  if (tool === "notebook_edit") {
+  if (tool === "notebook_cell") {
     const operation = typeof input.operation === "string" ? input.operation : "edit";
     const path = typeof input.path === "string" ? ` in ${input.path}` : "";
     const index = typeof input.index === "number" ? ` ${input.index}` : "";
@@ -424,14 +478,13 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
     const verb = verbs[operation]?.[active ? 1 : 0] ?? (active ? "editing notebook" : "edited notebook");
     return `${verb}${index}${path}`;
   }
-  if (tool === "mcp_resource_list") {
+  if (tool === "mcp_resource") {
     const server = typeof input.server === "string" && input.server.trim() ? ` from ${input.server.trim()}` : "";
+    if (input.operation === "read") {
+      const uri = typeof input.uri === "string" ? input.uri.trim() : "";
+      return `${active ? "reading" : "read"} MCP resource${uri ? ` ${uri}` : ""}${server}`;
+    }
     return `${active ? "listing" : "listed"} MCP resources${server}`;
-  }
-  if (tool === "mcp_resource_read") {
-    const uri = typeof input.uri === "string" ? input.uri.trim() : "";
-    const server = typeof input.server === "string" && input.server.trim() ? ` from ${input.server.trim()}` : "";
-    return `${active ? "reading" : "read"} MCP resource${uri ? ` ${uri}` : ""}${server}`;
   }
   if (tool === "proxy_scope") {
     return Array.isArray(input.allowedDomains)
@@ -457,11 +510,10 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
     return labels[action]?.[active ? 1 : 0];
   }
   if (tool === "proxy_clear") return active ? "clearing proxy traffic" : "cleared proxy traffic";
-  if (tool === "worktree_enter") {
+  if (tool === "worktree_manage") {
     const name = typeof input.name === "string" && input.name.trim() ? ` ${input.name.trim()}` : "";
-    return `${active ? "entering" : "entered"} worktree${name}`;
+    return input.operation === "exit" ? (active ? "leaving worktree" : "left worktree") : `${active ? "entering" : "entered"} worktree${name}`;
   }
-  if (tool === "worktree_exit") return active ? "leaving worktree" : "left worktree";
   if (tool === "agent_list") return active ? "listing agents" : "listed agents";
   return undefined;
 }

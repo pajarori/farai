@@ -46,7 +46,7 @@ function fixture(): { root: string; manifest: BenchmarkManifest } {
         hooks: false,
         resources: { cpus: 2, memoryMb: 2048, pids: 256 }
       },
-      toolScope: ["shell_exec"],
+      toolScope: ["command_run"],
       antiCheat: { executable: antiCheat, executableSha256: hashPath(antiCheat) }
     }
   };

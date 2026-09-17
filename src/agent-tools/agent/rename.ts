@@ -4,12 +4,13 @@ import { assertObject, asString } from "../../utils";
 import { defaultModelRenderer } from "../shared/renderers";
 
 export const sessionRenameTool: ToolDefinition = {
-  name: "session_rename",
+  name: "session_rename_internal",
   description: "Set a concise human-facing title for the current session when its goal becomes clear or materially changes. This only changes how the session appears in history and resume lists; it does not alter task state or create a new session.",
   inputSchema: {
     type: "object",
     required: ["title"],
-    properties: { title: { type: "string" } }
+    properties: { title: { type: "string", minLength: 1, description: "Concise human-facing session title." } },
+    additionalProperties: false
   },
   mutates: true,
   timeoutMs: 5_000,

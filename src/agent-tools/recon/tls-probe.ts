@@ -56,7 +56,7 @@ export function parseTlsProbeOutput(raw: string): { records: TlsProbeRecord[]; m
 }
 
 export const tlsProbeTool: ToolDefinition = {
-  name: "tls_probe",
+  name: "tls_inspect",
   description: "Inspect TLS endpoints with ProjectDiscovery tlsx and return normalized protocol, cipher, certificate subject, SAN, issuer, validity, fingerprint, wildcard, and optional enumeration or fingerprinting data. Use the default lightweight probe for inventory; enable version or cipher enumeration only for focused TLS assessment because they make many additional handshakes.",
   inputSchema: {
     type: "object",
@@ -86,11 +86,11 @@ export const tlsProbeTool: ToolDefinition = {
     assertObject(args, "args");
     const kali = backend(context);
     const result = await kali.exec(buildTlsProbeCommand(args), 595_000, context.signal, 32_000_000);
-    const converted = timeoutBackgroundResult("tls_probe", kali, result);
+    const converted = timeoutBackgroundResult("tls_inspect", kali, result);
     if (converted) return converted;
     const parsed = parseTlsProbeOutput(result.stdout);
     return projectDiscoveryResult(context, {
-      tool: "tls_probe",
+      tool: "tls_inspect",
       backend: "tlsx",
       result,
       records: parsed.records,

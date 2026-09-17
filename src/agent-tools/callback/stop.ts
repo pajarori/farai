@@ -6,7 +6,7 @@ import { serviceRegistry } from "../services/registry";
 
 export const callbackStopTool: ToolDefinition = {
   name: "callback_stop",
-  description: "Stop a host-side TCP listener previously created by callback_listen using its returned service name, such as callback-4444. Use session_stop instead when only a background jobId or processId is available.",
+  description: "Stop a host-side TCP listener previously created by callback_listen using its returned service name, such as callback-4444. Use command_stop instead when only a background jobId or processId is available.",
   inputSchema: {
     type: "object",
     required: ["name"],

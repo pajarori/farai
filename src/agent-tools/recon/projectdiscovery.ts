@@ -97,19 +97,24 @@ export function projectDiscoveryResult<T extends JsonRecord>(
   const partial = options.records.length > 0 && (options.result.exitCode !== 0 || options.result.timedOut);
   const diagnostics = compactDiagnostics(options.result.stderr);
   const diagnosticWarning = diagnostics && (options.result.exitCode !== 0 || /\b(?:warn|error|fatal|failed|unauthoriz|timed?\s*out)\b/i.test(diagnostics)) ? diagnostics : "";
+  const emptySuccess = options.records.length === 0 && options.result.exitCode === 0 && !options.result.timedOut;
+  const emptyMessage = emptySuccess ? `${options.tool}: completed with no ${options.noun}s found` : `${options.tool}: no output`;
+  let summary: string;
+  if (!ok) summary = `${options.tool}: failed`;
+  else if (emptySuccess) summary = `${options.tool}: completed, no ${options.noun}s found`;
+  else summary = `${options.tool}: ${options.records.length} ${options.noun}${options.records.length === 1 ? "" : "s"}${partial ? " (partial)" : ""}`;
   const output = [
     ...outputLines,
     ...(omittedOutputLines ? [`… +${omittedOutputLines} more ${options.noun}${omittedOutputLines === 1 ? "" : "s"} in artifact`] : []),
     ...(options.malformed ? [`warning: ignored ${options.malformed} malformed JSON record${options.malformed === 1 ? "" : "s"}`] : []),
     ...(diagnosticWarning ? [diagnosticWarning] : []),
     ...(!options.outputLines.length && diagnostics && !diagnosticWarning ? [diagnostics] : []),
+    ...(emptySuccess ? [emptyMessage] : []),
     ...(artifact ? [`full ${options.backend} output: artifact ${artifact.id}`] : [])
-  ].filter(Boolean).join("\n") || `${options.tool}: no results`;
+  ].filter(Boolean).join("\n") || emptyMessage;
   return {
     ok,
-    summary: ok
-      ? `${options.tool}: ${options.records.length} ${options.noun}${options.records.length === 1 ? "" : "s"}${partial ? " (partial)" : ""}`
-      : `${options.tool}: failed`,
+    summary,
     output,
     ...(artifact ? { outputArtifactId: artifact.id } : {}),
     metadata: {

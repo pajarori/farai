@@ -131,7 +131,7 @@ test("usage persists and clearSessionChat preserves durable pentest work", async
   const user = store.createMessage({ sessionId: session.id, turnId: turn.id, role: "user" });
   store.addPart({ sessionId: session.id, turnId: turn.id, messageId: user.id, type: "text", payload: { text: "scan" } });
   const artifact = store.saveOutputArtifact({ sessionId: session.id, toolCallId: "tool-1", content: "full output" });
-  store.saveToolCall({ id: "tool-1", sessionId: session.id, tool: "shell_exec", args: {}, status: "done", evidenceIds: [], turnId: turn.id, messageId: user.id, outputArtifactId: artifact.id });
+  store.saveToolCall({ id: "tool-1", sessionId: session.id, tool: "command_run", args: {}, status: "done", evidenceIds: [], turnId: turn.id, messageId: user.id, outputArtifactId: artifact.id });
   store.saveEvidence({ id: id(), sessionId: session.id, source: "tool", title: "open port", summary: "443 open", createdAt: nowIso() });
   store.addNote({ id: id(), sessionId: session.id, text: "keep note", tags: [], createdAt: nowIso() });
   store.upsertMemory({ sessionId: session.id, kind: "fact", key: "host", value: "example.test" });

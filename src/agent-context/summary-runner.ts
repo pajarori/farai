@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { classifyModelRetry, isContextOverflowError, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from "../provider/retry";
-import { takeBytes } from "../../agent-tools/shared/output-bound";
-import type { ConversationEntry, PlannerAction, PlannerInput, PlannerProvider } from "../provider";
+import { classifyModelRetry, isContextOverflowError, MODEL_RETRY_MAX_ATTEMPTS, modelRetryDelayMs } from "../agent-core/provider/retry";
+import { takeBytes } from "../agent-tools/shared/output-bound";
+import type { ConversationEntry, PlannerAction, PlannerInput, PlannerProvider } from "../agent-core/provider";
 
 const COMPACT_SUMMARY_MAX_BYTES = 48 * 1024;
 const COMPACT_CHECKPOINT_MAX_BYTES = 16 * 1024;
@@ -63,10 +63,11 @@ export async function runModelCompaction(input: {
   planner: PlannerProvider;
   plannerInput: PlannerInput;
   customInstructions?: string;
+  prompt?: string;
   signal?: AbortSignal;
 }): Promise<string> {
   let history = structuredClone(input.plannerInput.history);
-  const prompt = compactPrompt(input.customInstructions);
+  const prompt = input.prompt ?? compactPrompt(input.customInstructions);
   let failedAttempts = 0;
   while (true) {
     if (input.signal?.aborted) throw new Error(`compaction cancelled: ${String(input.signal.reason ?? "aborted")}`);

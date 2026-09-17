@@ -9,6 +9,7 @@ import type {
   Evidence
 } from "../types";
 import type { ToolResult } from "../types";
+import type { ContextReport } from "../agent-core/context-report";
 import { parseReasoning } from "./reasoning";
 import { isInternalMetaReasoning, isReasoningDuplicate, normalizeReasoningSummary, separateEmbeddedReasoning, stripReasoningEcho } from "../agent-core/reasoning-summary";
 import {
@@ -23,6 +24,7 @@ import {
   type ToolActivityPresentation
 } from "./tool-activity";
 import { takeBytes } from "../agent-tools/shared/output-bound";
+import { humanizeToolOutput } from "../agent-tools/shared/renderers";
 
 export const MAX_PAYLOAD_BYTES = 200_000;
 const HEAD_BUDGET = 4_096;
@@ -222,6 +224,7 @@ export type TimelineRow =
   | { kind: "todo_list"; title: string; items: TodoListRowItem[]; id: string }
   | { kind: "plan"; title: string; explanation?: string; items: PlanItem[]; markdown?: string; streaming: boolean; id: string }
   | { kind: "mcp_inventory"; text: string; id: string }
+  | { kind: "context"; report: ContextReport; id: string }
   | { kind: "artifact"; title: string; detail: string; body?: string; bodyFormat?: "markdown" | "text"; id: string }
   | { kind: "finding"; title: string; severity: string; target: string; detail: string; body?: string; id: string }
   | { kind: "progress"; title: string; detail: string; status: "running" | "done" | "info"; id: string }
@@ -484,7 +487,7 @@ function partToRow(
       const toolCallId = extractField(part.payload, "toolCallId");
       const linked = toolCallId ? toolRows.get(toolCallId) : undefined;
       const display = displayToolResult(linked?.tool ?? extractField(part.payload, "tool") ?? "tool", text, toolResult, humanResult);
-      const full = fullToolResult(text, toolResult);
+      const full = fullToolResult(text, toolResult, humanResult);
       const fullResult = includeFullToolResults || (humanResult !== undefined && humanResult !== full)
         ? truncatePayload(full, includeFullToolResults ? MAX_PAYLOAD_BYTES : TOOL_DETAIL_MAX_BYTES)
         : undefined;
@@ -575,6 +578,7 @@ function partToRow(
     case "artifact":
       if (looksLikePlanPayload(part.payload)) return planRow(part, width, streaming);
       if (extractField(part.payload, "kind") === "mcp_inventory") return mcpInventoryRow(part, width);
+      if (extractField(part.payload, "kind") === "context_report") return contextReportRow(part);
       if (extractField(part.payload, "kind") === "background_job_completion") {
         const linked = backgroundCompletionToolRow(part.payload, toolRows);
         if (linked) {
@@ -739,7 +743,8 @@ function groupActivityRows(rows: TimelineRow[]): TimelineRow[] {
     if (row.kind === "tool" && canGroupToolRow(row)) {
       if (pending.length > 0 && !canJoinActivity(pending[0]!, row)) flush();
       pending.push(row);
-      if (pending.length >= 8) flush();
+      const maxItems = pending[0]?.presentation.groupMaxItems ?? 8;
+      if (pending.length >= maxItems) flush();
       continue;
     }
     flush();
@@ -763,33 +768,25 @@ function toActivityRow(rows: ToolTimelineRow[]): ActivityTimelineRow {
   return {
     kind: "activity",
     status,
-    label: activityLabel(rows[0]!, rows.length, status === "running"),
+    label: activityLabel(rows, status === "running"),
     items: rows,
     ...(durationMs !== undefined ? { durationMs } : {}),
     id: rows[0]!.id
   };
 }
 
-function activityLabel(first: ToolTimelineRow, count: number, active: boolean): string {
+function activityLabel(rows: ToolTimelineRow[], active: boolean): string {
+  const first = rows[0]!;
+  const count = rows.length;
   const presentation = first.presentation;
   const verb = active ? presentation.groupActive ?? "running" : presentation.groupPast ?? "ran";
   const [action = verb, qualifier] = verb.split(" · ", 2);
-  const noun = presentation.family === "command"
-    ? "command"
-    : presentation.family === "workspace"
-      ? "workspace item"
-      : presentation.family === "browser"
-        ? "browser action"
-        : presentation.family === "http"
-          ? "endpoint"
-          : presentation.family === "proxy"
-            ? "proxy action"
-            : presentation.family === "knowledge"
-              ? "knowledge source"
-              : presentation.family === "mcp"
-                ? "mcp call"
-                : "operation";
-  return `${action} ${count} ${noun}${count === 1 ? "" : "s"}${qualifier ? ` · ${qualifier}` : ""}`;
+  if (presentation.groupNoun) {
+    const names = rows.flatMap((row) => row.presentation.groupItem ? [row.presentation.groupItem] : []).filter((name, index, values) => values.indexOf(name) === index);
+    const listed = names.slice(0, 5).join(", ");
+    return `${action} ${listed || `${count} ${presentation.groupNoun}${count === 1 ? "" : "s"}`}${names.length > 5 ? `, +${names.length - 5}` : ""}`;
+  }
+  return `${action} ${count} ${presentation.noun}${count === 1 ? "" : "s"}${qualifier ? ` · ${qualifier}` : ""}`;
 }
 
 function appendTodoRow(
@@ -823,25 +820,29 @@ function upsertTodoItem(items: TodoListRowItem[], next: TodoListRowItem): void {
 }
 
 function isTodoTool(tool: string): boolean {
-  return tool === "update_plan" || tool === "todo_add" || tool === "todo_update" || tool === "todo_list";
+  return tool === "task_manage" || tool === "todo_list";
 }
 
 function displayToolResult(tool: string, fallback: string, result: ToolResult | undefined, humanResult?: string): string {
   if (isTodoTool(tool)) return result?.output ?? result?.summary ?? firstResultLine(stripUntrustedMarkers(fallback), 120);
+  if (result?.metadata?.instructionSource === "skill") return result.summary;
   if (result?.status === "running_background") {
     return [
       result.summary,
-      result.output && result.output !== "(no output yet)" ? result.output : "(running; poll with session_poll or stop with session_stop)"
+      result.output && result.output !== "(no output yet)" ? result.output : "(running; poll with command_poll or stop with command_stop)"
     ].filter(Boolean).join("\n");
   }
-  if (humanResult !== undefined) return humanResult;
-  if (result) return result.output ?? result.summary ?? stripUntrustedMarkers(fallback);
-  return stripUntrustedMarkers(fallback);
+  if (humanResult !== undefined) return humanizeToolOutput(humanResult);
+  if (result) return humanizeToolOutput(result.output ?? result.summary ?? stripUntrustedMarkers(fallback));
+  return humanizeToolOutput(stripUntrustedMarkers(fallback));
 }
 
-function fullToolResult(fallback: string, result: ToolResult | undefined): string {
-  if (result) return result.output ?? result.summary ?? stripUntrustedMarkers(fallback);
-  return stripUntrustedMarkers(fallback);
+function fullToolResult(fallback: string, result: ToolResult | undefined, humanResult?: string): string {
+  if (result?.metadata?.instructionSource === "skill") return result.summary;
+  if (result?.output !== undefined) return humanizeToolOutput(result.output);
+  if (humanResult !== undefined) return humanizeToolOutput(humanResult);
+  if (result) return humanizeToolOutput(result.summary ?? stripUntrustedMarkers(fallback));
+  return humanizeToolOutput(stripUntrustedMarkers(fallback));
 }
 
 function stripUntrustedMarkers(text: string): string {
@@ -868,23 +869,25 @@ function todoItemsFromToolRow(row: Extract<TimelineRow, { kind: "tool" }>): Todo
   const parsed = parseTodoPayload(row.result);
   if (parsed.length > 0) return parsed;
   const input = row.args && typeof row.args === "object" && !Array.isArray(row.args) ? row.args as Record<string, unknown> : {};
-  if (typeof input.text === "string") {
+  const operationArgs = input.args && typeof input.args === "object" && !Array.isArray(input.args) ? input.args as Record<string, unknown> : input;
+  const operation = typeof input.operation === "string" ? input.operation : undefined;
+  if (typeof operationArgs.text === "string") {
     return [{
-      text: input.text,
-      status: normalizeTodoStatus(todoStatusInput(input.status, row.tool)),
-      ...(typeof input.priority === "string" ? { priority: input.priority } : {}),
-      ...(typeof input.id === "string" ? { id: input.id } : {})
+      text: operationArgs.text,
+      status: normalizeTodoStatus(todoStatusInput(operationArgs.status, row.tool, operation)),
+      ...(typeof operationArgs.priority === "string" ? { priority: operationArgs.priority } : {}),
+      ...(typeof operationArgs.id === "string" ? { id: operationArgs.id } : {})
     }];
   }
-  if (typeof input.id === "string") {
-    return [{ id: input.id, text: input.id, status: normalizeTodoStatus(typeof input.status === "string" ? input.status : "in_progress") }];
+  if (typeof operationArgs.id === "string") {
+    return [{ id: operationArgs.id, text: operationArgs.id, status: normalizeTodoStatus(typeof operationArgs.status === "string" ? operationArgs.status : "in_progress") }];
   }
   return [];
 }
 
-function todoStatusInput(status: unknown, tool: string): string {
+function todoStatusInput(status: unknown, tool: string, operation?: string): string {
   if (typeof status === "string") return status;
-  return tool === "todo_update" ? "in_progress" : "pending";
+  return tool === "todo_list" || operation === "list" ? "in_progress" : "pending";
 }
 
 function parseTodoPayload(value: string | undefined): TodoListRowItem[] {
@@ -1116,6 +1119,13 @@ function mcpInventoryRow(part: Part, width: number): Extract<TimelineRow, { kind
     text,
     id: part.id
   };
+}
+
+function contextReportRow(part: Part): Extract<TimelineRow, { kind: "context" }> {
+  const report = (part.payload as { report?: ContextReport }).report ?? {
+    model: "", window: 1, used: 0, free: 1, ratio: 0, slices: [], grid: [], columns: 20
+  };
+  return { kind: "context", report, id: part.id };
 }
 
 function artifactTitle(

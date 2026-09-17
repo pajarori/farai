@@ -34,7 +34,7 @@ export function normalizeToolResult(
   if (binaryLike && Buffer.byteLength(sanitizedOutput, "utf8") <= TOOL_OUTPUT_LIMITS.bytes) {
     return {
       ...normalized,
-      output: `${sanitizedOutput}\n\n[full raw output stored as artifact ${artifact.id}; read it with tool_output_read]`,
+      output: `${sanitizedOutput}\n\n[full raw output stored as artifact ${artifact.id}; read it with output_read]`,
       outputArtifactId: artifact.id,
       metadata: { ...(normalized.metadata ?? {}), outputArtifact: artifact, binaryLike: true }
     };
@@ -43,7 +43,7 @@ export function normalizeToolResult(
   const tail = takeBytes(sanitizedOutput, TOOL_OUTPUT_LIMITS.tailBytes, "tail");
   return {
     ...normalized,
-    output: `${head}\n\n[output truncated: full ${artifact.bytes} bytes stored as artifact ${artifact.id}; read it with tool_output_read]\n\n${tail}`,
+    output: `${head}\n\n[output truncated: full ${artifact.bytes} bytes stored as artifact ${artifact.id}; read it with output_read]\n\n${tail}`,
     outputArtifactId: artifact.id,
     metadata: { ...(normalized.metadata ?? {}), outputArtifact: artifact }
   };

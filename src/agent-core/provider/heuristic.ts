@@ -18,23 +18,23 @@ export function computeHeuristicActions(input: HeuristicInput): HeuristicAction[
   const target = targetFromPrompt(input.userText);
   if (/(pentest|attack path|full enum|full enumeration|recon plan|plan.*scan|scan.*enumerate)/.test(lower)) {
     return [
-      { kind: "tool", tool: "todo_add", args: { text: "Identify target and test assumptions", priority: "high" }, rationale: "Multi-step request needs an explicit task plan." },
-      { kind: "tool", tool: "todo_add", args: { text: "Run reconnaissance and collect evidence", priority: "high" }, rationale: "Recon is the first active cyber step." },
-      { kind: "tool", tool: "todo_add", args: { text: "Enumerate exposed services and web content", priority: "medium" }, rationale: "Enumeration follows initial recon." },
-      { kind: "tool", tool: "todo_add", args: { text: "Summarize findings and next hypotheses", priority: "medium" }, rationale: "Keep progress durable for TUI and reports." }
+      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Identify target and test assumptions", priority: "high" } }, rationale: "Multi-step request needs an explicit task plan." },
+      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Run reconnaissance and collect evidence", priority: "high" } }, rationale: "Recon is the first active cyber step." },
+      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Enumerate exposed services and web content", priority: "medium" } }, rationale: "Enumeration follows initial recon." },
+      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Summarize findings and next hypotheses", priority: "medium" } }, rationale: "Keep progress durable for TUI and reports." }
     ];
   }
   if (/(subdomains?|passive[ -]?dns|certificate transparency|crt\.sh)/.test(lower) && target) {
-    return [{ kind: "tool", tool: "subdomain_enum", args: { domain: target }, rationale: "enumerating passive subdomain sources" }];
+    return [{ kind: "tool", tool: "asset_subdomains", args: { domain: target }, rationale: "enumerating passive subdomain sources" }];
   }
   if (/(nmap|scan|enumerate|recon)/.test(lower) && target) {
-    return [{ kind: "tool", tool: "port_scan", args: { target }, rationale: "User requested recon/scan." }];
+    return [{ kind: "tool", tool: "network_scan", args: { target }, rationale: "User requested recon/scan." }];
   }
   if (/(dir|directory|ffuf|gobuster)/.test(lower) && target) {
-    return [{ kind: "tool", tool: "dir_enum", args: { url: `http://${target}/FUZZ` }, rationale: "User requested directory enumeration." }];
+    return [{ kind: "tool", tool: "web_directory", args: { url: `http://${target}/FUZZ` }, rationale: "User requested directory enumeration." }];
   }
   if (/(note|remember|catat)/.test(lower)) {
-    return [{ kind: "tool", tool: "notes_add", args: { text: input.userText, tags: ["user"] }, rationale: "User asked to remember context." }];
+    return [{ kind: "tool", tool: "knowledge_manage", args: { operation: "add", args: { text: input.userText, tags: ["user"] } }, rationale: "User asked to remember context." }];
   }
   if (/(report|writeup|finding)/.test(lower)) {
     return [{ kind: "respond", text: input.compactedSummary ?? "No summary available yet." }];

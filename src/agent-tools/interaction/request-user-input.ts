@@ -2,8 +2,8 @@ import type { ToolDefinition, UserInputQuestion } from "../../types";
 import { assertObject, asString } from "../../utils";
 
 export const requestUserInputTool: ToolDefinition = {
-  name: "request_user_input",
-  description: "Pause the turn to ask the user one to three concise questions. Each question requires id, question, and recommended. Use choices for selectable answers; options is accepted as a compatibility alias, and type is an optional compatibility hint. Do not invent other question fields. If the user does not answer before timeoutSeconds, Farai automatically selects every recommended value.",
+  name: "user_input",
+  description: "Pause the turn to ask the user one to three concise questions. Each question requires id, question, and recommended. Use choices for selectable answers. If the user does not answer before timeoutSeconds, Farai automatically selects every recommended value.",
   inputSchema: {
     type: "object",
     required: ["questions"],
@@ -19,17 +19,8 @@ export const requestUserInputTool: ToolDefinition = {
             header: { type: "string" },
             question: { type: "string" },
             recommended: { type: "string" },
-            type: { type: "string", description: "Optional presentation hint; Farai derives the actual input mode from choices." },
             choices: {
               type: "array",
-              items: { type: "object", required: ["label"], properties: {
-                label: { type: "string" },
-                description: { type: "string" }
-              }, additionalProperties: false }
-            },
-            options: {
-              type: "array",
-              description: "Compatibility alias for choices.",
               items: { type: "object", required: ["label"], properties: {
                 label: { type: "string" },
                 description: { type: "string" }
@@ -66,10 +57,7 @@ export const requestUserInputTool: ToolDefinition = {
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) throw new Error(`question id must be 1-64 safe identifier characters: ${id}`);
       if (!question || question.length > 1_000) throw new Error(`questions[${index}].question must contain 1-1000 characters`);
       seen.add(id);
-      if (raw.choices !== undefined && raw.options !== undefined) {
-        throw new Error(`questions[${index}] must use choices or options, not both`);
-      }
-      const rawChoices = raw.choices ?? raw.options;
+      const rawChoices = raw.choices;
       if (rawChoices !== undefined && (!Array.isArray(rawChoices) || rawChoices.length < 2 || rawChoices.length > 4)) {
         throw new Error(`questions[${index}].choices must contain two to four items`);
       }

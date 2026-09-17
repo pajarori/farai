@@ -4,8 +4,8 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 import { priority, todoStatus } from "./shared";
 
 export const todoUpdateTool: ToolDefinition = {
-  name: "todo_update",
-  description: "Change the text, priority, or lifecycle status of an existing session todo. Use the exact todo id returned by todo_add or todo_list; mark work done only after it is actually complete, and never substitute a tool-call id or untrusted boundary token.",
+  name: "task_update_internal",
+  description: "Change the text, priority, or lifecycle status of an existing session todo. Use the exact todo id returned by task_manage or task_manage; mark work done only after it is actually complete, and never substitute a tool-call id or untrusted boundary token.",
   inputSchema: {
     type: "object",
     required: ["id"],

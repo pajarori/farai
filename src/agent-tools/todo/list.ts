@@ -4,8 +4,8 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 import { todoStatus } from "./shared";
 
 export const todoListTool: ToolDefinition = {
-  name: "todo_list",
-  description: "List the current session's todos, optionally filtered by lifecycle status and bounded by limit. Use the returned todo ids for todo_update and consult this before adding items when duplication is possible.",
+  name: "task_list_internal",
+  description: "List the current session's todos, optionally filtered by lifecycle status and bounded by limit. Use the returned todo ids for task_manage and consult this before adding items when duplication is possible.",
   inputSchema: {
     type: "object",
     properties: {

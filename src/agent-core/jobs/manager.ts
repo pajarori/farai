@@ -1,5 +1,5 @@
 import type { BackendSessionResult } from "../../agent-tools/backends/types";
-import type { SessionManager } from "../../agent-tools/shared/session-manager";
+import { clampYieldMs, type SessionManager } from "../../agent-tools/shared/session-manager";
 import type { BackgroundJob, SessionMailboxItem, ToolCallRecord } from "../../types";
 import { id, nowIso } from "../../utils";
 import type { SqliteStore } from "../../agent-store/sqlite-store";
@@ -33,6 +33,23 @@ export class JobManager {
     private readonly sessions: SessionManager,
     private readonly onMailbox: (item: SessionMailboxItem, job: BackgroundJob) => void
   ) {}
+
+  snapshot(jobId: string): BackgroundJob {
+    const job = this.store.loadJob(jobId);
+    if (job.runtimeId !== this.runtimeId) throw new Error(`Background job ${jobId} is owned by another runtime`);
+    return job;
+  }
+
+  async poll(jobId: string, input?: string, yieldMs?: number): Promise<BackgroundJob> {
+    const current = this.snapshot(jobId);
+    if (!current.processId || ["succeeded", "failed", "cancelled", "lost"].includes(current.status)) return current;
+    await this.sessions.poll(current.processId, input, clampYieldMs(yieldMs));
+    return this.store.loadJob(jobId);
+  }
+
+  async sendInput(jobId: string, input: string, yieldMs?: number): Promise<BackgroundJob> {
+    return await this.poll(jobId, input, yieldMs);
+  }
 
   attachProcess(input: ProcessJobStart): BackgroundJob {
     const existing = this.store.findJobByProcessId(input.processId);

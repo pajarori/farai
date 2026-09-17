@@ -1,9 +1,9 @@
 import type { Session, ToolDefinition } from "../../types";
 import { canonicalToolName } from "../../tool-names";
 
-const SHARED_WORKSPACE_EDIT_TOOLS = new Set(["fs_write", "fs_edit", "patch_apply", "code_write_script"]);
+const SHARED_WORKSPACE_EDIT_TOOLS = new Set(["file_write", "file_replace", "file_patch", "script_write"]);
 const TOOL_SCOPE_ALIASES = new Map([
-  ["shell", "shell_exec"]
+  ["shell", "command_run"]
 ]);
 
 function scopedToolName(name: string): string {

@@ -5,8 +5,8 @@ import { containerPathKind, containerRelativePath, containerStatMtime, container
 import { appendDiagnosticReport } from "../../agent-lsp";
 
 export const fsWriteTool: ToolDefinition = {
-  name: "fs_write",
-  description: "Create a workspace file or replace an existing file with the complete supplied content. Use this only when the full desired file is known; prefer fs_edit for one exact replacement and patch_apply for coordinated edits across one or more files.",
+  name: "file_write",
+  description: "Create a workspace file or replace an existing file with the complete supplied content. Use this only when the full desired file is known; prefer file_replace for one exact replacement and file_patch for coordinated edits across one or more files.",
   inputSchema: {
     type: "object",
     required: ["path", "content"],

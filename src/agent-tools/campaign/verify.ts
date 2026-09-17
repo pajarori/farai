@@ -5,7 +5,7 @@ import { assertCampaignEvidence, campaignIdFor, loadCampaign, requireCampaignSto
 
 export const campaignVerifyTool: ToolDefinition = {
   name: "campaign_verify",
-  description: "Change a campaign finding's lifecycle state using explicit evidence and a reproducible test attempt. Use only after report_add_finding created the candidate. Use verified only with a passed campaign_test at impact_demonstrated or independently_verified; use duplicate only when duplicateOf points to the canonical finding.",
+  description: "Change a campaign finding's lifecycle state using explicit evidence and a reproducible test attempt. Use only after finding_manage operation=add_finding created the candidate. Use verified only with a passed campaign_manage operation=test at impact_demonstrated or independently_verified; use duplicate only when duplicateOf points to the canonical finding.",
   inputSchema: {
     type: "object",
     required: ["findingId", "status"],

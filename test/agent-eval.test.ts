@@ -33,9 +33,9 @@ test("eval runner checks tool selection and arguments, records a trace, and clea
       prompts: ["remember eval target"],
       expect: {
         responseExcludes: ["planner error"],
-        toolCalls: [{ tool: "notes_add", status: "done", argsInclude: { text: "remember eval target", tags: ["user"] } }],
-        toolsInOrder: ["notes_add"],
-        toolCallsAbsent: ["shell_exec"],
+        toolCalls: [{ tool: "knowledge_manage", status: "done", argsInclude: { operation: "add", args: { text: "remember eval target", tags: ["user"] } } }],
+        toolsInOrder: ["knowledge_manage"],
+        toolCallsAbsent: ["command_run"],
         plannerErrorsAtMost: 0,
         toolErrorsAtMost: 0
       }
@@ -48,7 +48,7 @@ test("eval runner checks tool selection and arguments, records a trace, and clea
   expect(result.ok).toBe(true);
   expect(result.suite).toBe("tool trajectory");
   expect(result.suiteHash).toMatch(/^[a-f0-9]{64}$/);
-  expect(result.results[0]?.trace.toolCalls).toEqual([{ tool: "notes_add", status: "done", args: { text: "remember eval target", tags: ["user"] } }]);
+  expect(result.results[0]?.trace.toolCalls).toEqual([{ tool: "knowledge_manage", status: "done", args: { operation: "add", args: { text: "remember eval target", tags: ["user"] } } }]);
   expect(result.results[0]?.trace.eventCounts.tool_call).toBe(1);
   expect(progress).toEqual(["[1/1] running note tool", "[1/1] passed note tool"]);
   expect(await readdir(root)).toEqual([]);
@@ -68,7 +68,7 @@ test("eval runner reports all metric failures and bounds a stalled case", async 
       name: "wrong expectations",
       planner: "heuristic",
       prompts: ["scan the target"],
-      expect: { responseIncludes: ["not present"], notesAtLeast: 2, toolCalls: [{ tool: "notes_add" }] }
+        expect: { responseIncludes: ["not present"], notesAtLeast: 2, toolCalls: [{ tool: "knowledge_manage" }] }
     }]
   };
   const failed = await runEvalSuite(failing, { workspacesRoot: root });
@@ -76,7 +76,7 @@ test("eval runner reports all metric failures and bounds a stalled case", async 
   expect(failed.results[0]?.failures).toEqual([
     "response missing: not present",
     "expected notes >= 2, got 0",
-    "expected tool notes_add matching criteria >= 1, got 0"
+    "expected tool knowledge_manage matching criteria >= 1, got 0"
   ]);
 
   const stalled = await runEvalSuite({

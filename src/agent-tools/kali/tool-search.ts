@@ -253,7 +253,7 @@ print(json.dumps({
     "query": query,
     "inventoryCount": len(catalog),
     "matches": matches,
-    "guidance": "prefer a typed Farai capability when one exists; otherwise inspect the selected command's local man page or --help once, then execute it with exec_command using machine-readable output and bounded scope"
+    "guidance": "prefer a typed Farai capability when one exists; otherwise inspect the selected command's local man page or --help once, then execute it with command_run using machine-readable output and bounded scope"
 }, ensure_ascii=True, separators=(",", ":")))
 `;
 
@@ -290,7 +290,7 @@ export function parseKaliToolSearchOutput(raw: string): KaliToolSearchOutput {
 }
 
 export const kaliToolSearchTool: ToolDefinition = {
-  name: "kali_tool_search",
+  name: "kali_search",
   description: "Search the actual command inventory installed in Farai's Kali container by task, capability, package description, category, or exact executable name. Use this only when the preloaded command map is ambiguous, runtime packages changed, or an expected command failed; it does not execute the selected command.",
   inputSchema: {
     type: "object",

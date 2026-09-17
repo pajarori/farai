@@ -137,8 +137,8 @@ test("system prompt describes isolated browser contexts without blocking normal 
   expect(prompt).not.toContain("browser automation is the mandatory default");
   expect(prompt).not.toContain("Do not use http_request");
   expect(prompt).not.toContain("Raw HTTP is reserved");
-  expect(prompt).toContain("Prefer purpose-built capabilities over exec_command");
-  expect(prompt).toContain("browser_navigate already returns the loaded page snapshot");
+  expect(prompt).toContain("Prefer purpose-built capabilities over command_run");
+  expect(prompt).toContain("browser_manage navigate already returns the loaded page snapshot");
   expect(prompt).toContain("hypothesis -> action -> observation -> adaptation");
   expect(prompt).toContain("do not force every domain into a universal phase sequence");
   expect(prompt).toContain("Distinguish what was observed directly, what is inferred, and what is proven");
@@ -157,10 +157,10 @@ test("system prompt describes isolated browser contexts without blocking normal 
   expect(prompt).toContain("Write user-facing prose and headings in lowercase");
   expect(prompt).toContain("Preserve the exact casing of technical literals");
   expect(prompt).toContain("compact map of every command in the current official Kali tool catalog");
-  expect(prompt).toContain("do not run which, command -v, or kali_tool_search first");
+  expect(prompt).toContain("do not run which, command -v, or kali_search first");
   expect(prompt).toContain("Passive infrastructure discovery is not interactive web exploration");
-  expect(prompt).toContain("call subdomain_enum directly");
-  expect(prompt).toContain("report_add_finding persists the candidate in the current session and populates the Findings tab");
+  expect(prompt).toContain("call asset_subdomains directly");
+  expect(prompt).toContain("finding_manage persists the candidate in the current session and populates the Findings tab");
 });
 
 test("heuristic planner emits port scan action from prompt target", async () => {
@@ -177,9 +177,9 @@ test("heuristic planner emits port scan action from prompt target", async () => 
     session,
     userText: "scan 10.10.10.10",
     history: [],
-    tools: ["port_scan"]
+    tools: ["network_scan"]
   });
-  expect(actions[0]).toMatchObject({ kind: "tool", tool: "port_scan" });
+  expect(actions[0]).toMatchObject({ kind: "tool", tool: "network_scan" });
 });
 
 test("heuristic planner routes passive subdomain requests to the typed workflow", async () => {
@@ -196,11 +196,11 @@ test("heuristic planner routes passive subdomain requests to the typed workflow"
     session,
     userText: "coba cek subdomain stockbit.com",
     history: [],
-    tools: ["subdomain_enum"]
+    tools: ["asset_subdomains"]
   });
   expect(actions).toEqual([{
     kind: "tool",
-    tool: "subdomain_enum",
+    tool: "asset_subdomains",
     args: { domain: "stockbit.com" },
     rationale: "enumerating passive subdomain sources"
   }]);
@@ -222,14 +222,14 @@ test("heuristic planner emits directory enum, note, report, and fallback actions
   ).resolves.toEqual([
     {
       kind: "tool",
-      tool: "dir_enum",
+      tool: "web_directory",
       args: { url: "http://10.10.10.10/FUZZ" },
       rationale: "User requested directory enumeration."
     }
   ]);
 
   await expect(planner.plan({ session: baseSession, userText: "catat this", history: [], tools: [] })).resolves.toEqual([
-    { kind: "tool", tool: "notes_add", args: { text: "catat this", tags: ["user"] }, rationale: "User asked to remember context." }
+    { kind: "tool", tool: "knowledge_manage", args: { operation: "add", args: { text: "catat this", tags: ["user"] } }, rationale: "User asked to remember context." }
   ]);
 
   await expect(planner.plan({ session: baseSession, userText: "make report", history: [], compactedSummary: "summary", tools: [] })).resolves.toEqual([
@@ -251,19 +251,19 @@ test("heuristic planner creates todos for multi-step cyber requests and summariz
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString()
   };
-  const actions = await planner.plan({ session, userText: "make a recon plan and scan enumerate", history: [], tools: ["todo_add"] });
+  const actions = await planner.plan({ session, userText: "make a recon plan and scan enumerate", history: [], tools: ["task_manage"] });
   expect(actions).toHaveLength(4);
-  expect(actions.every((action) => action.kind === "tool" && action.tool === "todo_add")).toBe(true);
+  expect(actions.every((action) => action.kind === "tool" && action.tool === "task_manage")).toBe(true);
 
   const continued = await planner.plan({
     session,
     history: [
-      { role: "assistant", toolCalls: [{ id: "call_1", tool: "shell_exec", args: {} }] },
-      { role: "tool", toolCallId: "call_1", tool: "shell_exec", text: "exit=0\neth0: inet 172.17.0.3\nlo: inet 127.0.0.1" }
+      { role: "assistant", toolCalls: [{ id: "call_1", tool: "command_run", args: {} }] },
+      { role: "tool", toolCallId: "call_1", tool: "command_run", text: "exit=0\neth0: inet 172.17.0.3\nlo: inet 127.0.0.1" }
     ],
     tools: []
   });
-  expect(continued).toEqual([{ kind: "respond", text: "shell_exec done. exit=0" }]);
+  expect(continued).toEqual([{ kind: "respond", text: "command_run done. exit=0" }]);
 });
 
 test("createPlannerForSession resolves session.model against a configured profile name before treating it as a bare model override", () => {
@@ -394,7 +394,7 @@ test("OpenAI-compatible planner sends a native tools payload and tool_choice", a
         { title: "Project Instructions", body: "Follow repo-specific AGENTS.md rules.", stable: true },
         { title: "Durable Session Context", body: "Recent evidence and todos.", stable: false }
       ],
-      tools: ["notes_add"]
+      tools: ["task_manage"]
     });
 
     expect(actions).toEqual([{ kind: "respond", text: "ok" }]);
@@ -403,7 +403,7 @@ test("OpenAI-compatible planner sends a native tools payload and tool_choice", a
     expect(requests[0]?.body.model).toBe("model-x");
     expect(requests[0]?.body.tool_choice).toBe("auto");
     expect(requests[0]?.body.tools).toEqual([
-      { type: "function", function: { name: "notes_add", description: expect.any(String), parameters: expect.any(Object) } }
+      { type: "function", function: { name: "task_manage", description: expect.any(String), parameters: expect.any(Object) } }
     ]);
     expect(requests[0]?.body.messages[0].role).toBe("system");
     const systemContent = requests[0]?.body.messages[0].content as string;
@@ -427,7 +427,7 @@ test("OpenAI-compatible planner maps native tool_calls into tool actions", async
         message: {
           content: null,
           tool_calls: [
-            { id: "call_1", type: "function", function: { name: "nmap_scan", arguments: JSON.stringify({ target: "localhost", ports: "1-65535" }) } }
+            { id: "call_1", type: "function", function: { name: "network_scan", arguments: JSON.stringify({ target: "localhost", ports: "1-65535" }) } }
           ]
         }
       }]
@@ -445,8 +445,8 @@ test("OpenAI-compatible planner maps native tool_calls into tool actions", async
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString()
     };
-    await expect(planner.plan({ session, userText: "scan", history: [], tools: ["nmap_scan"] })).resolves.toEqual([
-      { kind: "tool", tool: "nmap_scan", args: { target: "localhost", ports: "1-65535" }, rationale: "", toolCallId: "call_1" }
+    await expect(planner.plan({ session, userText: "scan", history: [], tools: ["network_scan"] })).resolves.toEqual([
+      { kind: "tool", tool: "network_scan", args: { target: "localhost", ports: "1-65535" }, rationale: "", toolCallId: "call_1" }
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -459,7 +459,7 @@ test("OpenAI-compatible planner parses Hermes-style <function=...> XML tool call
     JSON.stringify({
       choices: [{
         message: {
-          content: "Let me write the exploit script.\n<tool_call>\n<function=nmap_scan>\n<parameter=target>\n10.129.39.18\n</parameter>\n</function>\n</tool_call>",
+          content: "Let me write the exploit script.\n<tool_call>\n<function=network_scan>\n<parameter=target>\n10.129.39.18\n</parameter>\n</function>\n</tool_call>",
           tool_calls: []
         },
         finish_reason: "stop"
@@ -478,9 +478,9 @@ test("OpenAI-compatible planner parses Hermes-style <function=...> XML tool call
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString()
     };
-    await expect(planner.plan({ session, userText: "exploit it", history: [], tools: ["nmap_scan"] })).resolves.toEqual([
+    await expect(planner.plan({ session, userText: "exploit it", history: [], tools: ["network_scan"] })).resolves.toEqual([
       { kind: "respond", text: "Let me write the exploit script." },
-      { kind: "tool", tool: "nmap_scan", args: { target: "10.129.39.18" }, rationale: "" }
+      { kind: "tool", tool: "network_scan", args: { target: "10.129.39.18" }, rationale: "" }
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -493,7 +493,7 @@ test("OpenAI-compatible planner parses multiple XML tool calls and tolerates no 
     JSON.stringify({
       choices: [{
         message: {
-          content: "<function=notes_add><parameter=text>found it</parameter><parameter=tags>htb</parameter></function><function=todo_add><parameter=text>exploit next</parameter></function>",
+          content: "<function=notes_add><parameter=text>found it</parameter><parameter=tags>htb</parameter></function><function=task_manage><parameter=text>exploit next</parameter></function>",
           tool_calls: []
         }
       }]
@@ -511,9 +511,9 @@ test("OpenAI-compatible planner parses multiple XML tool calls and tolerates no 
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString()
     };
-    await expect(planner.plan({ session, userText: "go", history: [], tools: ["notes_add", "todo_add"] })).resolves.toEqual([
+    await expect(planner.plan({ session, userText: "go", history: [], tools: ["notes_add", "task_manage"] })).resolves.toEqual([
       { kind: "tool", tool: "notes_add", args: { text: "found it", tags: "htb" }, rationale: "" },
-      { kind: "tool", tool: "todo_add", args: { text: "exploit next" }, rationale: "" }
+      { kind: "tool", tool: "task_manage", args: { text: "exploit next" }, rationale: "" }
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -526,7 +526,7 @@ test("OpenAI-compatible planner coerces XML tool-call scalar args to typed value
     JSON.stringify({
       choices: [{
         message: {
-          content: "<function=shell_exec><parameter=command>id</parameter><parameter=background>true</parameter><parameter=yieldMs>500</parameter></function>",
+          content: "<function=command_run><parameter=command>id</parameter><parameter=background>true</parameter><parameter=yieldMs>500</parameter></function>",
           tool_calls: []
         }
       }]
@@ -544,8 +544,8 @@ test("OpenAI-compatible planner coerces XML tool-call scalar args to typed value
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString()
     };
-    await expect(planner.plan({ session, userText: "run id", history: [], tools: ["shell_exec"] })).resolves.toEqual([
-      { kind: "tool", tool: "shell_exec", args: { command: "id", background: true, yieldMs: 500 }, rationale: "" }
+    await expect(planner.plan({ session, userText: "run id", history: [], tools: ["command_run"] })).resolves.toEqual([
+      { kind: "tool", tool: "command_run", args: { command: "id", background: true, yieldMs: 500 }, rationale: "" }
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -560,7 +560,7 @@ test("OpenAI-compatible planner emits both a respond action and tool actions fro
         message: {
           content: "Adding a follow-up todo.",
           tool_calls: [
-            { id: "call_1", type: "function", function: { name: "todo_add", arguments: JSON.stringify({ text: "Follow up", priority: "medium" }) } }
+            { id: "call_1", type: "function", function: { name: "task_manage", arguments: JSON.stringify({ text: "Follow up", priority: "medium" }) } }
           ]
         }
       }]
@@ -578,9 +578,9 @@ test("OpenAI-compatible planner emits both a respond action and tool actions fro
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString()
     };
-    await expect(planner.plan({ session, userText: "plan next step", history: [], tools: ["todo_add"] })).resolves.toEqual([
+    await expect(planner.plan({ session, userText: "plan next step", history: [], tools: ["task_manage"] })).resolves.toEqual([
       { kind: "respond", text: "Adding a follow-up todo." },
-      { kind: "tool", tool: "todo_add", args: { text: "Follow up", priority: "medium" }, rationale: "", toolCallId: "call_1" }
+      { kind: "tool", tool: "task_manage", args: { text: "Follow up", priority: "medium" }, rationale: "", toolCallId: "call_1" }
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -596,7 +596,7 @@ test("OpenAI-compatible planner surfaces reasoning as its own action alongside a
           content: null,
           reasoning: "**Checking exploit conditions**\n\nThe queue name must match LPD_QUEUE before injection works.",
           tool_calls: [
-            { id: "call_1", type: "function", function: { name: "nmap_scan", arguments: JSON.stringify({ target: "10.10.10.10" }) } }
+            { id: "call_1", type: "function", function: { name: "network_scan", arguments: JSON.stringify({ target: "10.10.10.10" }) } }
           ]
         }
       }]
@@ -614,9 +614,9 @@ test("OpenAI-compatible planner surfaces reasoning as its own action alongside a
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString()
     };
-    await expect(planner.plan({ session, userText: "exploit it", history: [], tools: ["nmap_scan"] })).resolves.toEqual([
+    await expect(planner.plan({ session, userText: "exploit it", history: [], tools: ["network_scan"] })).resolves.toEqual([
       { kind: "reasoning", text: "**Checking exploit conditions**\n\nThe queue name must match LPD_QUEUE before injection works." },
-      { kind: "tool", tool: "nmap_scan", args: { target: "10.10.10.10" }, rationale: "", toolCallId: "call_1" }
+      { kind: "tool", tool: "network_scan", args: { target: "10.10.10.10" }, rationale: "", toolCallId: "call_1" }
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1091,15 +1091,15 @@ test("OpenAI-compatible planner consumes an SSE stream: emits deltas and assembl
 test("OpenAI-compatible planner assembles streamed tool_call fragments by index", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => sseResponse([
-    JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "port_scan", arguments: "{\"tar" } }] } }] }),
+    JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "network_scan", arguments: "{\"tar" } }] } }] }),
     JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "get\":\"10.0.0.1\"}" } }] } }] }),
     JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })
   ])) as unknown as typeof fetch;
   try {
     const planner = new OpenAICompatiblePlanner({ baseUrl: "https://example.test/v1", model: "m" });
     const session: Session = { id: "s1", workspace: "/tmp", mode: "freestyle", phase: "understand_goal", createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() };
-    const actions = await planner.plan({ session, userText: "scan", history: [], tools: ["port_scan"] }, { onStreamEvent: () => {} });
-    expect(actions).toEqual([{ kind: "tool", tool: "port_scan", args: { target: "10.0.0.1" }, rationale: "", toolCallId: "call_1" }]);
+    const actions = await planner.plan({ session, userText: "scan", history: [], tools: ["network_scan"] }, { onStreamEvent: () => {} });
+    expect(actions).toEqual([{ kind: "tool", tool: "network_scan", args: { target: "10.0.0.1" }, rationale: "", toolCallId: "call_1" }]);
   } finally {
     globalThis.fetch = originalFetch;
   }

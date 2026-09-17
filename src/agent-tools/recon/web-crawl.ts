@@ -33,7 +33,7 @@ export function buildWebCrawlCommand(args: Record<string, unknown>): string {
     "-d", String(depth), "-timeout", String(timeout), "-mdp", String(maxPages),
     "-mrs", String(maxResponseSize), "-rl", String(rateLimit), "-c", String(concurrency), "-p", String(parallelism)
   ];
-  if (args.javascript !== false) command.push("-jc");
+  if (args.javascript === true || args.headless === true) command.push("-jc");
   if (args.ignoreQueryParameters === true) command.push("-iqp");
   if (args.filterSimilar === true) command.push("-fsu");
   const scope = typeof args.scope === "string" ? args.scope : "registrable_domain";
@@ -52,7 +52,7 @@ export function parseWebCrawlOutput(raw: string): { records: WebCrawlRecord[]; m
 
 export const webCrawlTool: ToolDefinition = {
   name: "web_crawl",
-  description: "Crawl one or many authorized web targets with ProjectDiscovery katana and return normalized discovered URLs, methods, status codes, technologies, forms, and XHR counts without embedding response bodies. Use this for breadth-first application mapping after live HTTP services are known; enable headless mode only when JavaScript execution is necessary, and use browser tools for interactive workflows or authenticated state.",
+  description: "Crawl one or many authorized web targets with a static-first katana profile and return normalized discovered URLs, methods, status codes, technologies, forms, and XHR counts without embedding response bodies. Enable JavaScript or headless mode only when required; use browser tools for interactive workflows or authenticated state.",
   inputSchema: {
     type: "object",
     required: ["targets"],

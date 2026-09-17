@@ -3,7 +3,7 @@ import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 
 export const updatePlanTool: ToolDefinition = {
-  name: "update_plan",
+  name: "task_plan_internal",
   description: "Replace the current session plan with ordered steps and statuses.",
   inputSchema: { type: "object", required: ["plan"], properties: { plan: { type: "array", items: { type: "object", required: ["step", "status"], properties: { step: { type: "string" }, status: { type: "string", enum: ["pending", "in_progress", "completed"] } } } } } },
   mutates: true, timeoutMs: 5000, parallel: false, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,

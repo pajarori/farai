@@ -79,6 +79,33 @@ export const mcpResourceReadTool: ToolDefinition = {
   }
 };
 
+export const mcpResourceTool: ToolDefinition = {
+  name: "mcp_resource",
+  description: "List or read resources exposed by configured MCP servers.",
+  inputSchema: {
+    type: "object",
+    required: ["operation"],
+    properties: {
+      operation: { type: "string", enum: ["list", "read"] },
+      server: { type: "string" },
+      uri: { type: "string" }
+    },
+    additionalProperties: false
+  },
+  mutates: false,
+  timeoutMs: 90_000,
+  parallel: true,
+  renderHuman: render,
+  renderModel: render,
+  run: async (args, context) => {
+    assertObject(args, "args");
+    const operation = asString(args.operation, "operation");
+    if (operation === "list") return mcpResourceListTool.run(args, context);
+    if (operation === "read") return mcpResourceReadTool.run(args, context);
+    throw new Error("operation must be list or read");
+  }
+};
+
 export function renderMcpResource(raw: unknown): { output: string; attachments: ToolAttachment[] } {
   const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined;
   const contents = Array.isArray(record?.contents) ? record.contents : [];
@@ -120,4 +147,4 @@ function isImageMime(value: string): value is ToolAttachment["mediaType"] {
   return value === "image/png" || value === "image/jpeg" || value === "image/gif" || value === "image/webp";
 }
 
-export const mcpResourceTools: ToolDefinition[] = [mcpResourceListTool, mcpResourceReadTool];
+export const mcpResourceTools: ToolDefinition[] = [mcpResourceTool];

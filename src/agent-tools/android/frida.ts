@@ -344,7 +344,7 @@ export const androidFridaPsTool: ToolDefinition = {
 
 export const androidFridaRunTool: ToolDefinition = {
   name: "android_frida_run",
-  description: "Run a frida javascript script against an app and collect its send() messages. Write the script first with fs_write, then attach to a running process or spawn a package. Use background=true to keep hooks live while you interact with the app, then read output with session_poll.",
+  description: "Run a frida javascript script against an app and collect its send() messages. Write the script first with file_write, then attach to a running process or spawn a package. Use background=true to keep hooks live while you interact with the app, then read output with command_poll.",
   inputSchema: {
     type: "object",
     required: ["scriptPath", "target"],
@@ -353,7 +353,7 @@ export const androidFridaRunTool: ToolDefinition = {
       target: { type: "string", description: "package name to spawn, or process name/pid to attach to" },
       mode: { type: "string", enum: ["spawn", "attach"], description: "spawn launches the package fresh; attach hooks an already-running process (default attach)" },
       durationSeconds: { type: "integer", minimum: 1, maximum: 600, description: "how long to keep the session open collecting messages (default 15)" },
-      background: { type: "boolean", description: "run as a persistent background session and return a job id; poll it with session_poll" },
+      background: { type: "boolean", description: "run as a persistent background session and return a job id; poll it with command_poll" },
       serial: SERIAL_PROP
     },
     additionalProperties: false
@@ -399,7 +399,7 @@ export const androidFridaBypassTool: ToolDefinition = {
       type: { type: "string", enum: ["ssl", "root"], description: "which bundled bypass to inject" },
       package: { type: "string", description: "package name to spawn with the bypass attached" },
       durationSeconds: { type: "integer", minimum: 1, maximum: 600, description: "how long to keep the bypass session open (default 30)" },
-      background: { type: "boolean", description: "run as a persistent background session so hooks stay active; poll with session_poll" },
+      background: { type: "boolean", description: "run as a persistent background session so hooks stay active; poll with command_poll" },
       serial: SERIAL_PROP
     },
     additionalProperties: false

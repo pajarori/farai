@@ -3,7 +3,7 @@ import type { ToolContext, ToolDefinition, ToolResult } from "../../types";
 type OutputReadArgs = { artifactId?: unknown; offset?: unknown; limit?: unknown; byteOffset?: unknown; byteLimit?: unknown };
 
 export const outputReadTool: ToolDefinition<OutputReadArgs> = {
-  name: "tool_output_read",
+  name: "output_read",
   description: "Read a page of a durable tool-output artifact that was created because the original result was too large to inline. Pass the exact output_artifact_id from the truncated result and advance the zero-based line offset to inspect additional pages without rerunning the original tool.",
   inputSchema: {
     type: "object",
