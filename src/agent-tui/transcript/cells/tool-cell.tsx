@@ -4,7 +4,8 @@ import type { TimelineRow, ToolTimelineRow } from "../../renderers";
 import { truncateLine } from "../../renderers";
 import { inferFiletype } from "../../filetype";
 import { syntax } from "../../syntax";
-import { COLOR } from "../../theme";
+import { COLOR, toolFamilyColor } from "../../theme";
+import { toolLifecycleFamily } from "../../tool-lifecycle";
 import { useTuiDimensions } from "../../context/terminal";
 import { parseDirectoryResults, parseNmap, splitHttpResponse, unifiedEditDiff } from "../../tool-renderers";
 import { useTuiStore } from "../../context/store";
@@ -83,7 +84,7 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
     const right = [presentation().showOutcome !== false ? presentation().outcome : undefined, formatActivityDuration(props.row.durationMs)].filter(Boolean).join(" · ");
     return fitTerminalPair(title, right, Math.max(1, dims().width - 4), 8, 2);
   };
-  const headerColor = () => active() ? COLOR.accent : toolColor(props.row.status);
+  const headerColor = () => active() ? COLOR.accent : toolColor(props.row.status, props.row.tool);
   const toggleClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   const previewClick = createPrimaryClickGesture(() => tui.actions.cellExpandedToggle(props.row.id));
   const semanticPreview = () => presentation().preview.filter((line) => line.trim() !== presentation().outcome?.trim());
@@ -448,9 +449,9 @@ function previewOutputLines(text: string, limit: number): string[] {
   ];
 }
 
-function toolColor(status: string): string {
+function toolColor(status: string, tool?: string): string {
   if (status === "failed" || status === "error" || status === "denied") return COLOR.error;
-  if (status === "done") return COLOR.text;
+  if (status === "done") return tool ? toolFamilyColor(toolLifecycleFamily(tool)) : COLOR.text;
   return COLOR.dim;
 }
 

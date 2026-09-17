@@ -20,7 +20,7 @@ export type ChunkPlan = {
 export interface LanePolicy {
   readonly lane: string;
   classify(entry: ConversationEntry): boolean;
-  planChunks(nodes: LaneNode[]): ChunkPlan[];
+  planChunks(nodes: LaneNode[], windowTokens: number): ChunkPlan[];
   prompt(nodes: LaneNode[]): string;
   fallback(nodes: LaneNode[]): string;
 }
@@ -28,33 +28,38 @@ export interface LanePolicy {
 export type SummarizeLaneOptions = {
   lane?: string;
   chunkSize?: number;
-  triggerUncovered?: number;
   protectedTail?: number;
+  triggerFraction?: number;
+  triggerTokensFloor?: number;
 };
 
 export class SummarizeLanePolicy implements LanePolicy {
   readonly lane: string;
   private readonly chunkSize: number;
-  private readonly triggerUncovered: number;
   private readonly protectedTail: number;
+  private readonly triggerFraction: number;
+  private readonly triggerTokensFloor: number;
 
   constructor(options: SummarizeLaneOptions = {}) {
     this.lane = options.lane ?? "tool";
-    this.chunkSize = Math.max(2, options.chunkSize ?? 5);
-    this.triggerUncovered = Math.max(this.chunkSize, options.triggerUncovered ?? 30);
+    this.chunkSize = Math.max(2, options.chunkSize ?? 8);
     this.protectedTail = Math.max(0, options.protectedTail ?? 10);
+    this.triggerFraction = Math.max(0, options.triggerFraction ?? 0.15);
+    this.triggerTokensFloor = Math.max(0, options.triggerTokensFloor ?? 25_000);
   }
 
   classify(entry: ConversationEntry): boolean {
     return entry.role === "tool";
   }
 
-  planChunks(nodes: LaneNode[]): ChunkPlan[] {
+  planChunks(nodes: LaneNode[], windowTokens: number): ChunkPlan[] {
     const protectedFrom = Math.max(0, nodes.length - this.protectedTail);
     const eligible = nodes.filter((node, index) => !node.covered && node.settled && index < protectedFrom);
-    if (eligible.length < this.triggerUncovered) return [];
+    if (eligible.length < this.chunkSize) return [];
+    const eligibleTokens = eligible.reduce((total, node) => total + Math.ceil(node.bytes / 4), 0);
+    const threshold = Math.max(this.triggerTokensFloor, Math.round(windowTokens * this.triggerFraction));
+    if (eligibleTokens < threshold) return [];
     const batch = eligible.slice(0, this.chunkSize);
-    if (batch.length < this.chunkSize) return [];
     return [{
       lane: this.lane,
       coveredNodeIds: batch.map((node) => node.nodeId),

@@ -7,6 +7,7 @@ import { projectConversationHistory } from "../agent-core/history-projection";
 import { activeBackgroundJobs, renderBackgroundJobs } from "../agent-core/loop/background";
 import { buildCompactedHistory, insertCompactionContext, mergeCompactCheckpoint, runModelCompaction } from "./summary-runner";
 import { buildOverlayMap } from "./overlay";
+import { resolveContextWindow } from "../agent-core/model-registry";
 import type { LaneNode, LanePolicy } from "./lanes";
 
 export type CompactionOptions = {
@@ -63,6 +64,7 @@ export class ContextManager {
     const covered = new Set<string>();
     for (const chunk of this.store.listContextSummaryChunks(session.id)) for (const nodeId of chunk.coveredNodeIds) covered.add(nodeId);
     const activeJobs = new Set(activeBackgroundJobs(this.store.listToolCalls(session.id, 200)).map((job) => job.toolCallId));
+    const windowTokens = resolveContextWindow(planner.contextWindow);
     for (const policy of this.lanes) {
       if (signal.aborted) return;
       const nodes: LaneNode[] = [];
@@ -79,7 +81,7 @@ export class ContextManager {
           ...(entry.role === "tool" ? { toolCallId: entry.nodeId } : {})
         });
       }
-      for (const plan of policy.planChunks(nodes)) {
+      for (const plan of policy.planChunks(nodes, windowTokens)) {
         if (signal.aborted) return;
         const chunkNodes = nodes.filter((node) => plan.coveredNodeIds.includes(node.nodeId));
         if (!chunkNodes.length) continue;

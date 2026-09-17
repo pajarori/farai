@@ -230,7 +230,7 @@ export type TimelineRow =
   | { kind: "progress"; title: string; detail: string; status: "running" | "done" | "info"; id: string }
   | { kind: "phase"; phase: string; detail: string; id: string }
   | { kind: "loop_stop"; text: string; reason: string; id: string }
-  | { kind: "compaction"; text: string; summary?: string; id: string }
+  | { kind: "compaction"; text: string; summary?: string; references?: string[]; id: string }
   | { kind: "error"; title: string; text: string; body?: string; id: string }
   | { kind: "notice"; tone: "info" | "warning" | "success"; title: string; detail?: string; body?: string; id: string };
 

@@ -13,7 +13,7 @@ export function AssistantMessage(props: AssistantMessageProps): JSX.Element {
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1 }}>
       <box style={{ flexDirection: "row", flexShrink: 0, minWidth: 0 }}>
-        <TranscriptMarker color={COLOR.dim} />
+        <TranscriptMarker color={COLOR.agent} />
         <box style={{ flexDirection: "column", flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
           <MarkdownView
             id={`${props.row.id}:markdown`}

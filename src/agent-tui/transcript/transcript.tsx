@@ -8,6 +8,26 @@ import { FaraiRow } from "./cells";
 import { FARAI_BANNER_LINES } from "../../branding";
 import { useTuiDimensions } from "../context/terminal";
 import { presentToolActivity } from "../tool-activity";
+import { canonicalToolName } from "../../tool-names";
+import type { ToolCallRecord } from "../../types";
+
+function compactReferences(toolCalls: ToolCallRecord[]): string[] {
+  const verbs: Record<string, string> = {
+    file_read: "read", file_edit: "edited", file_write: "wrote", patch_apply: "edited", notebook_edit: "edited"
+  };
+  const seen = new Set<string>();
+  const refs: string[] = [];
+  for (const call of toolCalls) {
+    const verb = verbs[canonicalToolName(call.tool)];
+    if (!verb) continue;
+    const args = (call.args ?? {}) as Record<string, unknown>;
+    const path = [args.path, args.file, args.filePath, args.notebookPath].find((value) => typeof value === "string" && value.trim()) as string | undefined;
+    if (!path) continue;
+    const line = `${verb} ${path.replace(/^\/workspace\//, "").replace(/^\/worktrees\/[^/]+\//, "")}`;
+    if (!seen.has(line)) { seen.add(line); refs.push(line); }
+  }
+  return refs.slice(-12);
+}
 
 export function Transcript(props: { active?: boolean } = {}): JSX.Element {
   const tui = useTuiStore();
@@ -25,13 +45,15 @@ export function Transcript(props: { active?: boolean } = {}): JSX.Element {
     if (props.active === false) return renderedTranscriptRows;
     const boundary = tui.store.snapshot.compactionBoundary;
     const summary = boundary ? formatCompactSummary(boundary.summary) : "";
+    const references = boundary ? compactReferences(tui.store.snapshot.toolCalls) : [];
     const compactRow: TimelineRow[] = boundary ? [{
       kind: "compaction",
       id: boundary.id,
       text: boundary.preCompactTokens !== undefined && boundary.postCompactTokens !== undefined
         ? `${boundary.preCompactTokens} → ${boundary.postCompactTokens} tokens`
         : "",
-      ...(summary ? { summary } : {})
+      ...(summary ? { summary } : {}),
+      ...(references.length ? { references } : {})
     }] : [];
     renderedTranscriptRows = [...compactRow, ...tui.timelineRows()];
     return renderedTranscriptRows;

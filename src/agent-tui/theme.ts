@@ -18,6 +18,8 @@ export const COLOR = {
   muted: "#a8a8a8",
   text: "#d7d7d7",
   accent: "#5fd7ff",
+  agent: "#b39ddb",
+  info: "#7cb7ff",
   warning: "#d7af5f",
   error: "#ff5f5f",
   success: "#87d75f",
@@ -45,4 +47,19 @@ export { shortToolName } from "./tool-presentation";
 export function glyphForTool(tool: string): string {
   void tool;
   return GLYPH.toolDefault;
+}
+
+export function toolFamilyColor(family: string): string {
+  switch (family) {
+    case "workspace": return COLOR.success;
+    case "recon":
+    case "http": return COLOR.info;
+    case "browser": return COLOR.accent;
+    case "knowledge": return COLOR.agent;
+    case "proxy": return COLOR.memory.endpoint;
+    case "campaign":
+    case "agent": return COLOR.memory.hypothesis;
+    case "command": return COLOR.warning;
+    default: return COLOR.text;
+  }
 }

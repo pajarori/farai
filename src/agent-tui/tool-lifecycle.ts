@@ -201,7 +201,7 @@ function shouldRenderStandalone(policy: ToolLifecyclePolicy, input: ToolLifecycl
   return input.definitionMutates === true && policy.tool !== "command_run";
 }
 
-function toolLifecycleFamily(tool: string): ToolLifecycleFamily {
+export function toolLifecycleFamily(tool: string): ToolLifecycleFamily {
   if (tool === "command_run" || tool === "command_input" || tool === "command_poll" || tool === "command_stop") return "command";
   if (WORKSPACE_TOOLS.has(tool)) return "workspace";
   if (tool === "browser_manage" || tool === "browser_context" || BROWSER_TOOLS.has(tool)) return "browser";

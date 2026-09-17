@@ -573,7 +573,7 @@ describe("projectMessagesToRows", () => {
     };
     const rows = projectMessagesToRows([message]);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ kind: "activity", label: "loaded skills offensive-research, attack-surface-mapping" });
+    expect(rows[0]).toMatchObject({ kind: "activity", label: "loaded skills · 2" });
   });
 
   test("groups repetitive campaign asset saves without hiding failures", () => {
@@ -588,7 +588,7 @@ describe("projectMessagesToRows", () => {
     };
     const rows = projectMessagesToRows([message]);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ kind: "activity", label: "saved assets praditya.dev, https://www.praditya.dev" });
+    expect(rows[0]).toMatchObject({ kind: "activity", label: "saved assets · 2" });
   });
 
   test("groups consecutive successful shell calls as one stable command activity", () => {
