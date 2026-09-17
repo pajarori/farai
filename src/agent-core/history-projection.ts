@@ -6,6 +6,11 @@ import { spotlightUntrusted } from "./context-builder";
 
 export type ProjectionOverlay = Map<string, { anchor: boolean; summary: string; chunkId: string; lane: string }>;
 
+function isLocalCommandInput(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith("/") || trimmed.startsWith("!");
+}
+
 export type HistoryProjection = {
   entries: ConversationEntry[];
   estimatedTokens: number;
@@ -51,7 +56,7 @@ export function projectConversationHistory(messages: MessageWithParts[], options
       for (const part of message.parts) {
         if (part.type !== "text") { partIndex += 1; continue; }
         const text = (part.payload as { text?: unknown }).text;
-        if (typeof text === "string" && text) entries.push({ role: "user", text, nodeId: `msg:${message.id}#${partIndex}`, lane: "user" });
+        if (typeof text === "string" && text && !isLocalCommandInput(text)) entries.push({ role: "user", text, nodeId: `msg:${message.id}#${partIndex}`, lane: "user" });
         partIndex += 1;
       }
       continue;
