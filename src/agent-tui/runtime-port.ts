@@ -809,7 +809,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     queueInput(sessionId, input) { return runtime.queueUserInput(sessionId, input); },
     takeBackQueuedInput(sessionId) { return runtime.takeBackQueuedUserInput(sessionId); },
     async inspectContext(sessionId, hypotheticalInput) {
-      return runtime.inspectContext(runtime.loadSession(sessionId), hypotheticalInput);
+      return await runtime.inspectContext(runtime.loadSession(sessionId), hypotheticalInput);
     },
     steer(sessionId, input) {
       return runtime.injectUserInput(sessionId, input);

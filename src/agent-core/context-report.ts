@@ -35,7 +35,10 @@ const CATEGORIES: Array<{ key: string; tone: ContextTone; label: string }> = [
   { key: "history", tone: "messages", label: "messages" }
 ];
 
-export function buildContextReport(manifest: ContextManifest, model: string, columns = 20, rows = 5): ContextReport {
+const CELL_TOKENS = 3_000;
+const MAX_CELLS = 1_000;
+
+export function buildContextReport(manifest: ContextManifest, model: string, columns = 20, cellTokens = CELL_TOKENS): ContextReport {
   const window = Math.max(1, manifest.contextWindow);
   const used = Math.min(window, Math.max(0, Math.round(manifest.estimatedTokens)));
   const slices: ContextSlice[] = [];
@@ -44,7 +47,7 @@ export function buildContextReport(manifest: ContextManifest, model: string, col
     if (tokens > 0) slices.push({ tone: category.tone, label: category.label, tokens, ratio: tokens / window });
   }
   const free = Math.max(0, window - used);
-  const totalCells = Math.max(1, columns * rows);
+  const totalCells = Math.max(1, Math.min(MAX_CELLS, Math.round(window / Math.max(1, cellTokens))));
   const usedCells = Math.min(totalCells, Math.round((used / window) * totalCells));
   const grid: ContextTone[] = [];
   for (const slice of slices) {

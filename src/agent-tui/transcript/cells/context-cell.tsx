@@ -80,6 +80,9 @@ export function ContextRow(props: ContextRowProps): JSX.Element {
                 <For each={grid()!}>{(tone) => (
                   <text fg={toneColor(tone)}>{tone === "free" ? "⛶ " : "⛁ "}</text>
                 )}</For>
+                <Show when={grid()!.length < columns()}>
+                  <text>{" ".repeat((columns() - grid()!.length) * 2)}</text>
+                </Show>
               </Show>
               <Show when={line()}>
                 <text>{"  "}</text>

@@ -125,10 +125,10 @@ export async function resolveModelSelection(workspace: string, selection?: strin
   if (selection === HEURISTIC_MODEL_ID) return { baseUrl: resolveModel().baseUrl, model: HEURISTIC_MODEL_ID };
   if (selection) {
     const selected = (await buildModelCatalog(workspace)).models.find((model) => model.id === selection);
-    if (selected) return withSavedModelLimits(modelChoiceToResolved(selected), selection, workspace);
+    if (selected) return withModelsDevLimits(withSavedModelLimits(modelChoiceToResolved(selected), selection, workspace), selection, workspace);
     const profileResolved = await resolveProfileAsync(loadModelProfiles(workspace), selection);
-    if (profileResolved?.model) return withSavedModelLimits(profileResolved as ConcreteResolvedModel, selection, workspace);
-    return withSavedModelLimits(ensureConcrete(resolveModel({ model: selection })), selection, workspace);
+    if (profileResolved?.model) return withModelsDevLimits(withSavedModelLimits(profileResolved as ConcreteResolvedModel, selection, workspace), selection, workspace);
+    return withModelsDevLimits(withSavedModelLimits(ensureConcrete(resolveModel({ model: selection })), selection, workspace), selection, workspace);
   }
   return resolveDefaultCatalogModel(workspace);
 }
@@ -457,6 +457,19 @@ export async function lookupModelsDevLimits(model: string, providerHint?: string
     canonicalModel: selected.entry.id,
     contextWindow: selected.entry.limit!.context!,
     ...(selected.entry.limit?.output ? { maxOutputTokens: selected.entry.limit.output } : {})
+  };
+}
+
+async function withModelsDevLimits(resolved: ConcreteResolvedModel, selection: string, workspace: string): Promise<ConcreteResolvedModel> {
+  if (resolved.contextWindow) return resolved;
+  const profile = resolveProfile(loadModelProfiles(workspace), selection);
+  const lookupModel = resolved.model ?? profile?.model ?? selection;
+  const fetched = await lookupModelsDevLimits(lookupModel, profile ? selection : undefined, resolved.baseUrl ?? profile?.baseUrl);
+  if (!fetched?.contextWindow) return resolved;
+  return {
+    ...resolved,
+    contextWindow: fetched.contextWindow,
+    ...(resolved.maxOutputTokens ? {} : fetched.maxOutputTokens ? { maxOutputTokens: fetched.maxOutputTokens } : {})
   };
 }
 

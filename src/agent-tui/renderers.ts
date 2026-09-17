@@ -782,9 +782,7 @@ function activityLabel(rows: ToolTimelineRow[], active: boolean): string {
   const verb = active ? presentation.groupActive ?? "running" : presentation.groupPast ?? "ran";
   const [action = verb, qualifier] = verb.split(" · ", 2);
   if (presentation.groupNoun) {
-    const names = rows.flatMap((row) => row.presentation.groupItem ? [row.presentation.groupItem] : []).filter((name, index, values) => values.indexOf(name) === index);
-    const listed = names.slice(0, 5).join(", ");
-    return `${action} ${listed || `${count} ${presentation.groupNoun}${count === 1 ? "" : "s"}`}${names.length > 5 ? `, +${names.length - 5}` : ""}`;
+    return `${action} · ${count}${qualifier ? ` · ${qualifier}` : ""}`;
   }
   return `${action} ${count} ${presentation.noun}${count === 1 ? "" : "s"}${qualifier ? ` · ${qualifier}` : ""}`;
 }

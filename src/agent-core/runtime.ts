@@ -3872,7 +3872,7 @@ export class AgentRuntime {
       return text;
     }
     if (command === "/context") {
-      const report = buildContextReport(this.inspectContext(session), session.model ?? "");
+      const report = buildContextReport(await this.inspectContext(session), session.model ?? "");
       this.store.addPart({ sessionId: session.id, turnId: turn.id, messageId: assistantMessage.id, type: "artifact", payload: { kind: "context_report", report } });
       return "";
     }
@@ -4053,13 +4053,15 @@ export class AgentRuntime {
     return this.toolOperationDrain;
   }
 
-  inspectContext(session: Session, hypotheticalInput?: string): ContextManifest {
+  async inspectContext(session: Session, hypotheticalInput?: string): Promise<ContextManifest> {
+    const current = this.store.loadSession(session.id);
+    const planner = this.planner ?? await createPlannerForSessionAsync(current, this.workspace);
     return this.assembleContext({
-      session: this.store.loadSession(session.id),
+      session: current,
       ...(hypotheticalInput?.trim() ? { userText: hypotheticalInput.trim() } : {}),
-      availableTools: listToolsForSession(session),
-      contextWindow: resolveContextWindow(this.planner?.contextWindow),
-      maxOutputTokens: resolveMaxOutputTokens(this.planner?.maxOutputTokens),
+      availableTools: listToolsForSession(current),
+      contextWindow: resolveContextWindow(planner.contextWindow),
+      maxOutputTokens: resolveMaxOutputTokens(planner.maxOutputTokens),
       ...this.contextBudgetInput()
     }).manifest;
   }

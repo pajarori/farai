@@ -164,7 +164,8 @@ export function ActivityRow(props: ActivityRowProps): JSX.Element {
         <box style={{ flexDirection: "column", paddingLeft: 2 }} {...toggleClick}>
           <For each={props.row.items}>{(item, index) => {
             const presentation = () => item.presentation ?? presentToolActivity(item);
-            const pair = () => fitTerminalPair(presentation().compact, presentation().showOutcome !== false ? presentation().outcome ?? "" : "", width(), 8, 3);
+            const compact = () => presentation().groupItem ?? presentation().compact;
+            const pair = () => fitTerminalPair(compact(), presentation().showOutcome !== false ? presentation().outcome ?? "" : "", width(), 8, 3);
             return (
               <box style={{ flexDirection: "row" }}>
                 <text fg={COLOR.dim}>{index() === 0 ? "└ " : "  "}</text>
