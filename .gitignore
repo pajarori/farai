@@ -3,6 +3,7 @@ research/
 .git.old/
 test/
 test/*.ts
+test/*
 .farai/*
 .local/
 artifacts/
@@ -17,3 +18,4 @@ dist/
 !src/agent-skills/library/
 !src/agent-skills/library/**/
 !src/agent-skills/library/**/SKILL.md
+test/tui-renderers.test.ts
