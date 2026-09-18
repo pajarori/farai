@@ -22,8 +22,8 @@ export function buildDnsProbeCommand(args: Record<string, unknown>): string {
   const resolvers = optionalStringList(args.resolvers, "resolvers", 100);
   const queries = names.flatMap((name) => recordTypes.map((type) => `${name} ${type.toUpperCase()}`));
   const queryLines = queries.map(shellQuote).join(" ");
-  const fixed = ["dig", "+noall", "+answer", "+nocomments", "+tries=1", `+time=${timeout}`].join(" ");
-  const server = resolvers[0] ? ` ${shellQuote(`@${resolvers[0]}`)}` : "";
+  const fixed = ["dig", "+noall", "+answer", "+nocomments", "+tries=2", `+time=${timeout}`].join(" ");
+  const server = ` ${shellQuote(`@${resolvers[0] ?? "1.1.1.1"}`)}`;
   return [
     'file="$(mktemp /tmp/farai-dig.XXXXXX)" || exit 1',
     'trap \'rm -f "$file"\' EXIT',
@@ -57,14 +57,14 @@ export function parseDnsProbeOutput(raw: string): { records: DnsProbeRecord[]; m
 
 export const dnsProbeTool: ToolDefinition = {
   name: "dns_resolve",
-  description: "Resolve one or many hostnames with dig using selected DNS record types and optional custom resolver. Returns answer records grouped by name (following CNAME targets as their own entries). Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
+  description: "Resolve one or many hostnames with dig using selected DNS record types. Queries the public resolver 1.1.1.1 by default (the container's own resolver is unreliable); pass resolvers to override for internal names. Returns answer records grouped by name (following CNAME targets as their own entries). Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
   inputSchema: {
     type: "object",
     required: ["names"],
     properties: {
       names: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2_000, uniqueItems: true }] },
       recordTypes: { type: "array", items: { type: "string", enum: [...DNS_RECORD_TYPES] }, maxItems: DNS_RECORD_TYPES.length, uniqueItems: true },
-      resolvers: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }], description: "optional custom resolver; the first entry is passed to dig as @resolver" },
+      resolvers: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }], description: "optional custom resolver passed to dig as @resolver; defaults to the public resolver 1.1.1.1 because the container's default resolver is unreliable. set an internal resolver here for internal-only names" },
       timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 }
     },
     additionalProperties: false

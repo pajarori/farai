@@ -157,9 +157,9 @@ export class SqliteStore {
     const db = new Database(file, { create: true });
     try {
       ensurePrivateRegularFileIfExists(file, "farai database path");
+      db.exec("PRAGMA busy_timeout = 5000;");
       db.exec("PRAGMA journal_mode = WAL;");
       db.exec("PRAGMA foreign_keys = ON;");
-      db.exec("PRAGMA busy_timeout = 5000;");
       this.migrate(db);
       ensurePrivateSqlitePath(file, "farai database path");
       this.db = db;
