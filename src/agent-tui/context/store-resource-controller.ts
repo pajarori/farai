@@ -325,6 +325,19 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     containerToggles.clear();
   }
 
+  async function openSubagentsOverlay(): Promise<void> {
+    actions.overlayOpen("subagents");
+    try {
+      const [lanes, toolNames] = await Promise.all([port.listLanes(), port.listToolNames()]);
+      if (store.ui.overlayStack.at(-1)?.kind === "subagents") {
+        actions.lanesSet(lanes);
+        actions.toolNamesSet(toolNames);
+      }
+    } catch (error) {
+      if (store.ui.overlayStack.at(-1)?.kind === "subagents") actions.errorSet(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   return {
     refreshSessionMcp,
     refreshContainerStatus,
@@ -337,6 +350,7 @@ export function createStoreResourceController(input: StoreResourceControllerInpu
     openAgentsOverlay,
     openMcpOverlay,
     openEmailOverlay,
+    openSubagentsOverlay,
     toggleContainer,
     dispose
   };

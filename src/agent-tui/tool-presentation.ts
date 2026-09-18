@@ -91,6 +91,8 @@ const ACTIVE_ACTIONS: Record<string, string> = {
 };
 
 const TOOL_ACTIONS: Record<string, readonly [past: string, active: string]> = {
+  command_run: ["ran", "executing"],
+  command_input: ["sent input", "sending input"],
   agent_manage: ["managed agents", "managing agents"],
   browser_manage: ["managed browser", "managing browser"],
   callback_manage: ["managed callbacks", "managing callbacks"],

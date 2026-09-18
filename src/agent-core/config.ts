@@ -25,6 +25,7 @@ export type FaraiConfig = {
   maxSteps?: number;
   maxTurnSeconds?: number;
   maxCostUsd?: number;
+  pinnedSkills?: string[];
   recentModels?: string[];
   modelLimits?: Record<string, FaraiModelLimitConfig>;
   modelProviders?: Record<string, Record<string, unknown>>;
@@ -149,6 +150,7 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
   const email = providerMap(raw.email_accounts ?? raw.emailAccounts);
   const modelLimits = modelLimitMap(raw.model_limits ?? raw.modelLimits);
   const recent = raw.recent_models ?? raw.recentModels;
+  const pinnedSkills = raw.pinned_skills ?? raw.pinnedSkills;
   const proxy = proxyConfig(raw.proxy);
   const context = contextConfig(raw.context);
   const lsp = lspConfig(raw.lsp);
@@ -166,6 +168,7 @@ export function normalizeConfig(raw: unknown): FaraiConfig {
     ...(positiveNumber(raw.max_turn_seconds ?? raw.maxTurnSeconds) ? { maxTurnSeconds: positiveNumber(raw.max_turn_seconds ?? raw.maxTurnSeconds)! } : {}),
     ...(positiveNumber(raw.max_cost_usd ?? raw.maxCostUsd) ? { maxCostUsd: positiveNumber(raw.max_cost_usd ?? raw.maxCostUsd)! } : {}),
     ...(Array.isArray(recent) ? { recentModels: recent.filter((item): item is string => typeof item === "string") } : {}),
+    ...(Array.isArray(pinnedSkills) ? { pinnedSkills: [...new Set(pinnedSkills.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()))] } : {}),
     ...(modelLimits ? { modelLimits } : {}),
     ...(providers ? { modelProviders: providers } : {}),
     ...(mcp ? { mcpServers: mcp } : {}),
@@ -300,6 +303,7 @@ export function mergeConfig(base: FaraiConfig, over: FaraiConfig): FaraiConfig {
     ...over,
     ...(over.model ?? base.model ? { model: over.model ?? base.model } : {}),
     ...(over.recentModels ?? base.recentModels ? { recentModels: over.recentModels ?? base.recentModels } : {}),
+    ...(base.pinnedSkills || over.pinnedSkills ? { pinnedSkills: [...new Set([...(base.pinnedSkills ?? []), ...(over.pinnedSkills ?? [])])] } : {}),
     ...(base.modelLimits || over.modelLimits ? { modelLimits: { ...base.modelLimits, ...over.modelLimits } } : {}),
     ...(base.modelProviders || over.modelProviders ? { modelProviders: { ...base.modelProviders, ...over.modelProviders } } : {}),
     ...(base.mcpServers || over.mcpServers ? { mcpServers: { ...base.mcpServers, ...over.mcpServers } } : {}),
@@ -338,6 +342,7 @@ export function serializeConfigToml(config: FaraiConfig): string {
   if (config.configVersion !== undefined) lines.push(`config_version = ${config.configVersion}`);
   if (config.model) lines.push(`model = ${tomlString(config.model)}`);
   if (config.recentModels?.length) lines.push(`recent_models = ${tomlArray(config.recentModels)}`);
+  if (config.pinnedSkills?.length) lines.push(`pinned_skills = ${tomlArray(config.pinnedSkills)}`);
   if (config.contextWindow) lines.push(`context_window = ${config.contextWindow}`);
   if (config.maxOutputTokens) lines.push(`max_output_tokens = ${config.maxOutputTokens}`);
   if (config.maxSteps) lines.push(`max_steps = ${config.maxSteps}`);

@@ -12,6 +12,7 @@ import { createOverlaySelection } from "./overlay-selection";
 import { createModelProviderController } from "./model-provider-controller";
 import { createMcpServerController } from "./mcp-server-controller";
 import { createEmailAccountController } from "./email-account-controller";
+import { createLaneController } from "./lane-controller";
 import { createRequestUserInputController } from "./request-user-input-controller";
 import { createCenterSurfaceController } from "./center-surface-controller";
 import { createOverlayController } from "./overlay-controller";
@@ -44,6 +45,7 @@ export function KeyboardController(): JSX.Element {
   const modelProvider = createModelProviderController({ tui, port, selection: overlaySelection, isDisposed: () => disposed });
   const mcpServer = createMcpServerController({ tui, port, selection: overlaySelection, isDisposed: () => disposed });
   const emailAccount = createEmailAccountController({ tui, port, selection: overlaySelection, isDisposed: () => disposed });
+  const lane = createLaneController({ tui, port, selection: overlaySelection, isDisposed: () => disposed });
   const requestUserInput = createRequestUserInputController(tui, () => composer.focus());
   const centerSurface = createCenterSurfaceController({ tui, port, captureOwner: captureSessionOwner, owns: ownsSession });
   const composerActions = createComposerController({
@@ -69,7 +71,9 @@ export function KeyboardController(): JSX.Element {
     owns: ownsSession,
     openModelProvider: modelProvider.openAdd,
     openMcpServer: mcpServer.openAdd,
-    openEmailAccount: emailAccount.openAdd
+    openEmailAccount: emailAccount.openAdd,
+    openLaneAdd: lane.openAdd,
+    openLaneEdit: lane.openEdit
   });
   let modelOverlayKey: string | undefined;
   let mcpOverlayKey: string | undefined;
@@ -125,7 +129,8 @@ export function KeyboardController(): JSX.Element {
       terminalHeight: dims().height,
       ...(top?.kind === "model" ? { modelOverlay: overlaySelection.modelContext() } : {}),
       ...(top?.kind === "mcp" ? { mcpOverlay: overlaySelection.mcpContext() } : {}),
-      ...(top?.kind === "email" ? { emailOverlay: overlaySelection.emailContext() } : {})
+      ...(top?.kind === "email" ? { emailOverlay: overlaySelection.emailContext() } : {}),
+      ...(top?.kind === "subagents" ? { subagentsOverlay: overlaySelection.laneContext() } : {})
     }));
     if (routed.type === "passthrough") return;
     event.preventDefault();
@@ -151,6 +156,7 @@ export function KeyboardController(): JSX.Element {
     modelProvider.dispose();
     mcpServer.dispose();
     emailAccount.dispose();
+    lane.dispose();
   });
 
   function dispatchAction(action: RouterAction): void {
@@ -318,6 +324,42 @@ export function KeyboardController(): JSX.Element {
         return;
       case "mcp.removeServer":
         mcpServer.requestRemoval();
+        return;
+      case "lane.next":
+        await lane.next();
+        return;
+      case "lane.back":
+        lane.back();
+        return;
+      case "lane.toolMove":
+        lane.moveTool(action.delta);
+        return;
+      case "lane.toolToggle":
+        lane.toggleTool();
+        return;
+      case "lane.toolSelectAll":
+        lane.selectAllTools();
+        return;
+      case "lane.toolFilterAppend":
+        lane.filterAppend(action.char);
+        return;
+      case "lane.toolFilterBackspace":
+        lane.filterBackspace();
+        return;
+      case "laneRemoval.confirm":
+        await lane.confirmRemoval();
+        return;
+      case "laneRemoval.cancel":
+        lane.cancelRemoval();
+        return;
+      case "subagents.add":
+        lane.openAdd();
+        return;
+      case "subagents.edit":
+        lane.openEdit();
+        return;
+      case "subagents.remove":
+        lane.requestRemoval();
         return;
       case "composer.submit":
         await composerActions.submit();

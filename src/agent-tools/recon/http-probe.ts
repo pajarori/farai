@@ -43,11 +43,32 @@ export type HttpProbeRecord = JsonRecord & {
 
 export type HttpProbeMode = "fast" | "detail";
 
-export function buildFastHttpProbeCommand(args: Record<string, unknown>): string {
-  const targets = stringList(args.targets, "targets");
+function hasScheme(target: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(target);
+}
+
+function probeSchemes(args: Record<string, unknown>): string[] {
+  if (!Array.isArray(args.schemes)) return ["https"];
+  const schemes = [...new Set(args.schemes.filter((item): item is string => item === "https" || item === "http"))];
+  return schemes.length ? schemes : ["https"];
+}
+
+function fastProbeTargets(args: Record<string, unknown>): string[] {
+  const schemes = probeSchemes(args);
+  return stringList(args.targets, "targets").flatMap((target) => hasScheme(target) ? [target] : schemes.map((scheme) => `${scheme}://${target}`));
+}
+
+export function fastHttpProbeBudgetMs(args: Record<string, unknown>): number {
   const timeoutSeconds = integer(args.timeoutSeconds, 3, 1, 15);
   const concurrency = integer(args.concurrency, 100, 1, 200);
-  const probeTargets = targets.flatMap((target) => /^[a-z][a-z0-9+.-]*:\/\//i.test(target) ? [target] : [`https://${target}`, `http://${target}`]);
+  const waves = Math.max(1, Math.ceil(fastProbeTargets(args).length / concurrency));
+  return Math.min(28_000, Math.max(8_000, waves * timeoutSeconds * 1_000 + 6_000));
+}
+
+export function buildFastHttpProbeCommand(args: Record<string, unknown>): string {
+  const timeoutSeconds = integer(args.timeoutSeconds, 3, 1, 15);
+  const concurrency = integer(args.concurrency, 100, 1, 200);
+  const probeTargets = fastProbeTargets(args);
   const configLines = probeTargets.flatMap((target) => [
     `url = "${curlConfigQuote(target)}"`,
     'output = "/dev/null"',
@@ -137,7 +158,7 @@ export function selectFastHttpProbeRecords(records: HttpProbeRecord[]): HttpProb
 
 export const httpProbeTool: ToolDefinition = {
   name: "service_probe",
-  description: "Probe one or many hosts, IPs, or URLs with a lightweight concurrent HTTP probe and return normalized live service records. The default fast mode returns status, content type, response size, address, and timing; detail mode uses ProjectDiscovery httpx for page title, server, technology, ASN, CDN/WAF, redirect, and TLS enrichment. Use this after subdomain or port discovery; use browser tools for interactive state and http_request for one exact protocol request.",
+  description: "Probe one or many hosts, IPs, or URLs with a lightweight concurrent HTTP probe and return normalized live service records. Fast mode (default) tries https only for bare hosts and returns status, content type, response size, address, and timing; pass schemes:[\"https\",\"http\"] to also probe http. Detail mode uses ProjectDiscovery httpx for page title, server, technology, ASN, CDN/WAF, redirect, and TLS enrichment. Use this after subdomain or port discovery; use browser tools for interactive state and http_request for one exact protocol request.",
   inputSchema: {
     type: "object",
     required: ["targets"],
@@ -145,6 +166,7 @@ export const httpProbeTool: ToolDefinition = {
       targets: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 500, uniqueItems: true }] },
       mode: { type: "string", enum: ["fast", "detail"] },
       ports: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }] },
+      schemes: { type: "array", items: { type: "string", enum: ["https", "http"] }, minItems: 1, maxItems: 2, uniqueItems: true, description: "schemes to try for bare hosts; defaults to https only for speed, pass [\"https\",\"http\"] to also probe http" },
       redirects: { type: "string", enum: ["none", "same_host", "all"] },
       includeTls: { type: "boolean" },
       headers: { type: "object", additionalProperties: { type: "string" } },
@@ -164,7 +186,7 @@ export const httpProbeTool: ToolDefinition = {
     assertObject(args, "args");
     const kali = backend(context);
     const detail = args.mode === "detail";
-    const result = await kali.exec(buildHttpProbeCommand(args), detail ? 25_000 : 8_000, context.signal, 16_000_000);
+    const result = await kali.exec(buildHttpProbeCommand(args), detail ? 25_000 : fastHttpProbeBudgetMs(args), context.signal, 16_000_000);
     const converted = timeoutBackgroundResult("service_probe", kali, result);
     if (converted) return converted;
     const parsed = detail ? parseHttpProbeOutput(result.stdout) : parseFastHttpProbeOutput(result.stdout);

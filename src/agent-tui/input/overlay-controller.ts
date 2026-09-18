@@ -1,7 +1,7 @@
 import { rememberModelSelection } from "../../agent-core/model-catalog";
 import type { Command, CommandContext } from "../command-registry";
 import type { TuiStoreValue } from "../context/store";
-import type { EmailChoice, McpChoice, ModelChoice } from "../overlay-options";
+import type { EmailChoice, LaneChoice, McpChoice, ModelChoice } from "../overlay-options";
 import type { AgentThreadSummary, TuiRuntimePort } from "../runtime-port";
 import type { OverlayKind } from "./router";
 import type { OverlaySelection } from "./overlay-selection";
@@ -18,6 +18,8 @@ type OverlayControllerInput = {
   openModelProvider(): void;
   openMcpServer(): void;
   openEmailAccount?(): void;
+  openLaneAdd?(): void;
+  openLaneEdit?(): void;
   rememberModel?(model: string, options: Parameters<typeof rememberModelSelection>[1]): Promise<void>;
 };
 
@@ -125,6 +127,12 @@ export function createOverlayController(input: OverlayControllerInput) {
       case "email": {
         const choice = option.value as EmailChoice;
         if (choice.kind === "email_action") input.openEmailAccount?.();
+        return;
+      }
+      case "subagents": {
+        const choice = option.value as LaneChoice;
+        if (choice.kind === "lane_action") input.openLaneAdd?.();
+        else if (choice.editable) input.openLaneEdit?.();
         return;
       }
       case "model": {

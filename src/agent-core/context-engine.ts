@@ -2,7 +2,8 @@ import { basename, extname, join } from "node:path";
 import type { SqliteStore } from "../agent-store/sqlite-store";
 import type { CampaignRun, FileStateStore, Session, ToolDefinition } from "../types";
 import { canonicalToolName } from "../tool-names";
-import { renderSkillCatalog } from "../agent-skills/registry";
+import { renderPinnedSkills, renderSkillCatalog } from "../agent-skills/registry";
+import { loadConfig } from "./config";
 import { activeBackgroundJobs } from "./loop/background";
 import { autoCompactThreshold, buildCompactedHistory } from "../agent-context/summary-runner";
 import { buildToolsPayload, estimateProviderMessagesTokens, toProviderMessages, type ConversationEntry } from "./provider";
@@ -16,6 +17,7 @@ import { ContextSearchIndex } from "./context-index";
 import { takeBytes } from "../agent-tools/shared/output-bound";
 import { renderKaliCommandCatalog } from "./kali-command-catalog";
 import { containerWorkspacePath } from "../agent-container/kali";
+import { loadLanes } from "./subagents/lanes";
 import { CVSS31_METRIC_GUIDANCE } from "../security/cvss31-guidance";
 
 export type ContextClass = "kernel" | "instructions" | "working_set" | "retrieved" | "ephemeral" | "history" | "capabilities";
@@ -359,6 +361,38 @@ export class ContextEngine {
       mandatory: true,
       stable: true,
       priority: 95,
+      relevance: 1
+    }));
+
+    const pinnedNames = this.skillsEnabled && canLoadSkills ? loadConfig(workspace).pinnedSkills ?? [] : [];
+    const pinnedSkills = pinnedNames.length ? renderPinnedSkills(workspace, pinnedNames) : undefined;
+    if (pinnedSkills) candidates.push(candidate({
+      id: "pinned-skills",
+      class: "instructions",
+      title: "Pinned Skills",
+      source: "agent-skills registry (pinned)",
+      content: pinnedSkills,
+      mandatory: true,
+      stable: true,
+      priority: 98,
+      relevance: 1
+    }));
+
+    const canDelegate = !session.toolScope?.length || session.toolScope.some((name) => canonicalToolName(name) === "agent_manage");
+    const lanes = canDelegate ? loadLanes(workspace) : [];
+    if (lanes.length) candidates.push(candidate({
+      id: "subagent-lanes",
+      class: "capabilities",
+      title: "Available Subagent Lanes",
+      source: "subagent role registry",
+      content: [
+        "Delegate whole units of work to subagents (agent_manage): a multi-step objective, specialist work, or something that can run in parallel — pick the matching lane below when one fits, otherwise a plain child. Do not spawn a child just to run one tool (run a single slow tool in the background instead). Keep this thread as the orchestrator that plans, dispatches non-overlapping work in parallel, and owns synthesis. Lanes carry a role prompt and tool scope.",
+        "Available lanes:",
+        ...lanes.map((lane) => `- ${lane.id}: ${lane.description ?? "custom lane"}`)
+      ].join("\n"),
+      mandatory: false,
+      stable: true,
+      priority: 94,
       relevance: 1
     }));
 

@@ -11,6 +11,7 @@ export type OverlayKind =
   | "model"
   | "mcp"
   | "email"
+  | "subagents"
   | "detail"
   | "report"
   | "container";
@@ -26,7 +27,8 @@ const LIST_OVERLAYS: ReadonlySet<OverlayKind> = new Set([
   "agents",
   "model",
   "mcp",
-  "email"
+  "email",
+  "subagents"
 ]);
 
 export function isListOverlay(kind: OverlayKind): boolean {
@@ -135,7 +137,19 @@ export type RouterAction =
   | { kind: "email.test" }
   | { kind: "email.remove" }
   | { kind: "email.primary" }
-  | { kind: "email.secondary" };
+  | { kind: "email.secondary" }
+  | { kind: "lane.next" }
+  | { kind: "lane.back" }
+  | { kind: "lane.toolMove"; delta: number }
+  | { kind: "lane.toolToggle" }
+  | { kind: "lane.toolSelectAll" }
+  | { kind: "lane.toolFilterAppend"; char: string }
+  | { kind: "lane.toolFilterBackspace" }
+  | { kind: "laneRemoval.confirm" }
+  | { kind: "laneRemoval.cancel" }
+  | { kind: "subagents.add" }
+  | { kind: "subagents.edit" }
+  | { kind: "subagents.remove" };
 
 export type RouteResult =
   | { type: "consumed"; actions: RouterAction[] }
@@ -191,6 +205,18 @@ export type RouterContext = {
   };
   emailAccountRemoval?: {
     busy: boolean;
+  };
+  laneWizard?: {
+    field: "id" | "description" | "prompt" | "tools" | "model" | "review";
+    busy: boolean;
+  };
+  laneRemoval?: {
+    busy: boolean;
+  };
+  subagentsOverlay?: {
+    laneId?: string;
+    editable: boolean;
+    removable: boolean;
   };
   modelOverlay?: {
     providerID?: string;
@@ -273,9 +299,11 @@ export function routeKey(key: KeyToken, ctx: RouterContext): RouteResult {
   if (ctx.mcpServerWizard) return routeMcpServerWizard(key, ctx.mcpServerWizard);
   if (ctx.modelProviderRemoval) return routeModelProviderRemoval(key, ctx.modelProviderRemoval);
   if (ctx.modelProviderWizard) return routeModelProviderWizard(key, ctx.modelProviderWizard);
+  if (ctx.laneRemoval) return routeLaneRemoval(key, ctx.laneRemoval);
+  if (ctx.laneWizard) return routeLaneWizard(key, ctx.laneWizard);
   if (ctx.pendingUserInput && key.ctrl && key.name === "q") return consumed({ kind: "requestUserInput.show" });
   if (ctx.requestUserInput) return routeRequestUserInput(key, ctx.requestUserInput);
-  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay, ctx.mcpOverlay, ctx.emailOverlay);
+  if (ctx.overlayKind) return routeOverlay(key, ctx.overlayKind, ctx.modelOverlay, ctx.mcpOverlay, ctx.emailOverlay, ctx.subagentsOverlay);
   if (ctx.centerSurfaceKind) return routeCenterSurface(key, ctx.centerSurfaceKind, ctx.centerProxyFlowKind, ctx.centerSurfaceBusy);
   if (ctx.historySearchActive) return routeHistorySearch(key);
   if (slashActive(ctx)) {
@@ -431,6 +459,38 @@ function routeModelProviderWizard(key: KeyToken, state: NonNullable<RouterContex
   return PASSTHROUGH;
 }
 
+function routeLaneRemoval(key: KeyToken, state: NonNullable<RouterContext["laneRemoval"]>): RouteResult {
+  if (state.busy) return consumed();
+  if (key.name === "return") return consumed({ kind: "laneRemoval.confirm" });
+  if (key.name === "escape" || (key.ctrl && key.name === "c")) return consumed({ kind: "laneRemoval.cancel" });
+  return consumed();
+}
+
+function routeLaneWizard(key: KeyToken, state: NonNullable<RouterContext["laneWizard"]>): RouteResult {
+  if (state.busy) return consumed();
+  if (key.name === "escape") return consumed({ kind: "lane.back" });
+  if (state.field === "tools") {
+    if (key.ctrl && key.name === "a") return consumed({ kind: "lane.toolSelectAll" });
+    if (key.name === "up") return consumed({ kind: "lane.toolMove", delta: -1 });
+    if (key.name === "down") return consumed({ kind: "lane.toolMove", delta: 1 });
+    if (key.name === "space" || key.char === " ") return consumed({ kind: "lane.toolToggle" });
+    if (key.name === "return") return consumed({ kind: "lane.next" });
+    if (key.name === "backspace") return consumed({ kind: "lane.toolFilterBackspace" });
+    if (key.char && !key.ctrl && !key.meta) return consumed({ kind: "lane.toolFilterAppend", char: key.char });
+    return consumed();
+  }
+  if (state.field === "prompt") {
+    if (key.ctrl && key.name === "s") return consumed({ kind: "lane.next" });
+    return PASSTHROUGH;
+  }
+  if (state.field === "review") {
+    if (key.name === "return") return consumed({ kind: "lane.next" });
+    return consumed();
+  }
+  if (key.name === "return") return consumed({ kind: "lane.next" });
+  return PASSTHROUGH;
+}
+
 function routeRequestUserInput(key: KeyToken, state: NonNullable<RouterContext["requestUserInput"]>): RouteResult {
   if (state.submitting) return consumed();
   if (key.ctrl && key.name === "c") return consumed({ kind: "requestUserInput.dismiss" });
@@ -466,7 +526,7 @@ function routeRequestUserInput(key: KeyToken, state: NonNullable<RouterContext["
   }
 }
 
-function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["modelOverlay"], mcp?: RouterContext["mcpOverlay"], email?: RouterContext["emailOverlay"]): RouteResult {
+function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["modelOverlay"], mcp?: RouterContext["mcpOverlay"], email?: RouterContext["emailOverlay"], subagents?: RouterContext["subagentsOverlay"]): RouteResult {
   if (key.ctrl && key.name === "c") return consumed({ kind: "overlay.pop" });
   if (key.name === "escape") return consumed({ kind: "overlay.pop" });
 
@@ -491,6 +551,11 @@ function routeOverlay(key: KeyToken, kind: OverlayKind, model?: RouterContext["m
       if (key.name === "e" && mcp?.serverID) return consumed({ kind: "mcp.editServer" });
       if (key.name === "x" && mcp?.serverID && mcp.toggleable) return consumed({ kind: "mcp.toggleServer" });
       if (key.name === "d" && mcp?.serverID && mcp.removable) return consumed({ kind: "mcp.removeServer" });
+    }
+    if (kind === "subagents" && key.ctrl) {
+      if (key.name === "a") return consumed({ kind: "subagents.add" });
+      if (key.name === "e" && subagents?.editable) return consumed({ kind: "subagents.edit" });
+      if (key.name === "d" && subagents?.removable) return consumed({ kind: "subagents.remove" });
     }
     if (kind === "agents" && (key.name === "space" || key.char === " ")) {
       return consumed({ kind: "overlay.agentPreview" });

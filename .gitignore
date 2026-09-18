@@ -2,6 +2,7 @@ research/
 .claude/
 .git.old/
 test/
+test/*.ts
 .farai/*
 .local/
 artifacts/

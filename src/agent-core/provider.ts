@@ -286,12 +286,15 @@ export function actionsFromMessage(message: AssembledMessage): PlannerAction[] {
       const args = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
       actions.push({ kind: "tool", tool: name, args, rationale: "", ...(call.id ? { toolCallId: call.id } : {}) });
     } catch (error) {
+      const baseError = error instanceof Error ? error.message : String(error);
       actions.push({
         kind: "tool_parse_error",
         tool: name,
         toolCallId: call.id ?? name,
         rawArguments: raw,
-        error: error instanceof Error ? error.message : String(error)
+        error: isProviderIncompleteFinishReason(finishReason)
+          ? `${baseError} (the provider truncated the response before the tool arguments finished, finish_reason=${finishReason ?? "unknown"}; retry or switch model)`
+          : baseError
       });
     }
   }

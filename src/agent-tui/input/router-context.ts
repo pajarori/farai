@@ -14,6 +14,7 @@ type RouterContextInput = {
   modelOverlay?: RouterContext["modelOverlay"];
   mcpOverlay?: RouterContext["mcpOverlay"];
   emailOverlay?: RouterContext["emailOverlay"];
+  subagentsOverlay?: RouterContext["subagentsOverlay"];
 };
 
 export function buildRouterContext(input: RouterContextInput): RouterContext {
@@ -77,8 +78,11 @@ export function buildRouterContext(input: RouterContextInput): RouterContext {
       }
     } : {}),
     ...(tui.store.ui.emailAccountRemoval ? { emailAccountRemoval: { busy: tui.store.ui.emailAccountRemoval.busy } } : {}),
+    ...(tui.store.ui.laneWizard ? { laneWizard: { field: tui.store.ui.laneWizard.field, busy: tui.store.ui.laneWizard.busy } } : {}),
+    ...(tui.store.ui.laneRemoval ? { laneRemoval: { busy: tui.store.ui.laneRemoval.busy } } : {}),
     ...(input.modelOverlay ? { modelOverlay: input.modelOverlay } : {}),
     ...(input.mcpOverlay ? { mcpOverlay: input.mcpOverlay } : {}),
-    ...(input.emailOverlay ? { emailOverlay: input.emailOverlay } : {})
+    ...(input.emailOverlay ? { emailOverlay: input.emailOverlay } : {}),
+    ...(input.subagentsOverlay ? { subagentsOverlay: input.subagentsOverlay } : {})
   };
 }

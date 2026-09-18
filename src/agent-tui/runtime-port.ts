@@ -36,6 +36,8 @@ import { HEURISTIC_MODEL_ID } from "../agent-core/model-registry";
 import type { ContextManifest } from "../agent-core/context-engine";
 import { browserContextManager, type BrowserContextActivity } from "../agent-tools/browser/context-manager";
 import { listConfiguredMcpServers, removeMcpServer, saveMcpServer, setMcpServerEnabled, type McpServerInfo, type SaveMcpServerInput } from "../agent-core/mcp-server-management";
+import { listLanes, removeLane, saveLane, type LaneInfo, type SaveLaneInput } from "../agent-core/subagents/lane-management";
+import { listTools } from "../agent-tools/registry";
 import { listEmailAccounts, probeEmailAccount, removeEmailAccount, saveEmailAccount } from "../agent-email/accounts";
 import { emailOAuthProvider } from "../agent-email/oauth-providers";
 import { authorizeEmailOAuthDeviceCode, authorizeEmailOAuthLoopback, type DeviceCodePrompt, type EmailOAuthClient } from "../agent-email/oauth";
@@ -207,6 +209,10 @@ export interface TuiRuntimePort {
   startMcpServer(serverID: string): Promise<McpServerRuntimeStatus>;
   stopMcpServer(serverID: string): Promise<McpServerRuntimeStatus>;
   invokeMcpPrompt(sessionId: string, server: string, prompt: string, args: string[]): Promise<string>;
+  listLanes(): Promise<LaneInfo[]>;
+  listToolNames(): Promise<string[]>;
+  saveLane(input: SaveLaneInput): Promise<LaneInfo[]>;
+  removeLane(id: string): Promise<LaneInfo[]>;
   startContainer(): Promise<void>;
   stopContainer(): Promise<void>;
   loadSnapshot(sessionId: string): Promise<SessionSnapshot>;
@@ -748,6 +754,20 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
         servers: await listConfiguredMcpServers(runtime.workspace),
         statuses: listMcpServerStatuses(activeSessionId)
       };
+    },
+    async listLanes() {
+      return listLanes(runtime.workspace);
+    },
+    async listToolNames() {
+      return [...new Set(listTools().map((tool) => tool.name))].sort();
+    },
+    async saveLane(input) {
+      saveLane(runtime.workspace, input);
+      return listLanes(runtime.workspace);
+    },
+    async removeLane(id) {
+      removeLane(runtime.workspace, id);
+      return listLanes(runtime.workspace);
     },
     async setMcpServerEnabled(serverID, enabled) {
       await setMcpServerEnabled(runtime.workspace, serverID, enabled);

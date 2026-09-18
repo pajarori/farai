@@ -63,7 +63,8 @@ export function AppShell(): JSX.Element {
     container: () => tui.actions.centerSurfacePush({ kind: "container" }),
     proxy: () => {},
     mcp: () => { void tui.openMcpOverlay(); },
-    email: () => { void tui.openEmailOverlay(); }
+    email: () => { void tui.openEmailOverlay(); },
+    subagents: () => { void tui.openSubagentsOverlay(); }
   }));
   onCleanup(disposeCommands);
   createEffect(() => {

@@ -17,6 +17,7 @@ export type CommandOpeners = {
   mcp?: () => void;
   email?: () => void;
   agents?: () => void;
+  subagents?: () => void;
 };
 
 export function defineDefaultCommands(openers: CommandOpeners = {}): Command[] {
@@ -135,6 +136,7 @@ export function defineDefaultCommands(openers: CommandOpeners = {}): Command[] {
     slashPrompt("context", "inspect context", "show stored versus projected context and token budget"),
     slashLocal("model", "switch model", "choose a model or add a provider", () => openers.model?.(), "visible", ["models"]),
     slashLocal("mcp", "mcp servers", "show configured mcp server status", () => openers.mcp?.()),
+    slashLocal("subagents", "subagent lanes", "manage subagent roles (lanes): add, edit, or delete", () => openers.subagents?.(), "visible", ["lanes", "roles"]),
     slashLocal("email", "email inboxes", "choose primary or secondary email and add imap accounts", () => openers.email?.()),
     slashPrompt("campaign", "campaign control", "start, pause, resume, inspect, or stop a durable campaign"),
     slashLocal("exit", "exit", "exit farai", ({ exit }) => { void exit(); }),

@@ -18,6 +18,8 @@ import { ModelProviderRemoval } from "./model-provider-removal";
 import { McpServerWizard } from "./mcp-server-wizard";
 import { McpServerRemoval } from "./mcp-server-removal";
 import { EmailAccountWizard } from "./email-account-wizard";
+import { LaneWizard } from "./lane-wizard";
+import { LaneRemoval } from "./lane-removal";
 import { EmailAccountRemoval } from "./email-account-removal";
 import { slashCommandOptions, slashMatches, slashPopupRowLimit, slashPopupVisible } from "../slash-autocomplete";
 import { truncateLine } from "../renderers";
@@ -67,6 +69,8 @@ export function BottomPane(): JSX.Element {
     hasMcpServerWizard: mcpServerWizardActive(),
     hasEmailAccountRemoval: emailAccountRemovalActive(),
     hasEmailAccountWizard: emailAccountWizardActive(),
+    hasLaneRemoval: laneRemovalActive(),
+    hasLaneWizard: laneWizardActive(),
     hasRequestUserInput: inputRequestActive(),
     hasListFrame: Boolean(listFrame()),
     hasCenterFrame: Boolean(centerFrame()),
@@ -78,6 +82,8 @@ export function BottomPane(): JSX.Element {
   const mcpServerRemovalActive = () => Boolean(tui.store.ui.mcpServerRemoval);
   const emailAccountWizardActive = () => Boolean(tui.store.ui.emailAccountWizard);
   const emailAccountRemovalActive = () => Boolean(tui.store.ui.emailAccountRemoval);
+  const laneWizardActive = () => Boolean(tui.store.ui.laneWizard);
+  const laneRemovalActive = () => Boolean(tui.store.ui.laneRemoval);
   const inputRequestActive = () => Boolean(tui.store.snapshot.pendingUserInput && !tui.store.ui.requestUserInput?.dismissed);
   const inputRequestPending = () => Boolean(tui.store.snapshot.pendingUserInput);
   const composerSurfaceVisible = () => surface() === "composer";
@@ -159,6 +165,12 @@ export function BottomPane(): JSX.Element {
         </Match>
         <Match when={surface() === "email_account_wizard"}>
           <EmailAccountWizard />
+        </Match>
+        <Match when={surface() === "lane_removal"}>
+          <LaneRemoval />
+        </Match>
+        <Match when={surface() === "lane_wizard"}>
+          <LaneWizard />
         </Match>
         <Match when={surface() === "user_input"}>
           <Show when={tui.store.snapshot.pendingUserInput} keyed>

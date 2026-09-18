@@ -31,7 +31,7 @@ function lifecycleResult(summary: string, entries: AgentLifecycleEntry[]): ToolR
 const spawnProperties = {
   title: { type: "string", description: "optional concise label for the child; omit to derive it from the prompt" },
   prompt: { type: "string", description: "complete bounded task contract with objective, scope, useful context, constraints, and expected deliverable; give parallel children non-overlapping ownership" },
-  lane: { type: "string", description: "capability profile: explore for read-only inspection, recon for discovery shell, web for browser and HTTP work, code for edits, verify for independent validation, or an explicitly configured specialist lane" },
+  lane: { type: "string", description: "capability profile from the available subagent lanes (for example recon for basic attack-surface discovery), or an explicitly configured specialist lane; omit to inherit the full parent scope" },
   tools: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" }, description: "optional exact tool-name subset; omit to use the selected lane's normal scope, and never request tools unavailable to the parent" },
   model: { type: "string", description: "optional deliberate model override; omit to inherit the parent model" },
   mode: { type: "string", enum: ["attached", "detached"], description: "use the string attached to wait for the result, or detached to return immediately; omit for attached. there is no detached boolean field" }

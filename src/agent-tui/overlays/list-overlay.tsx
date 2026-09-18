@@ -560,6 +560,7 @@ function overlaySubtitle(frame: OverlayFrame): string {
   if (frame.kind === "evidence") return "open captured evidence";
   if (frame.kind === "findings") return "review security findings";
   if (frame.kind === "memory") return "inspect durable memory";
+  if (frame.kind === "subagents") return "roles farai can delegate to";
   return "";
 }
 
@@ -594,6 +595,7 @@ function overlayHint(
       ? "ctrl+p primary · ctrl+s secondary · ctrl+e edit · ctrl+t test · ctrl+d remove · esc back"
       : "ctrl+p primary · ctrl+s secondary · esc back";
   }
+  if (frame.kind === "subagents") return "ctrl+a add · ctrl+e edit · ctrl+d delete · esc close";
   if (frame.kind !== "model") return "press enter to confirm or esc to go back";
   if (selected?.kind === "model_action") return "enter add provider · ctrl+a add · esc back";
   const providerID = frame.providerID ?? (selected?.kind === "model_provider" ? selected.providerID : undefined);

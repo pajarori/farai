@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { localFaraiDir } from "../global-config";
 import { readBoundedFileTextSync } from "../../file-read";
+import { atomicWriteFile } from "../atomic-file";
 
 const LANE_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -15,47 +16,17 @@ export type LaneDefinition = {
 
 export const BUILTIN_LANES: LaneDefinition[] = [
   {
-    id: "explore",
-    description: "read-only workspace exploration and codebase analysis",
-    prompt: "Explore the workspace without modifying it. Return only the evidence, file references, conclusions, and unresolved questions needed by the parent.",
-    tools: ["file_list", "file_search", "file_read", "git_status", "git_diff", "code_diagnostics", "output_read", "agent_manage"]
-  },
-  {
     id: "recon",
-    description: "bounded infrastructure and attack-surface reconnaissance",
-    prompt: "Perform only the delegated reconnaissance scope. Prefer typed discovery tools, preserve evidence, avoid duplicate probes, and return deduplicated assets with source status and uncertainty.",
+    description: "basic attack-surface reconnaissance: subdomains, dns, live probing, and crawling",
+    prompt: [
+      "You are a focused reconnaissance subagent. Map only the delegated target's attack surface using passive and light-active discovery: subdomain enumeration, DNS records, live HTTP/TLS probing, content and URL discovery, and crawling.",
+      "Scope: discovery only. Do NOT exploit, brute-force, run broad port or vulnerability scanners, or perform intrusive testing — those belong to other lanes. Prefer the typed discovery tools; use shell only to run a recon CLI when no typed tool covers the need.",
+      "Deduplicate assets, preserve exact evidence, and record the source and confidence of each item. Return a structured inventory: subdomains/hosts, resolved DNS, live services with status code and detected technology, discovered URLs and paths, and TLS facts — separating confirmed from uncertain. End with coverage gaps and the highest-value next recon steps for the parent."
+    ].join("\n\n"),
     tools: [
-      "asset_subdomains", "dns_resolve", "network_scan", "service_probe", "tls_inspect", "url_discover", "web_crawl",
-      "vulnerability_scan", "vulnerability_lookup", "web_directory", "kali_search", "command_run", "command_input",
-      "browser_manage", "campaign_manage", "knowledge_manage", "command_poll", "command_stop", "output_read", "agent_manage"
-    ]
-  },
-  {
-    id: "web",
-    description: "web application exploration and verification",
-    prompt: "Audit only the delegated web scope. Use browser, HTTP, and shell capabilities as appropriate, preserve exact evidence, and return proven findings separately from uncertainty.",
-    tools: [
-      "browser_manage", "mail_manage",
-      "http_request", "service_probe", "tls_inspect", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup",
-      "web_directory", "kali_search", "command_run", "command_input",
-      "campaign_manage", "knowledge_manage", "command_poll", "command_stop", "output_read", "agent_manage"
-    ]
-  },
-  {
-    id: "code",
-    description: "isolated software implementation, debugging, and review",
-    prompt: "Handle only the delegated code task. Inspect before editing, preserve unrelated changes, make the smallest coherent patch, and return changed files, validation, and residual risk.",
-    tools: [
-      "file_list", "file_search", "file_read", "file_write", "file_replace", "file_patch", "git_status", "git_diff",
-      "code_diagnostics", "script_write", "command_run", "command_input", "task_manage", "output_read", "agent_manage"
-    ]
-  },
-  {
-    id: "verify",
-    description: "independent verification of evidence and candidate findings",
-    prompt: "Independently verify only the delegated claim. Establish a baseline, run the smallest discriminating test, save evidence, and return proven, disproven, or inconclusive with exact reasoning.",
-    tools: [
-      "browser_manage", "http_request", "service_probe", "tls_inspect", "vulnerability_scan", "vulnerability_lookup", "command_run", "command_input", "campaign_manage", "finding_manage", "knowledge_manage", "output_read", "agent_manage"
+      "asset_subdomains", "dns_resolve", "service_probe", "tls_inspect", "url_discover", "web_crawl", "web_directory",
+      "kali_search", "command_run", "command_input", "command_poll", "command_stop",
+      "campaign_manage", "knowledge_manage", "output_read", "agent_manage"
     ]
   }
 ];
@@ -85,6 +56,28 @@ export function loadLanes(workspace: string): LaneDefinition[] {
 
 export function resolveLane(workspace: string, id: string): LaneDefinition | undefined {
   return loadLanes(workspace).find((lane) => lane.id === id);
+}
+
+export function laneWriteTarget(workspace: string): string {
+  return laneConfigPaths(workspace)[0]!;
+}
+
+export function readLaneFile(path: string): LaneDefinition[] {
+  if (!existsSync(path)) return [];
+  try {
+    const parsed: unknown = JSON.parse(readBoundedFileTextSync(path, LANE_CONFIG_MAX_BYTES, "agent lane config"));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      const lane = normalizeLane(entry);
+      return lane ? [lane] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function writeLaneFile(path: string, lanes: LaneDefinition[]): void {
+  atomicWriteFile(path, `${JSON.stringify(lanes, null, 2)}\n`, 0o600);
 }
 
 function normalizeLane(value: unknown): LaneDefinition | undefined {

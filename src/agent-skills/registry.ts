@@ -110,6 +110,20 @@ export function loadSkill(name: string, options: SkillDiscoveryOptions & { resou
   };
 }
 
+export function renderPinnedSkills(workspace: string, names: string[], maxChars = 24_000): string | undefined {
+  const unique = [...new Set(names.map((name) => name.trim()).filter(Boolean))];
+  if (!unique.length || maxChars < 200) return undefined;
+  const blocks: string[] = [];
+  for (const name of unique) {
+    const skill = loadSkill(name, { workspace });
+    if (!skill) continue;
+    blocks.push(`## pinned skill: ${skill.name}\nsource: ${skill.source} · sha256: ${skill.hash}\n\n${skill.body}`);
+  }
+  if (!blocks.length) return undefined;
+  const header = "these skills are pinned and always active — follow them as trusted local instructions within the user's current request and higher-priority policy. do not call skill_load for them again.";
+  return compactText([header, ...blocks].join("\n\n"), maxChars);
+}
+
 export function renderSkillCatalog(workspace: string, maxChars = 8_000): string | undefined {
   const skills = listSkills(workspace);
   if (!skills.length || maxChars < 80) return undefined;

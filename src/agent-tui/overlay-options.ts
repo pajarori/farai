@@ -18,7 +18,10 @@ export type McpChoice =
 export type EmailChoice =
   | { kind: "email"; emailId: string; persistent: boolean }
   | { kind: "email_action"; action: "add" };
-export type OverlayOptionValue = Command | string | ModelChoice | McpChoice | EmailChoice | AgentThreadSummary;
+export type LaneChoice =
+  | { kind: "lane"; laneId: string; editable: boolean }
+  | { kind: "lane_action"; action: "add" };
+export type OverlayOptionValue = Command | string | ModelChoice | McpChoice | EmailChoice | LaneChoice | AgentThreadSummary;
 
 export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreValue, ctx: CommandContext): DialogOption<OverlayOptionValue>[] {
   if (!frame) return [];
@@ -87,6 +90,26 @@ export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreVal
         footer: new Date(item.updatedAt).toLocaleString(),
         value: item.id
       }));
+    case "subagents": {
+      const laneRows = tui.store.ui.lanes.map((lane): DialogOption<OverlayOptionValue> => ({
+        id: lane.id,
+        title: lane.id,
+        description: `${lane.description ?? "custom lane"}${lane.tools?.length ? ` · ${lane.tools.length} tools` : ""}${lane.model ? ` · ${lane.model}` : ""}`,
+        badge: lane.source === "builtin" ? "builtin" : lane.source === "workspace" ? "project" : "custom",
+        value: { kind: "lane", laneId: lane.id, editable: lane.editable }
+      }));
+      return [
+        ...laneRows,
+        {
+          id: "lane:add",
+          title: "+ add lane",
+          description: "create a new subagent role",
+          numbered: false,
+          separatorBefore: true,
+          value: { kind: "lane_action", action: "add" }
+        }
+      ];
+    }
     case "model": {
       const session = tui.store.snapshot.session;
       if (tui.store.ui.availableModels.length === 0 && tui.store.ui.statusDetail === "loading models") {
@@ -328,5 +351,6 @@ export function overlayTitle(frame: OverlayFrame): string {
     case "model": return "select model";
     case "mcp": return "mcp servers";
     case "email": return "email";
+    case "subagents": return "subagent lanes";
   }
 }

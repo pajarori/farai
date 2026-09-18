@@ -86,6 +86,15 @@ const TOOL_RULES: Record<string, ToolRule> = {
     detail: "summary",
     showOutcome: false,
     groupItem: (args) => stringValue(args.canonical)
+  },
+  command_poll: {
+    groupKey: "background:poll",
+    groupPast: "checked background work",
+    groupActive: "checking background work",
+    groupNoun: "check",
+    groupMaxItems: 20,
+    detail: "summary",
+    showOutcome: false
   }
 };
 

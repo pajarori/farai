@@ -15,13 +15,15 @@ import type { ModelProviderInfo } from "../agent-core/model-provider-management"
 import { createModelProviderWizard, type ModelProviderWizardState } from "./model-provider-state";
 import type { UpdateNotice } from "./update-check";
 import type { McpServerInfo } from "../agent-core/mcp-server-management";
+import type { LaneInfo } from "../agent-core/subagents/lane-management";
+import { createLaneWizard, type LaneWizardState } from "./lane-state";
 import { createMcpServerWizard, type McpServerWizardState } from "./mcp-server-state";
 import type { EmailAccountInfo } from "../agent-email/types";
 import { createEmailAccountWizard, type EmailAccountWizardState } from "./email-account-state";
 import { sameFinding } from "./findings/model";
 
 export type OverlayFrame =
-  | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory"; query: string; index: number }
+  | { kind: "palette" | "sessions" | "evidence" | "findings" | "memory" | "subagents"; query: string; index: number }
   | { kind: "agents"; query: string; index: number; expandedId?: string }
   | { kind: "model"; query: string; index: number; providerID?: string }
   | { kind: "mcp"; query: string; index: number; serverID?: string }
@@ -50,6 +52,12 @@ export type ModelProviderRemovalState = {
 
 export type McpServerRemovalState = {
   server: McpServerInfo;
+  busy: boolean;
+  error: string | undefined;
+};
+
+export type LaneRemovalState = {
+  lane: LaneInfo;
   busy: boolean;
   error: string | undefined;
 };
@@ -160,6 +168,10 @@ export type FaraiTuiStore = {
     centerScroll: { action: "up" | "down" | "pageUp" | "pageDown" | "home" | "end"; sequence: number };
     sessionStats: Record<string, Omit<SessionListItem, "session">>;
     agentThreads: AgentThreadSummary[];
+    lanes: LaneInfo[];
+    toolNames: string[];
+    laneWizard: LaneWizardState | undefined;
+    laneRemoval: LaneRemovalState | undefined;
     lastError: string | undefined;
     requestUserInput: RequestUserInputUiState | undefined;
     updateNotice: UpdateNotice | undefined;
@@ -270,6 +282,14 @@ export type StoreActions = {
   emailAccountRemovalPatch: (patch: Partial<Omit<EmailAccountRemovalState, "account">>) => void;
   emailAccountRemovalClose: () => void;
   agentThreadsSet: (threads: AgentThreadSummary[]) => void;
+  lanesSet: (lanes: LaneInfo[]) => void;
+  toolNamesSet: (names: string[]) => void;
+  laneWizardOpen: (lane?: LaneInfo) => void;
+  laneWizardPatch: (patch: Partial<LaneWizardState>) => void;
+  laneWizardClose: () => void;
+  laneRemovalOpen: (lane: LaneInfo) => void;
+  laneRemovalPatch: (patch: Partial<Omit<LaneRemovalState, "lane">>) => void;
+  laneRemovalClose: () => void;
   messageNavigationRequested: (direction: "next" | "prev") => void;
   centerScrollRequested: (action: FaraiTuiStore["ui"]["centerScroll"]["action"]) => void;
   chatCleared: () => void;
@@ -390,6 +410,10 @@ export function initialStore(workspace: string): FaraiTuiStore {
       centerScroll: { action: "down", sequence: 0 },
       sessionStats: {},
       agentThreads: [],
+      lanes: [],
+      toolNames: [],
+      laneWizard: undefined,
+      laneRemoval: undefined,
       lastError: undefined,
       requestUserInput: undefined,
       updateNotice: undefined
@@ -1049,6 +1073,48 @@ export function createActions(store: FaraiTuiStore, setStore: SetStoreFunction<F
     agentThreadsSet(threads: AgentThreadSummary[]): void {
       setStore("ui", "agentThreads", reconcile(threads, { key: "id" }));
     },
+    lanesSet(lanes: LaneInfo[]): void {
+      setStore("ui", "lanes", reconcile(lanes, { key: "id" }));
+    },
+    toolNamesSet(names: string[]): void {
+      setStore("ui", "toolNames", names);
+    },
+    laneWizardOpen(lane?: LaneInfo): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.laneWizard = createLaneWizard(lane);
+      }));
+    },
+    laneWizardPatch(patch: Partial<LaneWizardState>): void {
+      setStore(produce((s) => {
+        if (!s.ui.laneWizard) return;
+        Object.assign(s.ui.laneWizard, patch);
+      }));
+    },
+    laneWizardClose(): void {
+      setStore(produce((s) => {
+        s.ui.laneWizard = undefined;
+        s.ui.lastError = undefined;
+      }));
+    },
+    laneRemovalOpen(lane: LaneInfo): void {
+      setStore(produce((s) => {
+        s.ui.lastError = undefined;
+        s.ui.laneRemoval = { lane, busy: false, error: undefined };
+      }));
+    },
+    laneRemovalPatch(patch: Partial<Omit<LaneRemovalState, "lane">>): void {
+      setStore(produce((s) => {
+        if (!s.ui.laneRemoval) return;
+        Object.assign(s.ui.laneRemoval, patch);
+      }));
+    },
+    laneRemovalClose(): void {
+      setStore(produce((s) => {
+        s.ui.laneRemoval = undefined;
+        s.ui.lastError = undefined;
+      }));
+    },
     messageNavigationRequested(direction: "next" | "prev"): void {
       setStore(produce((s) => {
         s.ui.messageNavigation.direction = direction;
@@ -1385,6 +1451,7 @@ function defaultOverlayFrame(kind: OverlayFrame["kind"]): OverlayFrame {
     case "evidence":
     case "findings":
     case "memory":
+    case "subagents":
     case "agents":
     case "model":
     case "mcp":
@@ -1412,6 +1479,7 @@ function isSelectorOverlayKind(kind: OverlayKind): kind is OverlayFrame["kind"] 
     case "evidence":
     case "findings":
     case "memory":
+    case "subagents":
     case "agents":
     case "model":
     case "mcp":

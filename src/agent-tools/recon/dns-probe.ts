@@ -3,16 +3,14 @@ import { assertObject } from "../../utils";
 import { timeoutBackgroundResult } from "../shared/background-result";
 import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { inputFileCommand, integer, optionalStringList, parseJsonLines, projectDiscoveryResult, record, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
+import { integer, optionalStringList, projectDiscoveryResult, shellQuote, stringList, type JsonRecord } from "./projectdiscovery";
 
 const DNS_RECORD_TYPES = ["a", "aaaa", "cname", "ns", "txt", "srv", "ptr", "mx", "soa", "caa"] as const;
 
 export type DnsProbeRecord = JsonRecord & {
   name: string;
-  status?: string;
   records: Record<string, string[]>;
   resolver: string[];
-  asn?: JsonRecord;
 };
 
 export function buildDnsProbeCommand(args: Record<string, unknown>): string {
@@ -20,34 +18,54 @@ export function buildDnsProbeCommand(args: Record<string, unknown>): string {
   const requested = optionalStringList(args.recordTypes, "recordTypes", DNS_RECORD_TYPES.length);
   const recordTypes = requested.length ? requested : ["a", "aaaa", "cname"];
   if (recordTypes.some((value) => !DNS_RECORD_TYPES.includes(value as typeof DNS_RECORD_TYPES[number]))) throw new Error("recordTypes contains an unsupported DNS record type");
-  const command = ["-json", "-silent", "-nc", "-duc", "-omit-raw", "-resp", "-timeout", `${integer(args.timeoutSeconds, 5, 1, 30)}s`, "-rl", String(integer(args.rateLimit, 500, 1, 10_000))];
-  for (const type of recordTypes) command.push(`-${type}`);
-  if (args.includeAsn === true) command.push("-asn");
+  const timeout = integer(args.timeoutSeconds, 5, 1, 30);
   const resolvers = optionalStringList(args.resolvers, "resolvers", 100);
-  if (resolvers.length) command.push("-r", resolvers.join(","));
-  if (args.wildcard === "auto") command.push("-auto-wildcard");
-  return inputFileCommand("dnsx", command, names, "-l");
+  const queries = names.flatMap((name) => recordTypes.map((type) => `${name} ${type.toUpperCase()}`));
+  const queryLines = queries.map(shellQuote).join(" ");
+  const fixed = ["dig", "+noall", "+answer", "+nocomments", "+tries=1", `+time=${timeout}`].join(" ");
+  const server = resolvers[0] ? ` ${shellQuote(`@${resolvers[0]}`)}` : "";
+  return [
+    'file="$(mktemp /tmp/farai-dig.XXXXXX)" || exit 1',
+    'trap \'rm -f "$file"\' EXIT',
+    `printf '%s\\n' ${queryLines} > "$file"`,
+    `${fixed}${server} -f "$file"`
+  ].join("\n");
 }
 
 export function parseDnsProbeOutput(raw: string): { records: DnsProbeRecord[]; malformed: number } {
-  const parsed = parseJsonLines(raw);
-  return { records: parsed.records.map(normalizeDnsProbe), malformed: parsed.malformed };
+  const byName = new Map<string, Record<string, string[]>>();
+  let malformed = 0;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(";")) continue;
+    const fields = trimmed.split(/\s+/);
+    if (fields.length < 5) {
+      malformed += 1;
+      continue;
+    }
+    const owner = fields[0]!.replace(/\.$/, "").toLowerCase();
+    const type = fields[3]!.toLowerCase();
+    const value = fields.slice(4).join(" ").replace(/\.$/, "");
+    if (!DNS_RECORD_TYPES.includes(type as typeof DNS_RECORD_TYPES[number])) continue;
+    const entry = byName.get(owner) ?? {};
+    (entry[type] ??= []).push(value);
+    byName.set(owner, entry);
+  }
+  const records = [...byName.entries()].map(([name, entryRecords]): DnsProbeRecord => ({ name, records: entryRecords, resolver: [] }));
+  return { records, malformed };
 }
 
 export const dnsProbeTool: ToolDefinition = {
   name: "dns_resolve",
-  description: "Resolve and enrich one or many hostnames with ProjectDiscovery dnsx using selected DNS record types, optional custom resolvers, ASN enrichment, and automatic wildcard filtering. Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
+  description: "Resolve one or many hostnames with dig using selected DNS record types and optional custom resolver. Returns answer records grouped by name (following CNAME targets as their own entries). Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
   inputSchema: {
     type: "object",
     required: ["names"],
     properties: {
       names: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2_000, uniqueItems: true }] },
       recordTypes: { type: "array", items: { type: "string", enum: [...DNS_RECORD_TYPES] }, maxItems: DNS_RECORD_TYPES.length, uniqueItems: true },
-      resolvers: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }] },
-      wildcard: { type: "string", enum: ["off", "auto"] },
-      includeAsn: { type: "boolean" },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 },
-      rateLimit: { type: "integer", minimum: 1, maximum: 10_000 }
+      resolvers: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }], description: "optional custom resolver; the first entry is passed to dig as @resolver" },
+      timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 }
     },
     additionalProperties: false
   },
@@ -66,7 +84,7 @@ export const dnsProbeTool: ToolDefinition = {
     const parsed = parseDnsProbeOutput(result.stdout);
     return projectDiscoveryResult(context, {
       tool: "dns_resolve",
-      backend: "dnsx",
+      backend: "dig",
       result,
       records: parsed.records,
       malformed: parsed.malformed,
@@ -77,24 +95,7 @@ export const dnsProbeTool: ToolDefinition = {
   }
 };
 
-function normalizeDnsProbe(value: JsonRecord): DnsProbeRecord {
-  const records: Record<string, string[]> = {};
-  for (const type of DNS_RECORD_TYPES) {
-    const values = textArray(value[type]);
-    if (values.length) records[type] = values;
-  }
-  const status = text(value.status_code);
-  const asn = record(value.asn);
-  return {
-    name: text(value.host) ?? text(value.input) ?? "unknown",
-    ...(status ? { status } : {}),
-    records,
-    resolver: textArray(value.resolver),
-    ...(asn ? { asn } : {})
-  };
-}
-
 function renderDnsProbe(item: DnsProbeRecord): string {
   const answers = Object.entries(item.records).flatMap(([type, values]) => values.map((value) => `${type.toUpperCase()} ${value}`));
-  return `${item.name}${item.status ? ` · ${item.status}` : ""}${answers.length ? ` · ${answers.join(" · ")}` : " · no answers"}`;
+  return `${item.name}${answers.length ? ` · ${answers.join(" · ")}` : " · no answers"}`;
 }
