@@ -35,3 +35,5 @@ export interface ExecutionBackend {
   waitSession?(sessionId: string): Promise<BackendSessionResult>;
   stopSession(sessionId: string): Promise<void>;
 }
+
+export const BACKGROUND_HANDOFF_TIMEOUT_MS = 30_000;

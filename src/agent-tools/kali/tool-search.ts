@@ -3,7 +3,6 @@ import { assertObject, asString } from "../../utils";
 import { backend } from "../shared/backend";
 import { timeoutBackgroundResult } from "../shared/background-result";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
 
 export type KaliToolMatch = {
   name: string;
@@ -314,7 +313,7 @@ export const kaliToolSearchTool: ToolDefinition = {
     const limit = typeof args.limit === "number" && Number.isInteger(args.limit) ? Math.max(1, Math.min(20, args.limit)) : 8;
     const category = typeof args.category === "string" ? args.category : undefined;
     const kali = backend(context);
-    const result = await kali.exec(kaliToolSearchCommand({ query, limit, ...(category ? { category } : {}), refresh: args.refresh === true }), BACKGROUND_HANDOFF_TIMEOUT_MS, context.signal, 32_000);
+    const result = await kali.exec(kaliToolSearchCommand({ query, limit, ...(category ? { category } : {}), refresh: args.refresh === true }), undefined, context.signal, 32_000);
     const converted = timeoutBackgroundResult("kali tool inventory", kali, result);
     if (converted) return converted;
     if (result.exitCode !== 0) {

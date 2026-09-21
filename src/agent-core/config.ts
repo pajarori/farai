@@ -489,7 +489,7 @@ function isLegacyDefaultPlaywright(entry: Record<string, unknown> | undefined): 
 }
 
 const DEFAULT_CONFIG_TEMPLATE = `config_version = ${CURRENT_CONFIG_VERSION}
-model = "mimo-v2.5-free"
+model = "default"
 
 [proxy]
 mode = "explicit"

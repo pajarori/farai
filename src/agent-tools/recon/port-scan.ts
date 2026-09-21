@@ -8,7 +8,6 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 import { processOutput } from "../shared/process-output";
 import { timeoutBackgroundResult } from "../shared/background-result";
 import { integer, mapWithConcurrency, projectDiscoveryResult, shellQuote, text, type JsonRecord } from "./projectdiscovery";
-import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
 
 export type DiscoveredPort = JsonRecord & { host: string; port: number; protocol: string; service?: string };
 
@@ -110,13 +109,13 @@ async function runNetworkScan(args: unknown, context: Parameters<NonNullable<Too
   if (mode === "nmap" || mode === "deep") {
     const portSelection = normalizePortSelection(args.ports);
     const ports = portSelection ? expandPorts(portSelection, 65_535) : undefined;
-    const result = await kali.exec(buildNmapCommand([target], { ...(ports ? { ports } : {}), versionDetection, deep: mode === "deep" }), BACKGROUND_HANDOFF_TIMEOUT_MS, context.signal, 32_000_000);
+    const result = await kali.exec(buildNmapCommand([target], { ...(ports ? { ports } : {}), versionDetection, deep: mode === "deep" }), undefined, context.signal, 32_000_000);
     const converted = timeoutBackgroundResult("network_scan", kali, result);
     if (converted) return converted;
     return portResult(context, "network_scan", "nmap", mode, target, result, parseNmapOpenPorts(processOutput(result.stdout, result.stderr), target), false);
   }
 
-  const naabuResult = await kali.exec(buildNaabuCommand(args), BACKGROUND_HANDOFF_TIMEOUT_MS, context.signal, 16_000_000);
+  const naabuResult = await kali.exec(buildNaabuCommand(args), undefined, context.signal, 16_000_000);
   const converted = timeoutBackgroundResult("network_scan", kali, naabuResult);
   if (converted) return converted;
   const discovered = parseNaabuOutput(naabuResult.stdout, target);

@@ -128,23 +128,30 @@ export const dnsProbeTool: ToolDefinition = {
     const started = performance.now();
     const records = await nativeDnsResolve(args, context.signal);
     const resolved = records.filter((item) => item.status === "resolved" && !item.wildcard).length;
-    return projectDiscoveryResult(context, {
-      tool: "dns_resolve",
-      backend: "farai-native-dns",
-      result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
-      records,
-      malformed: 0,
-      noun: "DNS result",
-      outputLines: records.map(renderDnsProbe),
-      resultCount: resolved,
-      metadata: {
-        resolvedNames: resolved,
-        wildcardNames: records.filter((item) => item.wildcard).length,
-        notFoundNames: records.filter((item) => item.status === "not_found").length,
-        timedOutNames: records.filter((item) => item.status === "timeout").length,
-        errorNames: records.filter((item) => item.status === "error").length
+    return {
+      ...projectDiscoveryResult(context, {
+        tool: "dns_resolve",
+        backend: "farai-native-dns",
+        result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
+        records,
+        malformed: 0,
+        noun: "DNS result",
+        outputLines: records.map(renderDnsProbe),
+        resultCount: resolved,
+        metadata: {
+          resolvedNames: resolved,
+          wildcardNames: records.filter((item) => item.wildcard).length,
+          notFoundNames: records.filter((item) => item.status === "not_found").length,
+          timedOutNames: records.filter((item) => item.status === "timeout").length,
+          errorNames: records.filter((item) => item.status === "error").length
+        }
+      }),
+      campaignFeed: {
+        observations: records
+          .filter((item) => item.status === "resolved" && !item.wildcard)
+          .map((item) => ({ assetCanonical: item.name, kind: "dns_record", value: item.records, source: "dns_resolve", confidence: 0.8 }))
       }
-    });
+    };
   },
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer

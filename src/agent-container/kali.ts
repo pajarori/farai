@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { spawn as spawnPty } from "bun-pty";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import type { BackendExecResult, BackendSessionResult, ExecutionBackend, SessionKind } from "../agent-tools/backends/types";
+import { BACKGROUND_HANDOFF_TIMEOUT_MS, type BackendExecResult, type BackendSessionResult, type ExecutionBackend, type SessionKind } from "../agent-tools/backends/types";
 import { SpawnSessionStore, allOutput, combinedOutput, killEntry, toBackendSession, touch, waitForExit, waitForExitOrYield, writeInput } from "../agent-tools/backends/spawn-session";
 import {
   PtySessionStore,
@@ -67,6 +67,7 @@ export type KaliBackendOptions = {
   containerName?: string;
   workspace: string;
   timeoutMs?: number;
+  handoffTimeoutMs?: number;
   processRunner?: ProcessRunner;
   pullRunner?: ProcessRunner;
   signal?: AbortSignal;
@@ -210,6 +211,7 @@ export class KaliContainerBackend implements ExecutionBackend {
   readonly rootWorkspace: string;
   readonly workspacePath: string;
   readonly timeoutMs: number;
+  readonly handoffTimeoutMs: number;
   private readonly processRunner: ProcessRunner;
   private readonly pullRunner: ProcessRunner;
   private readonly signal: AbortSignal | undefined;
@@ -225,6 +227,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     this.rootWorkspace = resolve(options.rootWorkspace ?? options.workspace);
     this.workspacePath = containerWorkspacePath(this.rootWorkspace, this.workspace);
     this.timeoutMs = options.timeoutMs ?? 120_000;
+    this.handoffTimeoutMs = options.handoffTimeoutMs ?? BACKGROUND_HANDOFF_TIMEOUT_MS;
     this.processRunner = options.processRunner ?? ((command, args) => runProcess(command, args, Math.min(this.timeoutMs, 15_000)));
     this.pullRunner = options.pullRunner ?? options.processRunner ?? ((command, args) => runProcess(command, args, KALI_IMAGE_PULL_TIMEOUT_MS));
     this.signal = options.signal;
@@ -545,7 +548,7 @@ export class KaliContainerBackend implements ExecutionBackend {
 
   async exec(
     command: string,
-    timeoutMs = this.timeoutMs,
+    timeoutMs = this.handoffTimeoutMs,
     signal = this.signal,
     maxOutputChars = 8_000
   ): Promise<ContainerExecResult & { backgroundSessionId?: string }> {
@@ -564,7 +567,7 @@ export class KaliContainerBackend implements ExecutionBackend {
 
   private async execAttempt(
     command: string,
-    timeoutMs = this.timeoutMs,
+    timeoutMs = this.handoffTimeoutMs,
     signal = this.signal,
     maxOutputChars = 8_000
   ): Promise<ContainerExecResult & { backgroundSessionId?: string }> {

@@ -9,7 +9,6 @@ import { ensureMcpProxyReady, extendMcpProxyScope, managedProxyForSession } from
 import { processOutput } from "../shared/process-output";
 import { parseHttpResponseChain } from "../shared/http-response";
 import { encodeProxyCaptureIdentity, PROXY_CAPTURE_IDENTITY_HEADER, proxyCaptureIdentity, proxyScopeDomains } from "../services/mitmproxy/ownership";
-import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
 
 export const httpRequestTool: ToolDefinition = {
   name: "http_request",
@@ -67,7 +66,7 @@ export const httpRequestTool: ToolDefinition = {
     const result = await kali.exec(httpRequestCommand(args, {
       ...(proxyUrl ? { proxyUrl } : {}),
       ...(captureIdentity ? { captureIdentity } : {})
-    }), BACKGROUND_HANDOFF_TIMEOUT_MS);
+    }));
     const converted = timeoutBackgroundResult("http_request", kali, result);
     if (converted) return converted;
     const rawOutput = processOutput(result.stdout, result.stderr);

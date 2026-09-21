@@ -1,6 +1,6 @@
 import { basename, extname, join } from "node:path";
 import type { SqliteStore } from "../agent-store/sqlite-store";
-import type { CampaignRun, FileStateStore, Session, ToolDefinition } from "../types";
+import type { CampaignAsset, CampaignRun, FileStateStore, Session, ToolDefinition } from "../types";
 import { canonicalToolName } from "../tool-names";
 import { renderPinnedSkills, renderSkillCatalog } from "../agent-skills/registry";
 import { loadConfig } from "./config";
@@ -540,6 +540,10 @@ function buildWorkingSet(store: SqliteStore, session: Session, jobs: ReturnType<
   if (session.campaignId) {
     const dossier = store.campaignDossier(session.campaignId);
     lines.push("Campaign:", `- ${dossier.campaign.name} (${dossier.campaign.status})`);
+    const assetIndex = renderAssetIndex(dossier.assets);
+    if (assetIndex.length) {
+      lines.push("- known assets (already discovered; do not re-run discovery for these, read detail with campaign_search):", ...assetIndex);
+    }
     for (const hypothesis of dossier.hypotheses.filter((item) => ["open", "testing", "blocked"].includes(item.status)).slice(0, 4)) {
       lines.push(`- ${hypothesis.status}: ${hypothesis.title} -> ${hypothesis.nextTest}`);
     }
@@ -561,6 +565,23 @@ function buildWorkingSet(store: SqliteStore, session: Session, jobs: ReturnType<
     }
   }
   return lines.length ? lines.join("\n") : undefined;
+}
+
+function renderAssetIndex(assets: CampaignAsset[]): string[] {
+  if (!assets.length) return [];
+  const byKind = new Map<string, string[]>();
+  for (const asset of assets) {
+    const bucket = byKind.get(asset.kind) ?? [];
+    bucket.push(asset.canonical);
+    byKind.set(asset.kind, bucket);
+  }
+  return [...byKind.entries()]
+    .sort((left, right) => right[1].length - left[1].length)
+    .map(([kind, canonicals]) => {
+      const sample = canonicals.slice(0, 12);
+      const suffix = canonicals.length > sample.length ? `, +${canonicals.length - sample.length} more` : "";
+      return `  - ${canonicals.length} ${kind}: ${sample.join(", ")}${suffix}`;
+    });
 }
 
 const WORKING_FILES_COUNT = 6;

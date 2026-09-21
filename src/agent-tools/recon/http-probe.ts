@@ -170,20 +170,37 @@ export const httpProbeTool: ToolDefinition = {
     const started = performance.now();
     const records = selectFastHttpProbeRecords(await nativeFastProbe(args, context.signal));
     const liveServices = records.filter((item) => !item.failed && item.statusCode).length;
-    return projectDiscoveryResult(context, {
-      tool: "service_probe",
-      backend: "farai-native-probe",
-      result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
-      records,
-      malformed: 0,
-      noun: "live service",
-      resultCount: liveServices,
-      outputLines: records.map(renderHttpProbe),
-      metadata: {
-        liveServices,
-        failedTargets: records.filter((item) => item.failed).length
+    return {
+      ...projectDiscoveryResult(context, {
+        tool: "service_probe",
+        backend: "farai-native-probe",
+        result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
+        records,
+        malformed: 0,
+        noun: "live service",
+        resultCount: liveServices,
+        outputLines: records.map(renderHttpProbe),
+        metadata: {
+          liveServices,
+          failedTargets: records.filter((item) => item.failed).length
+        }
+      }),
+      campaignFeed: {
+        assets: records
+          .filter((item) => !item.failed && item.statusCode)
+          .map((item) => ({
+            canonical: item.finalUrl ?? item.url ?? item.input,
+            kind: "service" as const,
+            technologies: item.technologies,
+            confidence: 0.8,
+            metadata: {
+              ...(item.statusCode ? { statusCode: item.statusCode } : {}),
+              ...(item.title ? { title: item.title } : {}),
+              ...(item.webServer ? { server: item.webServer } : {})
+            }
+          }))
       }
-    });
+    };
   }
 };
 

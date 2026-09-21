@@ -4,7 +4,7 @@ import { timeoutBackgroundResult } from "../shared/background-result";
 import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { inputFileCommand, integer, optionalStringList, parseJsonLines, projectDiscoveryResult, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
-import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
+import { urlInventoryObservations } from "./shared/url-inventory";
 
 const PUBLIC_SOURCES = ["alienvault", "commoncrawl", "waybackarchive"] as const;
 
@@ -92,30 +92,33 @@ export const urlDiscoverTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const kali = backend(context);
-    const result = await kali.exec(buildUrlDiscoverCommand(args), BACKGROUND_HANDOFF_TIMEOUT_MS, context.signal, 32_000_000);
+    const result = await kali.exec(buildUrlDiscoverCommand(args), undefined, context.signal, 32_000_000);
     const converted = timeoutBackgroundResult("url_discover", kali, result);
     if (converted) return converted;
     const parsed = parseUrlDiscoverOutput(result.stdout);
     const limit = args.limit === undefined ? undefined : integer(args.limit, 1_000, 1, 10_000);
     const records = limit === undefined ? parsed.records : parsed.records.slice(0, limit);
     const sourceHealth = urlSourceHealth(selectedUrlSources(args), parsed.records, result.stderr, result.exitCode);
-    return projectDiscoveryResult(context, {
-      tool: "url_discover",
-      backend: "urlfinder",
-      result,
-      records,
-      malformed: parsed.malformed,
-      noun: "URL",
-      outputLines: records.map((item) => `${item.url}${item.sources.length ? ` · ${item.sources.join(", ")}` : ""}`),
-      metadata: {
-        uniqueUrls: new Set(records.map((item) => item.url)).size,
-        discoveredUrls: parsed.records.length,
-        ...(limit === undefined ? {} : { resultLimit: limit, resultsLimited: parsed.records.length > records.length }),
-        sources: sourceHealth,
-        sourceNames: [...new Set(records.flatMap((item) => item.sources))],
-        certainty: urlDiscoveryCertainty(sourceHealth, parsed.records.length)
-      }
-    });
+    return {
+      ...projectDiscoveryResult(context, {
+        tool: "url_discover",
+        backend: "urlfinder",
+        result,
+        records,
+        malformed: parsed.malformed,
+        noun: "URL",
+        outputLines: records.map((item) => `${item.url}${item.sources.length ? ` · ${item.sources.join(", ")}` : ""}`),
+        metadata: {
+          uniqueUrls: new Set(records.map((item) => item.url)).size,
+          discoveredUrls: parsed.records.length,
+          ...(limit === undefined ? {} : { resultLimit: limit, resultsLimited: parsed.records.length > records.length }),
+          sources: sourceHealth,
+          sourceNames: [...new Set(records.flatMap((item) => item.sources))],
+          certainty: urlDiscoveryCertainty(sourceHealth, parsed.records.length)
+        }
+      }),
+      campaignFeed: { observations: urlInventoryObservations(records.map((item) => item.url as string), "url_discover") }
+    };
   }
 };
 

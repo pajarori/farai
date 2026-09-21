@@ -5,7 +5,7 @@ import { timeoutBackgroundResult } from "../shared/background-result";
 import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { booleanValue, inputFileCommand, integer, mapWithConcurrency, parseJsonLines, projectDiscoveryResult, record, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
-import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
+import type { FeedObservation } from "./shared/campaign-feed";
 
 export type TlsProbeRecord = JsonRecord & {
   host: string;
@@ -61,6 +61,23 @@ function tlsIso(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toISOString();
+}
+
+function tlsObservations(records: TlsProbeRecord[]): FeedObservation[] {
+  return records
+    .filter((item) => item.status !== false)
+    .map((item) => ({
+      assetCanonical: item.host,
+      kind: "tls",
+      value: {
+        ...(item.subject ? { subject: item.subject } : {}),
+        ...(item.issuer ? { issuer: item.issuer } : {}),
+        ...(item.notAfter ? { notAfter: item.notAfter } : {}),
+        ...(item.subjectAlternativeNames.length ? { subjectAlternativeNames: item.subjectAlternativeNames.slice(0, 20) } : {})
+      },
+      source: "tls_inspect",
+      confidence: 0.8
+    }));
 }
 
 function tlsTargets(args: Record<string, unknown>): Array<{ host: string; port: number }> {
@@ -168,38 +185,44 @@ export const tlsProbeTool: ToolDefinition = {
     if (!tlsNeedsContainer(args)) {
       const started = performance.now();
       const records = await nativeTlsProbe(args, context.signal);
-      return projectDiscoveryResult(context, {
-        tool: "tls_inspect",
-        backend: "farai-native-tls",
-        result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
-        records,
-        malformed: 0,
-        noun: "TLS endpoint",
-        outputLines: records.map(renderTlsProbe),
-        metadata: {
-          successfulProbes: records.filter((item) => item.status !== false).length,
-          expiringCertificates: records.filter((item) => expiresWithin(item.notAfter, 30)).length
-        }
-      });
+      return {
+        ...projectDiscoveryResult(context, {
+          tool: "tls_inspect",
+          backend: "farai-native-tls",
+          result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
+          records,
+          malformed: 0,
+          noun: "TLS endpoint",
+          outputLines: records.map(renderTlsProbe),
+          metadata: {
+            successfulProbes: records.filter((item) => item.status !== false).length,
+            expiringCertificates: records.filter((item) => expiresWithin(item.notAfter, 30)).length
+          }
+        }),
+        campaignFeed: { observations: tlsObservations(records) }
+      };
     }
     const kali = backend(context);
-    const result = await kali.exec(buildTlsProbeCommand(args), BACKGROUND_HANDOFF_TIMEOUT_MS, context.signal, 32_000_000);
+    const result = await kali.exec(buildTlsProbeCommand(args), undefined, context.signal, 32_000_000);
     const converted = timeoutBackgroundResult("tls_inspect", kali, result);
     if (converted) return converted;
     const parsed = parseTlsProbeOutput(result.stdout);
-    return projectDiscoveryResult(context, {
-      tool: "tls_inspect",
-      backend: "tlsx",
-      result,
-      records: parsed.records,
-      malformed: parsed.malformed,
-      noun: "TLS endpoint",
-      outputLines: parsed.records.map(renderTlsProbe),
-      metadata: {
-        successfulProbes: parsed.records.filter((item) => item.status !== false).length,
-        expiringCertificates: parsed.records.filter((item) => expiresWithin(item.notAfter, 30)).length
-      }
-    });
+    return {
+      ...projectDiscoveryResult(context, {
+        tool: "tls_inspect",
+        backend: "tlsx",
+        result,
+        records: parsed.records,
+        malformed: parsed.malformed,
+        noun: "TLS endpoint",
+        outputLines: parsed.records.map(renderTlsProbe),
+        metadata: {
+          successfulProbes: parsed.records.filter((item) => item.status !== false).length,
+          expiringCertificates: parsed.records.filter((item) => expiresWithin(item.notAfter, 30)).length
+        }
+      }),
+      campaignFeed: { observations: tlsObservations(parsed.records) }
+    };
   }
 };
 

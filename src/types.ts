@@ -611,6 +611,29 @@ export type ToolResult = {
   attachments?: ToolAttachment[];
   jobId?: string;
   processId?: string;
+  campaignFeed?: CampaignFeed;
+};
+
+export type CampaignFeedAsset = {
+  canonical: string;
+  kind: AssetKind;
+  parentCanonical?: string;
+  technologies?: string[];
+  metadata?: Record<string, unknown>;
+  confidence?: number;
+};
+
+export type CampaignFeedObservation = {
+  assetCanonical?: string;
+  kind: string;
+  value: unknown;
+  source: string;
+  confidence?: number;
+};
+
+export type CampaignFeed = {
+  assets?: CampaignFeedAsset[];
+  observations?: CampaignFeedObservation[];
 };
 
 type ToolAttachmentMetadata = {

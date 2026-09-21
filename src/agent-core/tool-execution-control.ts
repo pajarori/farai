@@ -187,7 +187,7 @@ export function normalizeToolTimeout(timeoutMs: number): number {
   return Math.max(1, Math.floor(timeoutMs));
 }
 
-export const BACKGROUND_HANDOFF_TIMEOUT_MS = 30_000;
+export { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../agent-tools/backends/types";
 
 export const MODEL_DEADLINE_ARG = "deadlineSeconds";
 

@@ -19,7 +19,6 @@ export function backend(context: ToolContext): ToolExecutionBackend {
     rootWorkspace: context.rootWorkspace ?? root.workspace,
     containerName: containerNameForSession(root.id),
     ...(context.signal ? { signal: context.signal } : {}),
-    ...(context.timeoutMs ? { timeoutMs: context.timeoutMs } : {}),
     ...(context.onOutputChunk ? { onOutputChunk: context.onOutputChunk } : {})
   });
 }

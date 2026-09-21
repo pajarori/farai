@@ -4,6 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, CampaignRun, Message, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, SubagentForkMode, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/registry";
+import { feedCampaign } from "../agent-tools/recon/shared/campaign-feed";
 import { formatMcpInventory, getMcpPrompt, getMcpPromptDescriptor, listMcpServerStatuses, probeMcpServer as probeMcpServerConfig, renderMcpPromptResult, renderMcpServerInstructionContext, requestMcpFormElicitation, startMcpServer, stopMcpServer, stopMcpToolsForSession, type McpRefreshInput, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
 import { mcpServerFromInput, type SaveMcpServerInput } from "./mcp-server-management";
 import { stopBrowserContextsForSession } from "../agent-tools/browser/context-manager";
@@ -752,6 +753,16 @@ export class AgentRuntime {
           reason: `background_job_${job.status}`
         });
       }
+    }
+  }
+
+  private absorbCampaignFeed(session: Session, result: ToolResult): void {
+    if (!session.campaignId || !result.campaignFeed) return;
+    if (!result.campaignFeed.assets?.length && !result.campaignFeed.observations?.length) return;
+    try {
+      feedCampaign(this.store, session.campaignId, result.campaignFeed);
+    } catch (error) {
+      this.emitRecoverableToolError({ id: "campaign_feed", tool: "campaign_feed", sessionId: session.id } as ToolCallRecord, "campaign feed absorption", error);
     }
   }
 
@@ -3819,6 +3830,7 @@ export class AgentRuntime {
     let rendered: RenderedToolResult;
     try {
       result = normalizeFailedToolResult(this.store.persistToolResultAttachments(session.id, this.boundToolOutput(session.id, toolCall, result)));
+      this.absorbCampaignFeed(session, result);
       if (result.evidence) {
         for (const evidence of result.evidence) {
           const saved = this.store.saveEvidence(evidence, result.output);

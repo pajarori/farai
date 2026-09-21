@@ -150,7 +150,15 @@ export const subdomainEnumTool: ToolDefinition = {
         sources: sourceStatuses,
         discoveredSubdomains: names,
         truncated: results.reduce((total, item) => total + item.names.length, 0) > names.length
-      }
+      },
+      ...(names.length ? {
+        campaignFeed: {
+          assets: [
+            { canonical: domain, kind: "domain" as const, confidence: 0.9 },
+            ...names.map((name) => ({ canonical: name, kind: "subdomain" as const, parentCanonical: domain, confidence: 0.7 }))
+          ]
+        }
+      } : {})
     };
   }
 };

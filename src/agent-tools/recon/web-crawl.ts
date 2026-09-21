@@ -2,6 +2,7 @@ import type { ToolDefinition } from "../../types";
 import { assertObject } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { integer, mapWithConcurrency, projectDiscoveryResult, stringList, type JsonRecord } from "./projectdiscovery";
+import { urlInventoryObservations } from "./shared/url-inventory";
 
 export type WebCrawlRecord = JsonRecord & {
   url: string;
@@ -165,20 +166,23 @@ export const webCrawlTool: ToolDefinition = {
     assertObject(args, "args");
     const started = performance.now();
     const records = await nativeWebCrawl(args, context.signal);
-    return projectDiscoveryResult(context, {
-      tool: "web_crawl",
-      backend: "farai-native-crawl",
-      result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
-      records,
-      malformed: 0,
-      noun: "endpoint",
-      outputLines: records.map(renderWebCrawl),
-      metadata: {
-        uniqueUrls: new Set(records.map((item) => item.url)).size,
-        forms: records.reduce((total, item) => total + item.forms, 0),
-        failedRequests: records.filter((item) => item.failed).length
-      }
-    });
+    return {
+      ...projectDiscoveryResult(context, {
+        tool: "web_crawl",
+        backend: "farai-native-crawl",
+        result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
+        records,
+        malformed: 0,
+        noun: "endpoint",
+        outputLines: records.map(renderWebCrawl),
+        metadata: {
+          uniqueUrls: new Set(records.map((item) => item.url)).size,
+          forms: records.reduce((total, item) => total + item.forms, 0),
+          failedRequests: records.filter((item) => item.failed).length
+        }
+      }),
+      campaignFeed: { observations: urlInventoryObservations(records.filter((item) => !item.failed).map((item) => item.url), "web_crawl") }
+    };
   }
 };
 
