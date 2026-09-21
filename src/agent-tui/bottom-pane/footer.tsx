@@ -4,7 +4,7 @@ import { useComposerControl } from "../context/composer";
 import { useTuiRuntime } from "../context/runtime";
 import { COLOR } from "../theme";
 import { fmtElapsed } from "./time";
-import { contextualFooter, fitFooterLine, footerRightItems, instructionalFooterLines, type FooterMode } from "./footer-state";
+import { contextualFooter, fitFooterLine, footerRightItems, formatWorkspaceDisplay, instructionalFooterLines, type FooterMode } from "./footer-state";
 import { displayModelSelection } from "../../agent-core/model-catalog";
 import { loadConfig } from "../../agent-core/config";
 import { DEFAULT_CONTEXT_WINDOW } from "../../agent-core/default-model";
@@ -40,7 +40,7 @@ export function Footer(props: FooterProps): JSX.Element {
     return tui.store.ui.promptHistory.filter((entry) => entry.text.toLowerCase().includes(needle)).length;
   });
   const context = () => {
-    return `${modelLabel()} · ${runtime.workspace}`;
+    return `${modelLabel()} · ${formatWorkspaceDisplay(runtime.workspace)}`;
   };
   const mode = (): FooterMode => {
     const search = historySearch();

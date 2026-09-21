@@ -241,3 +241,29 @@ function shortTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}m`;
   return `${(value / 1_000).toFixed(value >= 10_000 ? 1 : 2).replace(/\.0$/, "")}k`;
 }
+
+export function formatWorkspaceDisplay(workspace: string, home = process.env.HOME || process.env.USERPROFILE || ""): string {
+  if (!workspace) return "";
+  const normalized = workspace.replace(/\\/g, "/");
+
+  const webUserMatch = normalized.match(/\/users\/[^/]+\/workspace(?:\/(.+))?$/);
+  if (webUserMatch) {
+    const sub = webUserMatch[1];
+    return sub ? `${sub}` : "/workspace";
+  }
+
+  const normalizedHome = home.replace(/\\/g, "/").replace(/\/$/, "");
+  let display = normalized;
+  if (normalizedHome && (normalized === normalizedHome || normalized.startsWith(`${normalizedHome}/`))) {
+    display = `~${normalized.slice(normalizedHome.length)}`;
+  }
+
+  const parts = display.split("/").filter(Boolean);
+  if (display.length > 28 && parts.length > 3) {
+    const first = display.startsWith("/") ? `/${parts[0]}` : parts[0];
+    return `${first}/.../${parts.slice(-2).join("/")}`;
+  }
+
+  return display;
+}
+
