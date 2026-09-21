@@ -14,7 +14,7 @@ export const fsEditTool: ToolDefinition = {
     properties: { path: { type: "string" }, oldString: { type: "string" }, newString: { type: "string" }, replaceAll: { type: "boolean" } }
   },
   mutates: true,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

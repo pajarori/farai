@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../types";
+import { MODEL_DEADLINE_ARG, modelDeadlineProperty } from "../agent-core/tool-execution-control";
 
 const PROPERTY_HINTS: Record<string, string> = {
   action: "operation to perform; use only one of the enum values declared by this schema",
@@ -150,8 +151,7 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
     max_output_tokens: "positive output budget for this poll response"
   },
   task_manage: {
-    operation: "add, update, list, or replace the durable task plan",
-    args: "operation-specific arguments"
+    operation: "add, update, list, or replace the durable task plan"
   },
   command_poll: {
     jobId: "job id returned by a background command, callback, or another background operation",
@@ -198,7 +198,7 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
     maxChars: "bounded readable extraction size; request a larger value only when the source requires it"
   },
   service_probe: {
-    targets: "hosts, IPs, or URLs to probe with the fast concurrent service engine; use detail mode only when httpx enrichment is needed",
+    targets: "hosts, IPs, or URLs to probe with the fast native concurrent service engine (status, content type, size, final url, timing)",
     mode: "fast is the default bounded inventory; choose detail only when technology, ASN, CDN/WAF, redirect, or TLS enrichment is needed",
     redirects: "none, same_host, or all; none is the fast default and same_host is for redirect-aware inventory",
     includeTls: "include certificate metadata when true; disable only when TLS data is unnecessary"
@@ -348,11 +348,11 @@ const ENUM_HINTS: Record<string, Record<string, string>> = {
 
 const EXACT_GUIDANCE: Record<string, string> = {
   agent_manage: "set operation to spawn, list, wait, message, followup, interrupt, or close and pass operation-specific fields.",
-  browser_manage: "set operation to the browser action and pass its fields inside args; eval requires args.script containing a JavaScript function expression, for example () => document.title. keep one browser context stable for a workflow.",
+  browser_manage: "set operation to the browser action and pass its fields directly alongside operation (flat, not nested); eval requires a script field containing a JavaScript function expression, for example () => document.title. keep one browser context stable for a workflow.",
   callback_manage: "set operation to host_info, listen, oast, or stop and pass operation-specific fields.",
   campaign_manage: "set operation to the campaign lifecycle action and pass operation-specific fields while preserving durable evidence.",
   finding_manage: "set operation to calculate, add_finding, or update_finding and include evidence for scored security claims.",
-  knowledge_manage: "set operation to search, read, resolve, neighbors, prioritize, notes, evidence, hypothesis, failed, or skill_load and pass fields inside args. skill_load accepts args.name or args.skill with an exact catalog name.",
+  knowledge_manage: "set operation to search, read, resolve, neighbors, prioritize, notes, evidence, hypothesis, failed, or skill_load and pass that operation's fields directly alongside operation (flat, not nested). skill_load accepts a name or skill field with an exact catalog name.",
   mail_manage: "set operation to list, create, inbox, read, or wait and pass operation-specific fields using exact Farai UUIDs.",
   mobile_manage: "set operation to the Android device, app, static-analysis, UI, or Frida action and pass operation-specific fields.",
   mcp_resource: "set operation to list or read; read requires the exact server and URI returned by list.",
@@ -369,7 +369,7 @@ const EXACT_GUIDANCE: Record<string, string> = {
   service_probe: "use the fast concurrent HTTP engine for live service inventory. choose mode=detail only when technology, ASN, CDN/WAF, redirect, or TLS enrichment is needed; use browser tools for stateful interaction.",
   tls_inspect: "use ProjectDiscovery tlsx for TLS inventory. enable version or cipher enumeration only for a focused assessment because it creates additional handshakes.",
   url_discover: "pass domains and optionally limit, sources, scope, timeoutSeconds, maxMinutes, or rateLimit to build a passive historical URL corpus. validate selected URLs later; this tool does not request every discovered URL.",
-  web_crawl: "crawl authorized live targets with katana for breadth-first route and technology mapping. enable headless or JavaScript only when required; use browser tools for authenticated workflows.",
+  web_crawl: "crawl authorized live targets with the fast native host crawler for breadth-first same-scope route mapping (static only). use browser tools for JavaScript-rendered or authenticated workflows.",
   vulnerability_scan: "run the pinned local Nuclei templates against authorized targets. treat matches as candidate evidence, not verified findings; enable oast only for an intentional callback test.",
   vulnerability_lookup: "query advisory intelligence by ids or filters, or set source=exploitdb for the local Exploit-DB index. it informs prioritization and does not prove that a target is vulnerable or exploitable.",
   http_request: "send one exact request when method, headers, body, redirects, path spelling, or HTTP version matters. use web_fetch for reading public pages and browser tools for cookies or forms.",
@@ -435,7 +435,7 @@ const EXACT_GUIDANCE: Record<string, string> = {
   agent_followup: "start another turn on an idle child by session id; use mode=detached only when that turn should run in the background.",
   agent_interrupt: "cancel the active child turn while preserving its session for a later follow-up.",
   agent_close: "stop outstanding child work and archive its context when it is no longer needed.",
-  session_manage: "use operation=rename with args.title set to a concise non-empty human-facing title; do not call rename without title.",
+  session_manage: "use operation=rename with a title field set to a concise non-empty human-facing title; do not call rename without title.",
   web_search: "use first for public web discovery: return ranked titles, URLs, snippets, and attribution, then choose a result before web_fetch.",
   web_fetch: "read one selected public URL as bounded text, JSON, HTML, or PDF. it does not search, execute JavaScript, or preserve browser state.",
   image_read: "inspect an existing workspace image with dimensions and optional OCR; it does not fetch remote URLs.",
@@ -462,10 +462,10 @@ export function modelToolDescription(tool: Pick<ToolDefinition, "name" | "descri
 }
 
 export function modelToolSchema(schema: Record<string, unknown>, _detailed = false, toolName?: string): Record<string, unknown> {
-  return enrichSchemaNode(schema, [], toolName) as Record<string, unknown>;
+  return enrichSchemaNode(schema, [], toolName, true) as Record<string, unknown>;
 }
 
-function enrichSchemaNode(value: unknown, path: string[], toolName?: string): unknown {
+function enrichSchemaNode(value: unknown, path: string[], toolName?: string, isArgsShape = false): unknown {
   if (Array.isArray(value)) return value.map((item) => enrichSchemaNode(item, path, toolName));
   if (!isRecord(value)) return value;
   const next: Record<string, unknown> = { ...value };
@@ -483,7 +483,16 @@ function enrichSchemaNode(value: unknown, path: string[], toolName?: string): un
     if (key in value) next[key] = enrichSchemaNode(value[key], [...path, key], toolName);
   }
   for (const key of ["oneOf", "anyOf", "allOf", "prefixItems"]) {
-    if (Array.isArray(value[key])) next[key] = value[key].map((item) => enrichSchemaNode(item, [...path, key], toolName));
+    if (Array.isArray(value[key])) {
+      const branchIsArgsShape = isArgsShape && (key === "oneOf" || key === "anyOf");
+      next[key] = value[key].map((item) => enrichSchemaNode(item, [...path, key], toolName, branchIsArgsShape));
+    }
+  }
+  if (isArgsShape && (next.type === "object" || isRecord(next.properties))) {
+    const argsProperties = isRecord(next.properties) ? next.properties : {};
+    if (!(MODEL_DEADLINE_ARG in argsProperties)) {
+      next.properties = { ...argsProperties, [MODEL_DEADLINE_ARG]: { ...modelDeadlineProperty } };
+    }
   }
   return next;
 }

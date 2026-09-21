@@ -13,7 +13,7 @@ export const patchApplyTool: ToolDefinition = {
     properties: { patch: { type: "string" } }
   },
   mutates: true,
-  timeoutMs: 15_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

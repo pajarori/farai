@@ -1,20 +1,11 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject } from "../../utils";
-import { timeoutBackgroundResult } from "../shared/background-result";
-import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import {
-  booleanValue,
-  inputFileCommand,
   integer,
-  optionalStringList,
-  parseJsonLines,
+  mapWithConcurrency,
   projectDiscoveryResult,
-  record,
   stringList,
-  text,
-  textArray,
-  shellQuote,
   type JsonRecord
 } from "./projectdiscovery";
 
@@ -41,8 +32,6 @@ export type HttpProbeRecord = JsonRecord & {
   error?: string;
 };
 
-export type HttpProbeMode = "fast" | "detail";
-
 function hasScheme(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(target);
 }
@@ -56,63 +45,6 @@ function probeSchemes(args: Record<string, unknown>): string[] {
 function fastProbeTargets(args: Record<string, unknown>): string[] {
   const schemes = probeSchemes(args);
   return stringList(args.targets, "targets").flatMap((target) => hasScheme(target) ? [target] : schemes.map((scheme) => `${scheme}://${target}`));
-}
-
-export function fastHttpProbeBudgetMs(args: Record<string, unknown>): number {
-  const timeoutSeconds = integer(args.timeoutSeconds, 3, 1, 15);
-  const concurrency = integer(args.concurrency, 100, 1, 200);
-  const waves = Math.max(1, Math.ceil(fastProbeTargets(args).length / concurrency));
-  return Math.min(28_000, Math.max(8_000, waves * timeoutSeconds * 1_000 + 6_000));
-}
-
-export function buildFastHttpProbeCommand(args: Record<string, unknown>): string {
-  const timeoutSeconds = integer(args.timeoutSeconds, 3, 1, 15);
-  const concurrency = integer(args.concurrency, 100, 1, 200);
-  const probeTargets = fastProbeTargets(args);
-  const configLines = probeTargets.flatMap((target) => [
-    `url = "${curlConfigQuote(target)}"`,
-    'output = "/dev/null"',
-    'write-out = "%{url}\\t%{url_effective}\\t%{http_code}\\t%{content_type}\\t%{size_download}\\t%{time_total}\\t%{remote_ip}\\t%{exitcode}\\t%{errormsg}\\n"'
-  ]).map(shellQuote).join(" ");
-  return [
-    'config="$(mktemp /tmp/farai-http-probe.XXXXXX)" || exit 1',
-    'trap \'rm -f "$config"\' EXIT',
-    `printf '%s\\n' ${configLines} > "$config"`,
-    `curl --parallel --parallel-immediate --parallel-max ${concurrency} --silent --show-error --insecure --connect-timeout 1 --max-time ${timeoutSeconds} --config "$config"`
-  ].join("\n");
-}
-
-export function buildHttpProbeCommand(args: Record<string, unknown>): string {
-  if (args.mode !== "detail") return buildFastHttpProbeCommand(args);
-  const targets = stringList(args.targets, "targets");
-  const timeout = integer(args.timeoutSeconds, 10, 1, 60);
-  const rateLimit = integer(args.rateLimit, 100, 1, 1_000);
-  const concurrency = integer(args.concurrency, 50, 1, 200);
-  const command = [
-    "-json", "-silent", "-nc", "-duc", "-sc", "-title", "-server", "-ct", "-cl", "-location", "-rt", "-ip", "-cname",
-    "-timeout", String(timeout), "-retries", "1", "-rl", String(rateLimit), "-threads", String(concurrency),
-    "-rstr", "5000000"
-  ];
-  command.push("-td", "-asn", "-cdn");
-  if (args.includeTls !== false) command.push("-tls-grab");
-  const redirect = typeof args.redirects === "string" ? args.redirects : "same_host";
-  if (redirect === "same_host") command.push("-fhr");
-  if (redirect === "all") command.push("-fr");
-  if (targets.every((target) => /^[a-z][a-z0-9+.-]*:\/\//i.test(target))) command.push("-nfs");
-  const ports = optionalStringList(args.ports, "ports", 100);
-  if (ports.length) command.push("-p", ports.join(","));
-  if (args.headers && typeof args.headers === "object" && !Array.isArray(args.headers)) {
-    for (const [name, value] of Object.entries(args.headers as Record<string, unknown>)) {
-      if (typeof value !== "string" || !name.trim() || /[\r\n]/.test(name) || /[\r\n]/.test(value)) throw new Error("headers must contain single-line string names and values");
-      command.push("-H", `${name}: ${value}`);
-    }
-  }
-  return inputFileCommand("httpx", command, targets, "-l");
-}
-
-export function parseHttpProbeOutput(raw: string): { records: HttpProbeRecord[]; malformed: number } {
-  const parsed = parseJsonLines(raw);
-  return { records: parsed.records.map(normalizeHttpProbe), malformed: parsed.malformed };
 }
 
 export function parseFastHttpProbeOutput(raw: string): { records: HttpProbeRecord[]; malformed: number } {
@@ -156,96 +88,104 @@ export function selectFastHttpProbeRecords(records: HttpProbeRecord[]): HttpProb
   return [...selected.values()];
 }
 
+async function probeOne(target: string, timeoutMs: number, follow: boolean, parentSignal?: AbortSignal): Promise<HttpProbeRecord> {
+  const input = target.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").replace(/:\d+(?:\/|$)/, "$1");
+  const started = performance.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("timed out")), timeoutMs);
+  const onAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal) parentSignal.addEventListener("abort", onAbort, { once: true });
+  const elapsed = () => `${((performance.now() - started) / 1_000).toFixed(3)}s`;
+  try {
+    const response = await fetch(target, {
+      method: "GET",
+      redirect: follow ? "follow" : "manual",
+      headers: { "user-agent": "Mozilla/5.0 Farai/0.1", accept: "*/*" },
+      signal: controller.signal,
+      tls: { rejectUnauthorized: false }
+    } as RequestInit);
+    try { await response.body?.cancel(); } catch { }
+    const contentType = response.headers.get("content-type") ?? undefined;
+    const contentLength = Number(response.headers.get("content-length") ?? "");
+    return {
+      input,
+      url: target,
+      ...(response.url && response.url !== target ? { finalUrl: response.url } : {}),
+      statusCode: response.status,
+      ...(contentType ? { contentType } : {}),
+      ...(Number.isFinite(contentLength) ? { contentLength } : {}),
+      responseTime: elapsed(),
+      cnames: [],
+      technologies: []
+    };
+  } catch (error) {
+    if (parentSignal?.aborted) throw parentSignal.reason ?? error;
+    return {
+      input,
+      failed: true,
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 240),
+      responseTime: elapsed(),
+      cnames: [],
+      technologies: []
+    };
+  } finally {
+    clearTimeout(timer);
+    if (parentSignal) parentSignal.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function nativeFastProbe(args: Record<string, unknown>, signal?: AbortSignal): Promise<HttpProbeRecord[]> {
+  const targets = fastProbeTargets(args);
+  const timeoutMs = integer(args.timeoutSeconds, 3, 1, 15) * 1_000;
+  const concurrency = integer(args.concurrency, 100, 1, 200);
+  const follow = args.redirects === "all" || args.redirects === "same_host";
+  return mapWithConcurrency(targets, concurrency, (target) => probeOne(target, timeoutMs, follow, signal), signal);
+}
+
+
 export const httpProbeTool: ToolDefinition = {
   name: "service_probe",
-  description: "Probe one or many hosts, IPs, or URLs with a lightweight concurrent HTTP probe and return normalized live service records. Fast mode (default) tries https only for bare hosts and returns status, content type, response size, address, and timing; pass schemes:[\"https\",\"http\"] to also probe http. Detail mode uses ProjectDiscovery httpx for page title, server, technology, ASN, CDN/WAF, redirect, and TLS enrichment. Use this after subdomain or port discovery; use browser tools for interactive state and http_request for one exact protocol request.",
+  description: "Probe one or many hosts, IPs, or URLs and return normalized live service records. Runs a native concurrent probe directly from the farai host — fast and reliable, bypassing the container network — trying https only for bare hosts and returning status, content type, size, final url, and timing; pass schemes:[\"https\",\"http\"] to also probe http. Use this after subdomain or port discovery; use browser tools for interactive state and http_request for one exact protocol request.",
   inputSchema: {
     type: "object",
     required: ["targets"],
     properties: {
       targets: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 500, uniqueItems: true }] },
-      mode: { type: "string", enum: ["fast", "detail"] },
       ports: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }] },
       schemes: { type: "array", items: { type: "string", enum: ["https", "http"] }, minItems: 1, maxItems: 2, uniqueItems: true, description: "schemes to try for bare hosts; defaults to https only for speed, pass [\"https\",\"http\"] to also probe http" },
       redirects: { type: "string", enum: ["none", "same_host", "all"] },
-      includeTls: { type: "boolean" },
-      headers: { type: "object", additionalProperties: { type: "string" } },
       timeoutSeconds: { type: "integer", minimum: 1, maximum: 60 },
-      rateLimit: { type: "integer", minimum: 1, maximum: 1_000 },
       concurrency: { type: "integer", minimum: 1, maximum: 200 }
     },
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "recon",
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const kali = backend(context);
-    const detail = args.mode === "detail";
-    const result = await kali.exec(buildHttpProbeCommand(args), detail ? 25_000 : fastHttpProbeBudgetMs(args), context.signal, 16_000_000);
-    const converted = timeoutBackgroundResult("service_probe", kali, result);
-    if (converted) return converted;
-    const parsed = detail ? parseHttpProbeOutput(result.stdout) : parseFastHttpProbeOutput(result.stdout);
-    const records = detail ? parsed.records : selectFastHttpProbeRecords(parsed.records);
+    const started = performance.now();
+    const records = selectFastHttpProbeRecords(await nativeFastProbe(args, context.signal));
+    const liveServices = records.filter((item) => !item.failed && item.statusCode).length;
     return projectDiscoveryResult(context, {
       tool: "service_probe",
-      backend: detail ? "httpx" : "farai-http-probe",
-      result,
+      backend: "farai-native-probe",
+      result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
       records,
-      malformed: parsed.malformed,
-      noun: "service",
+      malformed: 0,
+      noun: "live service",
+      resultCount: liveServices,
       outputLines: records.map(renderHttpProbe),
       metadata: {
-        liveServices: records.filter((item) => !item.failed).length,
+        liveServices,
         failedTargets: records.filter((item) => item.failed).length
       }
     });
   }
 };
-
-function normalizeHttpProbe(value: JsonRecord): HttpProbeRecord {
-  const url = text(value.url);
-  const finalUrl = text(value.final_url) ?? text(value.finalurl);
-  const title = text(value.title);
-  const webServer = text(value.webserver);
-  const contentType = text(value.content_type);
-  const responseTime = text(value.time);
-  const host = text(value.host);
-  const ip = text(value.host_ip);
-  const cdn = booleanValue(value.cdn);
-  const cdnName = text(value.cdn_name);
-  const cdnType = text(value.cdn_type);
-  const location = text(value.location);
-  const tls = record(value.tls);
-  const failed = booleanValue(value.failed);
-  const error = text(value.error) ?? text(value.err);
-  return {
-    input: text(value.input) ?? url ?? host ?? "unknown",
-    ...(url ? { url } : {}),
-    ...(finalUrl ? { finalUrl } : {}),
-    ...(typeof value.status_code === "number" ? { statusCode: value.status_code } : {}),
-    ...(title ? { title } : {}),
-    ...(webServer ? { webServer } : {}),
-    ...(contentType ? { contentType } : {}),
-    ...(typeof value.content_length === "number" ? { contentLength: value.content_length } : {}),
-    ...(responseTime ? { responseTime } : {}),
-    ...(host ? { host } : {}),
-    ...(ip ? { ip } : {}),
-    cnames: textArray(value.cname ?? value.cnames),
-    technologies: textArray(value.tech ?? value.technologies),
-    ...(cdn !== undefined ? { cdn } : {}),
-    ...(cdnName ? { cdnName } : {}),
-    ...(cdnType ? { cdnType } : {}),
-    ...(location ? { location } : {}),
-    ...(tls ? { tls } : {}),
-    ...(failed !== undefined ? { failed } : {}),
-    ...(error ? { error } : {})
-  };
-}
 
 function renderHttpProbe(item: HttpProbeRecord): string {
   if (item.failed) return `failed ${item.input}${item.error ? ` · ${item.error}` : ""}`;
@@ -259,10 +199,6 @@ function renderHttpProbe(item: HttpProbeRecord): string {
     item.cdnName ? `${item.cdnName}${item.cdnType ? ` ${item.cdnType}` : ""}` : undefined,
     item.responseTime
   ].filter(Boolean).join(" · ");
-}
-
-function curlConfigQuote(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 function fastRecordRank(record: HttpProbeRecord): number {

@@ -17,7 +17,7 @@ export const worktreeEnterTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   concurrencyScope: "session",
   renderHuman: render,
@@ -46,7 +46,7 @@ export const worktreeExitTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   concurrencyScope: "session",
   renderHuman: render,

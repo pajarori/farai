@@ -7,8 +7,8 @@ import { timeoutBackgroundResult } from "../shared/background-result";
 
 export function summarizeFfufOutput(raw: string): string {
   try {
-    const parsed = JSON.parse(raw) as { results?: Array<{ url?: string; status?: number; length?: number }> };
-    const results = parsed.results ?? [];
+    const parsed = JSON.parse(raw) as { results?: Array<{ url?: string; status?: number; length?: number; words?: number; lines?: number; redirectlocation?: string }> };
+    const results = filterWildcardResults(parsed.results ?? []);
     if (!results.length) return "no paths found";
     return results.map((r) => `${r.status ?? "?"} ${r.url ?? ""} (len=${r.length ?? "?"})`).join("\n");
   } catch {
@@ -25,7 +25,10 @@ export function buildDirEnumCommand(url: string, wordlist: string, options: { ti
   return [
     'output="$(mktemp /tmp/farai-ffuf.XXXXXX)" || exit 1',
     'trap \'rm -f "$output"\' EXIT',
-    `ffuf -u ${JSON.stringify(url)} -w ${JSON.stringify(wordlist)} -t ${threads} -timeout ${timeoutSeconds} -maxtime ${maxTimeSeconds}${rateLimit ? ` -rate ${rateLimit}` : ""} -o "$output" -of json -noninteractive >/dev/null`,
+    `wordlist=${JSON.stringify(wordlist)}`,
+    'for candidate in "$wordlist" /usr/share/wordlists/dirb/common.txt /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt /usr/share/dirb/wordlists/common.txt; do if [ -f "$candidate" ]; then wordlist="$candidate"; break; fi; done',
+    'if [ ! -f "$wordlist" ]; then echo "no wordlist found; install seclists or pass an existing wordlist path" >&2; exit 2; fi',
+    `ffuf -u ${JSON.stringify(url)} -w "$wordlist" -t ${threads} -timeout ${timeoutSeconds} -maxtime ${maxTimeSeconds} -ac -ach${rateLimit ? ` -rate ${rateLimit}` : ""} -o "$output" -of json -noninteractive >/dev/null`,
     'status=$?',
     'if [ -s "$output" ]; then cat "$output"; fi',
     'exit "$status"'
@@ -49,7 +52,7 @@ export const dirEnumTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 130_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -75,3 +78,15 @@ export const dirEnumTool: ToolDefinition = {
     });
   }
 };
+
+function filterWildcardResults<T extends { status?: number; length?: number; words?: number; lines?: number; redirectlocation?: string }>(results: T[]): T[] {
+  if (results.length < 6) return results;
+  const counts = new Map<string, number>();
+  for (const result of results) {
+    const signature = [result.status, result.length, result.words, result.lines, result.redirectlocation ?? ""].join("|");
+    counts.set(signature, (counts.get(signature) ?? 0) + 1);
+  }
+  const wildcard = [...counts.entries()].sort((left, right) => right[1] - left[1])[0];
+  if (!wildcard || wildcard[1] / results.length < 0.8) return results;
+  return results.filter((result) => [result.status, result.length, result.words, result.lines, result.redirectlocation ?? ""].join("|") !== wildcard[0]);
+}

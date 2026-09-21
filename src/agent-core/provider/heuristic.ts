@@ -18,10 +18,10 @@ export function computeHeuristicActions(input: HeuristicInput): HeuristicAction[
   const target = targetFromPrompt(input.userText);
   if (/(pentest|attack path|full enum|full enumeration|recon plan|plan.*scan|scan.*enumerate)/.test(lower)) {
     return [
-      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Identify target and test assumptions", priority: "high" } }, rationale: "Multi-step request needs an explicit task plan." },
-      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Run reconnaissance and collect evidence", priority: "high" } }, rationale: "Recon is the first active cyber step." },
-      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Enumerate exposed services and web content", priority: "medium" } }, rationale: "Enumeration follows initial recon." },
-      { kind: "tool", tool: "task_manage", args: { operation: "add", args: { text: "Summarize findings and next hypotheses", priority: "medium" } }, rationale: "Keep progress durable for TUI and reports." }
+      { kind: "tool", tool: "task_manage", args: { operation: "add", text: "Identify target and test assumptions", priority: "high" }, rationale: "Multi-step request needs an explicit task plan." },
+      { kind: "tool", tool: "task_manage", args: { operation: "add", text: "Run reconnaissance and collect evidence", priority: "high" }, rationale: "Recon is the first active cyber step." },
+      { kind: "tool", tool: "task_manage", args: { operation: "add", text: "Enumerate exposed services and web content", priority: "medium" }, rationale: "Enumeration follows initial recon." },
+      { kind: "tool", tool: "task_manage", args: { operation: "add", text: "Summarize findings and next hypotheses", priority: "medium" }, rationale: "Keep progress durable for TUI and reports." }
     ];
   }
   if (/(subdomains?|passive[ -]?dns|certificate transparency|crt\.sh)/.test(lower) && target) {
@@ -34,7 +34,7 @@ export function computeHeuristicActions(input: HeuristicInput): HeuristicAction[
     return [{ kind: "tool", tool: "web_directory", args: { url: `http://${target}/FUZZ` }, rationale: "User requested directory enumeration." }];
   }
   if (/(note|remember|catat)/.test(lower)) {
-    return [{ kind: "tool", tool: "knowledge_manage", args: { operation: "add", args: { text: input.userText, tags: ["user"] } }, rationale: "User asked to remember context." }];
+    return [{ kind: "tool", tool: "knowledge_manage", args: { operation: "add", text: input.userText, tags: ["user"] }, rationale: "User asked to remember context." }];
   }
   if (/(report|writeup|finding)/.test(lower)) {
     return [{ kind: "respond", text: input.compactedSummary ?? "No summary available yet." }];

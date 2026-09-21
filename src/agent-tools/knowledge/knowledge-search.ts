@@ -19,7 +19,7 @@ export const knowledgeSearchTool: ToolDefinition = {
     }
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -38,18 +38,18 @@ export const knowledgeSearchTool: ToolDefinition = {
     if (!hits.length) {
       return { ok: true, summary: `no knowledge hits for ${query}`, output: "no matching entries; try web_search or different terms" };
     }
+    const leafTitle = (heading: string): string => {
+      const leaf = heading.split(" > ").pop() ?? heading;
+      return leaf.replace(/[`*_]+/g, "").replace(/\s+/g, " ").trim() || heading;
+    };
     const rendered = hits
-      .map((hit) => [
-        `[${hit.recordId}] ${hit.heading}`,
-        `source: ${hit.pack}@${hit.pin.slice(0, 12)} (${hit.license})`,
-        `matched: ${hit.matchedBy.join(", ")}${hit.docPath ? ` · path: ${hit.docPath}` : ""}`,
-        hit.snippet
-      ].join("\n"))
-      .join("\n\n");
+      .map((hit) => `[${hit.recordId}] ${leafTitle(hit.heading)}`)
+      .join("\n");
     return {
       ok: true,
       summary: `${hits.length} knowledge hit(s) for ${query}`,
-      output: `read full entries with knowledge_read <record_id>.\n\n${spotlightUntrusted(rendered)}`
+      output: `read full entries with knowledge_read <record_id>.\n\n${spotlightUntrusted(rendered)}`,
+      metadata: { hits: hits.length }
     };
   }
 };

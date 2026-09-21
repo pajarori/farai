@@ -1,101 +1,161 @@
+import { Resolver } from "node:dns/promises";
 import type { ToolDefinition } from "../../types";
 import { assertObject } from "../../utils";
-import { timeoutBackgroundResult } from "../shared/background-result";
-import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { integer, optionalStringList, projectDiscoveryResult, shellQuote, stringList, type JsonRecord } from "./projectdiscovery";
+import { integer, mapWithConcurrency, optionalStringList, projectDiscoveryResult, stringList, type JsonRecord } from "./projectdiscovery";
 
 const DNS_RECORD_TYPES = ["a", "aaaa", "cname", "ns", "txt", "srv", "ptr", "mx", "soa", "caa"] as const;
+type DnsRecordType = typeof DNS_RECORD_TYPES[number];
 
 export type DnsProbeRecord = JsonRecord & {
   name: string;
   records: Record<string, string[]>;
   resolver: string[];
+  status: "resolved" | "not_found" | "timeout" | "no_answer" | "error";
+  errors: Record<string, string>;
+  wildcard?: boolean;
+  wildcardName?: string;
 };
 
-export function buildDnsProbeCommand(args: Record<string, unknown>): string {
-  const names = stringList(args.names, "names", 2_000);
-  const requested = optionalStringList(args.recordTypes, "recordTypes", DNS_RECORD_TYPES.length);
-  const recordTypes = requested.length ? requested : ["a", "aaaa", "cname"];
-  if (recordTypes.some((value) => !DNS_RECORD_TYPES.includes(value as typeof DNS_RECORD_TYPES[number]))) throw new Error("recordTypes contains an unsupported DNS record type");
-  const timeout = integer(args.timeoutSeconds, 5, 1, 30);
-  const resolvers = optionalStringList(args.resolvers, "resolvers", 100);
-  const queries = names.flatMap((name) => recordTypes.map((type) => `${name} ${type.toUpperCase()}`));
-  const queryLines = queries.map(shellQuote).join(" ");
-  const fixed = ["dig", "+noall", "+answer", "+nocomments", "+tries=2", `+time=${timeout}`].join(" ");
-  const server = ` ${shellQuote(`@${resolvers[0] ?? "1.1.1.1"}`)}`;
-  return [
-    'file="$(mktemp /tmp/farai-dig.XXXXXX)" || exit 1',
-    'trap \'rm -f "$file"\' EXIT',
-    `printf '%s\\n' ${queryLines} > "$file"`,
-    `${fixed}${server} -f "$file"`
-  ].join("\n");
+function dnsErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string") return error.code;
+  return error instanceof Error ? error.name : "dns_error";
 }
 
-export function parseDnsProbeOutput(raw: string): { records: DnsProbeRecord[]; malformed: number } {
-  const byName = new Map<string, Record<string, string[]>>();
-  let malformed = 0;
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith(";")) continue;
-    const fields = trimmed.split(/\s+/);
-    if (fields.length < 5) {
-      malformed += 1;
-      continue;
+export function dnsProbeStatus(records: Record<string, string[]>, errors: Record<string, string>): DnsProbeRecord["status"] {
+  if (Object.values(records).some((values) => values.length > 0)) return "resolved";
+  const codes = Object.values(errors).map((value) => value.toUpperCase());
+  if (codes.some((value) => value.includes("TIMEOUT") || value === "ETIMEOUT")) return "timeout";
+  if (codes.length > 0 && codes.every((value) => value === "ENOTFOUND" || value === "ENODATA" || value === "ENODOMAIN")) return "not_found";
+  if (codes.length > 0) return "error";
+  return "no_answer";
+}
+
+function dnsSignature(records: Record<string, string[]>): string {
+  return Object.entries(records)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([type, values]) => values.slice().sort().map((value) => `${type}:${value}`))
+    .join("|");
+}
+
+function wildcardSibling(name: string): string | undefined {
+  const labels = name.replace(/\.$/, "").split(".").filter(Boolean);
+  if (labels.length < 3) return undefined;
+  return `farai-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}.${labels.slice(1).join(".")}`;
+}
+
+async function resolveType(resolver: Resolver, name: string, type: DnsRecordType): Promise<string[]> {
+  switch (type) {
+    case "a": return resolver.resolve4(name);
+    case "aaaa": return resolver.resolve6(name);
+    case "cname": return resolver.resolveCname(name);
+    case "ns": return resolver.resolveNs(name);
+    case "ptr": return resolver.resolvePtr(name);
+    case "txt": return (await resolver.resolveTxt(name)).map((chunks) => chunks.join(""));
+    case "mx": return (await resolver.resolveMx(name)).map((mx) => `${mx.priority} ${mx.exchange}`);
+    case "srv": return (await resolver.resolveSrv(name)).map((srv) => `${srv.priority} ${srv.weight} ${srv.port} ${srv.name}`);
+    case "caa": return (await resolver.resolveCaa(name)).map((caa) => JSON.stringify(caa));
+    case "soa": {
+      const soa = await resolver.resolveSoa(name);
+      return [`${soa.nsname} ${soa.hostmaster} ${soa.serial} ${soa.refresh} ${soa.retry} ${soa.expire} ${soa.minttl}`];
     }
-    const owner = fields[0]!.replace(/\.$/, "").toLowerCase();
-    const type = fields[3]!.toLowerCase();
-    const value = fields.slice(4).join(" ").replace(/\.$/, "");
-    if (!DNS_RECORD_TYPES.includes(type as typeof DNS_RECORD_TYPES[number])) continue;
-    const entry = byName.get(owner) ?? {};
-    (entry[type] ??= []).push(value);
-    byName.set(owner, entry);
   }
-  const records = [...byName.entries()].map(([name, entryRecords]): DnsProbeRecord => ({ name, records: entryRecords, resolver: [] }));
-  return { records, malformed };
+}
+
+export async function nativeDnsResolve(args: Record<string, unknown>, signal?: AbortSignal): Promise<DnsProbeRecord[]> {
+  const names = stringList(args.names, "names", 2_000);
+  const requested = optionalStringList(args.recordTypes, "recordTypes", DNS_RECORD_TYPES.length);
+  const recordTypes = (requested.length ? requested : ["a", "aaaa", "cname"]) as DnsRecordType[];
+  if (recordTypes.some((value) => !DNS_RECORD_TYPES.includes(value))) throw new Error("recordTypes contains an unsupported DNS record type");
+  const timeoutMs = integer(args.timeoutSeconds, 5, 1, 30) * 1_000;
+  const resolvers = optionalStringList(args.resolvers, "resolvers", 100);
+  const resolver = new Resolver({ timeout: timeoutMs, tries: 2 });
+  if (resolvers.length) resolver.setServers(resolvers);
+
+  const resolveName = async (name: string): Promise<DnsProbeRecord> => {
+    const entry: Record<string, string[]> = {};
+    const errors: Record<string, string> = {};
+    for (const type of recordTypes) {
+      try {
+        const values = await resolveType(resolver, name, type);
+        if (values.length) entry[type] = values;
+      } catch (error) {
+        errors[type] = dnsErrorCode(error);
+      }
+    }
+    return { name, records: entry, resolver: resolvers, status: dnsProbeStatus(entry, errors), errors };
+  };
+  const records = await mapWithConcurrency(names, 50, resolveName, signal);
+  if (args.wildcard === "off") return records;
+  const wildcardParents = [...new Set(records.flatMap((item) => {
+    const sibling = item.status === "resolved" ? wildcardSibling(item.name) : undefined;
+    return sibling ? [sibling.split(".").slice(1).join(".")] : [];
+  }))];
+  const wildcardNames = wildcardParents.map((parent) => `farai-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}.${parent}`);
+  if (!wildcardNames.length) return records;
+  const wildcardRecords = await mapWithConcurrency(wildcardNames, 20, resolveName, signal);
+  const wildcardByParent = new Map(wildcardRecords.map((item) => [item.name.split(".").slice(1).join("."), item]));
+  return records.map((item) => {
+    if (item.status !== "resolved") return item;
+    const parent = item.name.replace(/\.$/, "").split(".").slice(1).join(".");
+    const wildcard = wildcardByParent.get(parent);
+    if (!wildcard || wildcard.status !== "resolved" || dnsSignature(item.records) !== dnsSignature(wildcard.records)) return item;
+    return { ...item, wildcard: true, wildcardName: wildcard.name };
+  });
 }
 
 export const dnsProbeTool: ToolDefinition = {
   name: "dns_resolve",
-  description: "Resolve one or many hostnames with dig using selected DNS record types. Queries the public resolver 1.1.1.1 by default (the container's own resolver is unreliable); pass resolvers to override for internal names. Returns answer records grouped by name (following CNAME targets as their own entries). Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
+  description: "Resolve one or many hostnames using a fast native resolver that runs directly on the farai host (reliable — it does not depend on the container's DNS). Select DNS record types and optionally set custom resolver servers. Returns answer records grouped by name. Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
   inputSchema: {
     type: "object",
     required: ["names"],
     properties: {
       names: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2_000, uniqueItems: true }] },
       recordTypes: { type: "array", items: { type: "string", enum: [...DNS_RECORD_TYPES] }, maxItems: DNS_RECORD_TYPES.length, uniqueItems: true },
-      resolvers: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }], description: "optional custom resolver passed to dig as @resolver; defaults to the public resolver 1.1.1.1 because the container's default resolver is unreliable. set an internal resolver here for internal-only names" },
+      resolvers: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }], description: "optional resolver server ip(s); defaults to the host's system resolver" },
+      wildcard: { type: "string", enum: ["off", "auto"], description: "detect sibling wildcard DNS answers; defaults to auto" },
       timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 }
     },
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 180_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "recon",
-  renderHuman: defaultHumanRenderer,
-  renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const kali = backend(context);
-    const result = await kali.exec(buildDnsProbeCommand(args), 175_000, context.signal, 16_000_000);
-    const converted = timeoutBackgroundResult("dns_resolve", kali, result);
-    if (converted) return converted;
-    const parsed = parseDnsProbeOutput(result.stdout);
+    const started = performance.now();
+    const records = await nativeDnsResolve(args, context.signal);
+    const resolved = records.filter((item) => item.status === "resolved" && !item.wildcard).length;
     return projectDiscoveryResult(context, {
       tool: "dns_resolve",
-      backend: "dig",
-      result,
-      records: parsed.records,
-      malformed: parsed.malformed,
+      backend: "farai-native-dns",
+      result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
+      records,
+      malformed: 0,
       noun: "DNS result",
-      outputLines: parsed.records.map(renderDnsProbe),
-      metadata: { resolvedNames: parsed.records.filter((item) => Object.values(item.records).some((values) => values.length)).length }
+      outputLines: records.map(renderDnsProbe),
+      resultCount: resolved,
+      metadata: {
+        resolvedNames: resolved,
+        wildcardNames: records.filter((item) => item.wildcard).length,
+        notFoundNames: records.filter((item) => item.status === "not_found").length,
+        timedOutNames: records.filter((item) => item.status === "timeout").length,
+        errorNames: records.filter((item) => item.status === "error").length
+      }
     });
-  }
+  },
+  renderHuman: defaultHumanRenderer,
+  renderModel: defaultModelRenderer
 };
 
 function renderDnsProbe(item: DnsProbeRecord): string {
   const answers = Object.entries(item.records).flatMap(([type, values]) => values.map((value) => `${type.toUpperCase()} ${value}`));
-  return `${item.name}${answers.length ? ` · ${answers.join(" · ")}` : " · no answers"}`;
+  if (item.wildcard) return `${item.name} · wildcard DNS match`;
+  if (answers.length) return `${item.name} · ${answers.join(" · ")}`;
+  if (item.status === "not_found") return `${item.name} · not found`;
+  if (item.status === "timeout") return `${item.name} · resolver timeout`;
+  if (item.status === "error") return `${item.name} · resolver error`;
+  return `${item.name} · no answers`;
 }

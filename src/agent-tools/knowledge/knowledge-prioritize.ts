@@ -11,7 +11,7 @@ export const knowledgePrioritizeTool: ToolDefinition = {
     properties: { cve: { type: "string", description: "CVE identifier, e.g. CVE-2021-44228" } }
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

@@ -24,16 +24,15 @@ export function parseDirectoryResults(text: string): DirRow[] {
 }
 
 export function splitHttpResponse(text: string): { status?: string; headers: string; body: string; contentType?: string } {
-  const normalized = text.replaceAll("\r\n", "\n");
-  const boundary = normalized.indexOf("\n\n");
-  if (boundary < 0 || !normalized.startsWith("HTTP/")) return { headers: "", body: text };
-  const headers = normalized.slice(0, boundary);
-  const status = headers.split("\n")[0];
+  const response = parseHttpResponseChain(text).origin;
+  if (!response) return { headers: "", body: text };
+  const headers = response.headers;
+  const status = response.statusLine;
   const contentTypeLine = headers.split("\n").find((line) => /^content-type:/i.test(line));
   const contentType = contentTypeLine?.slice(contentTypeLine.indexOf(":") + 1).trim();
   return {
     headers,
-    body: normalized.slice(boundary + 2),
+    body: response.body,
     ...(status ? { status } : {}),
     ...(contentType ? { contentType } : {})
   };
@@ -50,3 +49,4 @@ export function unifiedEditDiff(path: string, oldText: string, newText: string):
     ...newLines.map((line) => `+${line}`)
   ].join("\n");
 }
+import { parseHttpResponseChain } from "../agent-tools/shared/http-response";

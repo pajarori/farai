@@ -13,7 +13,7 @@ export const sessionStopTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: (result) => result.summary,
   renderModel: defaultModelRenderer,

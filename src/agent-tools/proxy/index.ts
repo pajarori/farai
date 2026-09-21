@@ -3,14 +3,18 @@ import { assertObject, asString } from "../../utils";
 import { callMcpServerTool, isMcpErrorResult, renderMcpToolResult, updateManagedProxyPolicy } from "../mcp-manager";
 import { takeBytes } from "../shared/output-bound";
 import { proxyFlowDetailFromMcpInspect, proxyFlowsFromMcpTrafficSummary, type ProxyFlowDetail, type ProxyFlowKind, type ProxyFlowSummary } from "../services/mitmproxy/flows";
+import { rootSessionId } from "../services/mitmproxy/ownership";
 
 const SERVER = "mitmproxy-mcp";
 const render = (result: ToolResult): string => result.output ?? result.summary;
 
 async function call(context: Parameters<ToolDefinition["run"]>[1], tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  const owner = rootSessionId(context.session, context.store.loadSession);
   const result = await callMcpServerTool({
     workspace: context.workspace,
     ...(context.rootWorkspace ? { configWorkspace: context.rootWorkspace } : {}),
+    ...(context.rootWorkspace ? { rootWorkspace: context.rootWorkspace } : {}),
+    rootSessionId: owner,
     session: context.session,
     server: SERVER,
     tool,
@@ -21,12 +25,19 @@ async function call(context: Parameters<ToolDefinition["run"]>[1], tool: string,
   return result;
 }
 
+function ownerQuery(context: Parameters<ToolDefinition["run"]>[1], browserContextId?: string): { root_session_id: string; browser_context_id?: string } {
+  return {
+    root_session_id: rootSessionId(context.session, context.store.loadSession),
+    ...(browserContextId ? { browser_context_id: browserContextId } : {})
+  };
+}
+
 export const proxyScopeTool: ToolDefinition = {
   name: "proxy_scope",
-  description: "Read or replace the recording scope of Farai's managed proxy. allowedDomains only controls which flows are saved and displayed; it does not route, bypass, or pass traffic through. An empty list records every domain.",
+  description: "Read or replace the recording scope of Farai's managed proxy. allowedDomains only controls which flows are saved and displayed; it does not route, bypass, or pass traffic through. An empty list disables recording.",
   inputSchema: { type: "object", properties: { allowedDomains: { type: "array", items: { type: "string" } } }, additionalProperties: false },
   mutates: true,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: render,
   renderModel: render,
@@ -39,7 +50,7 @@ export const proxyScopeTool: ToolDefinition = {
     const raw = await call(context, "proxy_scope_get");
     const state = parseTextJson(raw) as { allowedDomains?: unknown } | undefined;
     const domains = Array.isArray(state?.allowedDomains) ? state.allowedDomains.map(String) : [];
-    return { ok: true, summary: domains.length ? `proxy scope: ${domains.join(", ")}` : "proxy scope: all traffic", output: domains.length ? domains.join("\n") : "all domains", metadata: { allowedDomains: domains } };
+    return { ok: true, summary: domains.length ? `proxy scope: ${domains.join(", ")}` : "proxy recording disabled", output: domains.length ? domains.join("\n") : "recording disabled", metadata: { allowedDomains: domains, recordingEnabled: domains.length > 0 } };
   }
 };
 
@@ -55,7 +66,7 @@ export const proxyPolicyTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: render,
   renderModel: render,
@@ -91,12 +102,13 @@ export const proxyFlowsTool: ToolDefinition = {
       kind: { type: "string", enum: ["http", "websocket", "tcp", "udp", "dns"] },
       filter: { type: "string" },
       method: { type: "string" },
-      statusClass: { type: "number", minimum: 1, maximum: 5 }
+      statusClass: { type: "number", minimum: 1, maximum: 5 },
+      browserContextId: { type: "string" }
     },
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: render,
   renderModel: render,
@@ -104,9 +116,14 @@ export const proxyFlowsTool: ToolDefinition = {
     assertObject(args, "args");
     const limit = typeof args.limit === "number" ? Math.max(1, Math.min(1000, Math.floor(args.limit))) : 100;
     const kind = typeof args.kind === "string" ? args.kind as ProxyFlowKind : undefined;
-    const raw = await call(context, "proxy_flow_summaries", { limit, ...(kind ? { kind } : {}) });
+    const browserContextId = typeof args.browserContextId === "string" ? args.browserContextId : undefined;
+    const root = rootSessionId(context.session, context.store.loadSession);
+    const raw = await call(context, "proxy_flow_summaries", { limit, ...(kind ? { kind } : {}), ...ownerQuery(context, browserContextId) });
     const flows = proxyFlowsFromMcpTrafficSummary(raw, {
       limit,
+      rootSessionId: root,
+      ...(browserContextId ? { browserContextId } : {}),
+      includeUnattributed: false,
       ...(kind ? { kind } : {}),
       ...(typeof args.filter === "string" ? { filter: args.filter } : {}),
       ...(typeof args.method === "string" ? { method: args.method } : {}),
@@ -121,14 +138,14 @@ export const proxyFlowGetTool: ToolDefinition = {
   description: "Inspect one captured proxy flow by exact flowId, including HTTP request and response data, WebSocket or raw stream messages, or DNS questions and answers. Use proxy_flows to discover ids and browser_network_request for browser-only request records not captured by the proxy.",
   inputSchema: { type: "object", required: ["flowId"], properties: { flowId: { type: "string" } }, additionalProperties: false },
   mutates: false,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: render,
   renderModel: render,
   run: async (args, context) => {
     assertObject(args, "args");
     const flowId = asString(args.flowId, "flowId");
-    const raw = await call(context, "proxy_flow_inspect", { flow_id: flowId });
+    const raw = await call(context, "proxy_flow_inspect", { flow_id: flowId, ...ownerQuery(context) });
     const flow = proxyFlowDetailFromMcpInspect(raw);
     if (!flow) throw new Error(`captured proxy flow not found: ${flowId}`);
     return { ok: true, summary: flowLine(flow), output: formatFlowDetail(flow), metadata: proxyFlowMetadata(flow) };
@@ -140,16 +157,17 @@ export const proxySitemapTool: ToolDefinition = {
   description: "Build a compact sitemap from captured HTTP and WebSocket traffic, grouped by host and path with observed methods and status codes. Use this to map routes from existing proxy traffic; it does not crawl the target or generate new requests.",
   inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 1000 }, host: { type: "string" } }, additionalProperties: false },
   mutates: false,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: render,
   renderModel: render,
   run: async (args, context) => {
     assertObject(args, "args");
     const limit = typeof args.limit === "number" ? Math.max(1, Math.min(1000, Math.floor(args.limit))) : 1000;
-    const raw = await call(context, "proxy_flow_summaries", { limit });
+    const root = rootSessionId(context.session, context.store.loadSession);
+    const raw = await call(context, "proxy_flow_summaries", { limit, ...ownerQuery(context) });
     const hostFilter = typeof args.host === "string" ? args.host.toLowerCase() : undefined;
-    const flows = proxyFlowsFromMcpTrafficSummary(raw, { limit }).filter((flow) => (flow.kind === "http" || flow.kind === "websocket") && (!hostFilter || flow.host.toLowerCase().includes(hostFilter)));
+    const flows = proxyFlowsFromMcpTrafficSummary(raw, { limit, rootSessionId: root, includeUnattributed: false }).filter((flow) => (flow.kind === "http" || flow.kind === "websocket") && (!hostFilter || flow.host.toLowerCase().includes(hostFilter)));
     const hosts = new Map<string, Map<string, Set<string>>>();
     for (const flow of flows) {
       const paths = hosts.get(flow.host) ?? new Map<string, Set<string>>();
@@ -180,7 +198,7 @@ export const proxyReplayTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 150_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: render,
   renderModel: render,
@@ -199,7 +217,8 @@ export const proxyReplayTool: ToolDefinition = {
       ...(typeof args.method === "string" ? { method: args.method } : {}),
       ...(normalizedHeaders ? { headers_json: JSON.stringify(normalizedHeaders) } : {}),
       ...(args.omitBody === true ? { body: "__omit__" } : typeof args.body === "string" ? { body: args.body } : {}),
-      ...(typeof args.timeoutSeconds === "number" ? { timeout: args.timeoutSeconds } : {})
+      ...(typeof args.timeoutSeconds === "number" ? { timeout: args.timeoutSeconds } : {}),
+      ...ownerQuery(context)
     });
     const result = parseTextJson(raw) as { ok?: unknown; parentFlowId?: unknown; descendantFlowId?: unknown; message?: unknown; error?: unknown } | undefined;
     if (!result || typeof result.ok !== "boolean") throw new Error(`invalid correlated replay response: ${renderMcpToolResult(raw)}`);
@@ -235,7 +254,7 @@ export const proxyInterceptTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: render,
   renderModel: render,
@@ -258,8 +277,9 @@ export const proxyInterceptTool: ToolDefinition = {
       return { ok: true, summary: action === "status" ? "checked manual interception" : `manual interception ${args.enabled === true ? "enabled" : "disabled"}`, output };
     }
     if (action === "list") {
-      const raw = await call(context, "proxy_intercept_list");
-      const flows = proxyFlowsFromMcpTrafficSummary(raw, { limit: 100 });
+      const root = rootSessionId(context.session, context.store.loadSession);
+      const raw = await call(context, "proxy_intercept_list", ownerQuery(context));
+      const flows = proxyFlowsFromMcpTrafficSummary(raw, { limit: 100, rootSessionId: root, includeUnattributed: false });
       return { ok: true, summary: `${flows.length} paused requests`, output: flows.length ? flows.map(flowLine).join("\n") : "no paused requests", metadata: proxyFlowCollectionMetadata(flows) };
     }
     const flowId = asString(args.flowId, "flowId");
@@ -271,7 +291,8 @@ export const proxyInterceptTool: ToolDefinition = {
       ...(typeof args.method === "string" ? { method: args.method } : {}),
       ...(typeof args.url === "string" ? { url: args.url } : {}),
       ...(normalizedHeaders ? { headers_json: JSON.stringify(normalizedHeaders) } : {}),
-      ...(typeof args.body === "string" ? { body: args.body } : {})
+      ...(typeof args.body === "string" ? { body: args.body } : {}),
+      ...ownerQuery(context)
     });
     const output = renderMcpToolResult(raw);
     return { ok: true, summary: `${action} intercepted request ${flowId}`, output };
@@ -283,14 +304,14 @@ export const proxyClearTool: ToolDefinition = {
   description: "Delete all currently captured proxy flows after confirm=true while preserving proxy scope and interception configuration. Use this to start a clean capture window; the removed traffic cannot be inspected afterward.",
   inputSchema: { type: "object", required: ["confirm"], properties: { confirm: { type: "boolean" } }, additionalProperties: false },
   mutates: true,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: render,
   renderModel: render,
   run: async (args, context) => {
     assertObject(args, "args");
     if (args.confirm !== true) throw new Error("proxy_clear requires confirm=true");
-    const raw = await call(context, "clear_traffic");
+    const raw = await call(context, "proxy_clear_flows", ownerQuery(context));
     return { ok: true, summary: "cleared captured proxy traffic", output: renderMcpToolResult(raw) };
   }
 };

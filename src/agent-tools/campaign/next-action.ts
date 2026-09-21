@@ -8,7 +8,7 @@ export const campaignNextActionTool: ToolDefinition = {
   description: "Select one recommended next campaign action from durable state, evidence gaps, prior attempts, confidence, novelty, and estimated cost. This is a bounded prioritization signal, not a workflow prescription; the model decides whether and how to execute it.",
   inputSchema: { type: "object", required: [], properties: { campaignId: { type: "string" } } },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

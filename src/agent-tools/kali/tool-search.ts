@@ -3,6 +3,7 @@ import { assertObject, asString } from "../../utils";
 import { backend } from "../shared/backend";
 import { timeoutBackgroundResult } from "../shared/background-result";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
+import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
 
 export type KaliToolMatch = {
   name: string;
@@ -131,8 +132,6 @@ if catalog is None:
 
     supplemental = {
         "dnsx": "high-speed DNS resolution and record enrichment with JSONL output",
-        "httpx": "HTTP service probing, technology detection, and TLS enrichment with JSONL output",
-        "katana": "bounded web crawler with JavaScript, form, XHR, and headless discovery modes",
         "naabu": "fast SYN/CONNECT port scanner with JSONL output",
         "nuclei": "template-based vulnerability scanner with structured findings",
         "subfinder": "passive subdomain discovery from multiple public sources",
@@ -304,7 +303,7 @@ export const kaliToolSearchTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -315,7 +314,7 @@ export const kaliToolSearchTool: ToolDefinition = {
     const limit = typeof args.limit === "number" && Number.isInteger(args.limit) ? Math.max(1, Math.min(20, args.limit)) : 8;
     const category = typeof args.category === "string" ? args.category : undefined;
     const kali = backend(context);
-    const result = await kali.exec(kaliToolSearchCommand({ query, limit, ...(category ? { category } : {}), refresh: args.refresh === true }), 25_000, context.signal, 32_000);
+    const result = await kali.exec(kaliToolSearchCommand({ query, limit, ...(category ? { category } : {}), refresh: args.refresh === true }), BACKGROUND_HANDOFF_TIMEOUT_MS, context.signal, 32_000);
     const converted = timeoutBackgroundResult("kali tool inventory", kali, result);
     if (converted) return converted;
     if (result.exitCode !== 0) {

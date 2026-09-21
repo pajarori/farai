@@ -8,7 +8,7 @@ export const campaignSearchTool: ToolDefinition = {
   description: "Search persistent campaign assets, observations, hypotheses, findings, and evidence, or return a bounded dossier when no query is supplied or dossier=true. Use this to recover target state before choosing new work and avoid rediscovering existing information.",
   inputSchema: { type: "object", required: [], properties: { campaignId: { type: "string" }, query: { type: "string" }, limit: { type: "number" }, dossier: { type: "boolean" } } },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

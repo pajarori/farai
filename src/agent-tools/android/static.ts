@@ -42,7 +42,7 @@ export const androidDecompileTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 240_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -79,7 +79,7 @@ export const androidManifestTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -123,7 +123,7 @@ export const androidPermissionsTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -155,7 +155,7 @@ export const androidExportedComponentsTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -199,7 +199,7 @@ export const androidScanSecretsTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -233,7 +233,7 @@ export const androidGrepApkTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 90_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

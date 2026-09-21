@@ -1,3 +1,4 @@
+import { createTextAttributes } from "@opentui/core";
 import { For, Show, type JSX } from "solid-js";
 import type { TimelineRow } from "../../renderers";
 import { COLOR } from "../../theme";
@@ -9,21 +10,39 @@ type PlanRowProps = {
   animated?: boolean | undefined;
 };
 
+const boldAttributes = createTextAttributes({ bold: true });
+const completedAttributes = createTextAttributes({ dim: true, strikethrough: true });
+const italicAttributes = createTextAttributes({ dim: true, italic: true });
+
 export function PlanRow(props: PlanRowProps): JSX.Element {
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
-      <Show when={props.row.streaming} fallback={<text fg={COLOR.text}>{`• ${props.row.title}`}</text>}>
+      <Show when={props.row.streaming} fallback={
+        <box style={{ flexDirection: "row" }}>
+          <text fg={COLOR.dim}>{"• "}</text>
+          <text fg={COLOR.text} attributes={boldAttributes}>{props.row.title}</text>
+        </box>
+      }>
         <FaraiSpinner label={props.row.title} color={COLOR.accent} animated={props.animated} />
       </Show>
       <Show when={props.row.explanation}>
-        {(explanation) => <text fg={COLOR.dim}>{`  └ ${explanation()}`}</text>}
+        {(explanation) => <text fg={COLOR.dim} attributes={italicAttributes}>{`  └ ${explanation()}`}</text>}
       </Show>
       <Show when={props.row.items.length > 0}>
-        <box style={{ flexDirection: "column", paddingLeft: 2 }}>
-          <For each={props.row.items}>{(item) => (
-            <text fg={planItemColor(item.status)}>
-              {`${planMarker(item.status)} ${item.step}`}
-            </text>
+        <box style={{ flexDirection: "column" }}>
+          <For each={props.row.items}>{(item, index) => (
+            <box style={{ flexDirection: "row" }}>
+              <text fg={COLOR.dim}>{!props.row.explanation && index() === 0 ? "  └ " : "    "}</text>
+              <text fg={planItemColor(item.status)}>{`${planMarker(item.status)} `}</text>
+              <text
+                fg={planItemColor(item.status)}
+                attributes={planItemAttributes(item.status)}
+                wrapMode="word"
+                style={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }}
+              >
+                {item.step}
+              </text>
+            </box>
           )}</For>
         </box>
       </Show>
@@ -45,6 +64,11 @@ function planItemColor(status: string): string {
 
 function planMarker(status: string): string {
   if (status === "completed") return "✔";
-  if (status === "in_progress") return "□";
   return "□";
+}
+
+function planItemAttributes(status: string): number {
+  if (status === "completed") return completedAttributes;
+  if (status === "in_progress") return boldAttributes;
+  return 0;
 }

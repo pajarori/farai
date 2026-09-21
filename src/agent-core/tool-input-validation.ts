@@ -1,6 +1,7 @@
 import AjvDraft7, { type ErrorObject, type ValidateFunction } from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
+import { stripModelDeadlineArg } from "./tool-execution-control";
 
 const validatorCache = new WeakMap<Record<string, unknown>, ValidateFunction>();
 
@@ -8,9 +9,10 @@ const draft7 = new AjvDraft7({ allErrors: false, strict: false, validateFormats:
 const draft2019 = new Ajv2019({ allErrors: false, strict: false, validateFormats: false, allowUnionTypes: true });
 const draft2020 = new Ajv2020({ allErrors: false, strict: false, validateFormats: false, allowUnionTypes: true });
 
-export function validateToolArgs(schema: Record<string, unknown> | undefined, args: unknown): string | undefined {
+export function validateToolArgs(schema: Record<string, unknown> | undefined, rawArgs: unknown): string | undefined {
   if (!schema || typeof schema !== "object") return undefined;
-  if (!args || typeof args !== "object" || Array.isArray(args)) return "expected an object of arguments";
+  if (!rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) return "expected an object of arguments";
+  const args = stripModelDeadlineArg(rawArgs);
   const selectedBranch = selectDiscriminatedBranch(schema, args as Record<string, unknown>);
   if (selectedBranch?.error) return selectedBranch.error;
   if (selectedBranch?.schema) return validateAgainstSchema(selectedBranch.schema, args);
@@ -170,9 +172,41 @@ function resolveSchemaPointer(schema: Record<string, unknown>, schemaPath: strin
 function unexpectedFieldError(path: string, property: string, schema: Record<string, unknown>): string {
   const field = joinFieldPath(path, property);
   const enumOwner = enumOwnerForValue(schema, property);
-  return enumOwner
-    ? `unexpected field "${field}"; use field "${enumOwner}" with value "${property}"`
+  if (enumOwner) return `unexpected field "${field}"; use field "${enumOwner}" with value "${property}"`;
+  const accepted = acceptedFieldsAt(schema, path);
+  return accepted.length
+    ? `unexpected field "${field}"; accepted fields are: ${accepted.join(", ")}`
     : `unexpected field "${field}"`;
+}
+
+function acceptedFieldsAt(schema: Record<string, unknown>, path: string): string[] {
+  let node: unknown = schema;
+  const segments = path ? path.split(".").filter(Boolean) : [];
+  for (const segment of segments) {
+    if (!node || typeof node !== "object") return [];
+    const record = node as Record<string, unknown>;
+    if (/^\[\d+\]$/.test(segment)) node = record.items;
+    else {
+      const properties = record.properties;
+      node = properties && typeof properties === "object" ? (properties as Record<string, unknown>)[segment.replace(/\[\d+\]$/, "")] : undefined;
+    }
+  }
+  const target = collectAcceptedProperties(node);
+  return [...target];
+}
+
+function collectAcceptedProperties(node: unknown): Set<string> {
+  const names = new Set<string>();
+  if (!node || typeof node !== "object" || Array.isArray(node)) return names;
+  const record = node as Record<string, unknown>;
+  if (record.properties && typeof record.properties === "object" && !Array.isArray(record.properties)) {
+    for (const key of Object.keys(record.properties as Record<string, unknown>)) names.add(key);
+  }
+  for (const key of ["oneOf", "anyOf", "allOf"]) {
+    const branches = record[key];
+    if (Array.isArray(branches)) for (const branch of branches) for (const name of collectAcceptedProperties(branch)) names.add(name);
+  }
+  return names;
 }
 
 function enumOwnerForValue(schema: unknown, value: string): string | undefined {

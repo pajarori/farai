@@ -4,6 +4,7 @@ import type { BackgroundJob, SessionMailboxItem, ToolCallRecord } from "../../ty
 import { id, nowIso } from "../../utils";
 import type { SqliteStore } from "../../agent-store/sqlite-store";
 import { takeBytes } from "../../agent-tools/shared/output-bound";
+import { classifyToolError } from "../tool-error-category";
 
 export type ProcessJobStart = {
   sessionId: string;
@@ -167,6 +168,7 @@ export class JobManager {
       status: "failed",
       settleToolStatus: "error",
       error,
+      errorCategory: classifyToolError({ error }),
       mailbox: {
         sessionId: current.sessionId,
         kind: "agent_completion",
@@ -192,7 +194,8 @@ export class JobManager {
         status: "cancelled",
         settleToolStatus: "error",
         deliveryState: "suppressed",
-        error: "background job cancelled."
+        error: "background job cancelled.",
+        errorCategory: "cancelled"
       });
       return completed.job;
     }
@@ -201,6 +204,7 @@ export class JobManager {
       status: "cancelled",
       settleToolStatus: "error",
       error: "background job cancelled.",
+      errorCategory: "cancelled",
       mailbox: this.mailboxInput(current, "cancelled", "background job cancelled.")
     });
     this.onMailbox(completed.mailbox, completed.job);
@@ -222,6 +226,7 @@ export class JobManager {
       status: "lost",
       settleToolStatus: "error",
       error,
+      errorCategory: classifyToolError({ error }),
       mailbox: this.mailboxInput(current, "lost", error)
     });
     this.onMailbox(completed.mailbox, completed.job);
@@ -239,6 +244,7 @@ export class JobManager {
       settleToolStatus: status === "succeeded" ? "done" : "error",
       ...(current.result !== undefined ? { result: current.result } : {}),
       ...(current.error ? { error: current.error } : {}),
+      ...(status === "cancelled" ? { errorCategory: "cancelled" as const } : current.error ? { errorCategory: classifyToolError({ error: current.error }) } : {}),
       ...(current.outputArtifactId ? { outputArtifactId: current.outputArtifactId } : {}),
       mailbox: current.kind === "agent"
         ? {
@@ -278,6 +284,7 @@ export class JobManager {
         ...(outputArtifact ? { outputArtifactId: outputArtifact.id } : {})
       },
       ...(status === "failed" ? { error: summary } : {}),
+      ...(status === "failed" ? { errorCategory: classifyToolError({ error: summary }) } : {}),
       ...(outputArtifact ? { outputArtifactId: outputArtifact.id } : {}),
       mailbox: this.mailboxInput(current, status, summary, outputArtifact?.id)
     });
@@ -306,7 +313,7 @@ export class JobManager {
         summary,
         ...(outputArtifactId ? { outputArtifactId } : {})
       },
-      triggerPolicy: job.kind === "agent" ? "context" : "wake",
+      triggerPolicy: "context",
       dedupeKey: `job:${job.id}:completion`
     };
   }

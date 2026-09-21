@@ -1,142 +1,193 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject } from "../../utils";
-import { timeoutBackgroundResult } from "../shared/background-result";
-import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { inputFileCommand, integer, parseJsonLines, projectDiscoveryResult, record, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
+import { integer, mapWithConcurrency, projectDiscoveryResult, stringList, type JsonRecord } from "./projectdiscovery";
 
 export type WebCrawlRecord = JsonRecord & {
   url: string;
   method: string;
   statusCode?: number;
-  source?: string;
-  tag?: string;
   depth?: number;
+  contentType?: string;
   contentLength?: number;
   technologies: string[];
   forms: number;
   xhrRequests: number;
+  failed?: boolean;
   error?: string;
 };
 
-export function buildWebCrawlCommand(args: Record<string, unknown>): string {
-  const targets = stringList(args.targets, "targets", 100);
-  const depth = integer(args.depth, 3, 1, 10);
-  const timeout = integer(args.timeoutSeconds, 10, 1, 60);
-  const maxPages = integer(args.maxPagesPerDomain, 1_000, 1, 20_000);
-  const maxResponseSize = integer(args.maxResponseBytes, 4_194_304, 1_024, 16_777_216);
-  const rateLimit = integer(args.rateLimit, 100, 1, 1_000);
-  const concurrency = integer(args.concurrency, 10, 1, 100);
-  const parallelism = integer(args.parallelism, 5, 1, 50);
-  const command = [
-    "-jsonl", "-silent", "-nc", "-duc", "-or", "-ob", "-td", "-fx",
-    "-d", String(depth), "-timeout", String(timeout), "-mdp", String(maxPages),
-    "-mrs", String(maxResponseSize), "-rl", String(rateLimit), "-c", String(concurrency), "-p", String(parallelism)
-  ];
-  if (args.javascript === true || args.headless === true) command.push("-jc");
-  if (args.ignoreQueryParameters === true) command.push("-iqp");
-  if (args.filterSimilar === true) command.push("-fsu");
-  const scope = typeof args.scope === "string" ? args.scope : "registrable_domain";
-  if (scope === "none") command.push("-ns");
-  else command.push("-fs", scope === "fqdn" ? "fqdn" : "rdn");
-  const knownFiles = typeof args.knownFiles === "string" ? args.knownFiles : "none";
-  if (knownFiles !== "none") command.push("-kf", knownFiles === "all" ? "all" : knownFiles === "robots" ? "robotstxt" : "sitemapxml");
-  if (args.headless === true) command.push("-hl", "-xhr", "-scp", "/usr/bin/chromium", "-nos");
-  return inputFileCommand("katana", command, targets, "-u");
+function hasScheme(target: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(target);
 }
 
-export function parseWebCrawlOutput(raw: string): { records: WebCrawlRecord[]; malformed: number } {
-  const parsed = parseJsonLines(raw);
-  return { records: parsed.records.map(normalizeWebCrawl), malformed: parsed.malformed };
+function seedUrl(target: string): string {
+  return hasScheme(target) ? target : `https://${target}`;
+}
+
+function apexOf(hostname: string): string {
+  const labels = hostname.toLowerCase().split(".").filter(Boolean);
+  return labels.length <= 2 ? labels.join(".") : labels.slice(-2).join(".");
+}
+
+function inScope(candidate: URL, seeds: URL[], scope: string): boolean {
+  if (scope === "none") return true;
+  return seeds.some((seed) => {
+    if (scope === "fqdn") return candidate.hostname.toLowerCase() === seed.hostname.toLowerCase();
+    const apex = apexOf(seed.hostname);
+    const host = candidate.hostname.toLowerCase();
+    return host === apex || host.endsWith(`.${apex}`);
+  });
+}
+
+function extractLinks(baseUrl: string, html: string): string[] {
+  const links = new Set<string>();
+  const pattern = /(?:href|src)\s*=\s*["']([^"'#\s]+)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(html)) !== null) {
+    const raw = match[1];
+    if (!raw || raw.startsWith("data:") || raw.startsWith("javascript:") || raw.startsWith("mailto:") || raw.startsWith("tel:")) continue;
+    try {
+      links.add(new URL(raw, baseUrl).toString());
+    } catch { }
+  }
+  return [...links];
+}
+
+async function fetchPage(url: string, timeoutMs: number, maxBytes: number, signal?: AbortSignal): Promise<{ record: WebCrawlRecord; html: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("timed out")), timeoutMs);
+  const onAbort = () => controller.abort(signal?.reason);
+  if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: { "user-agent": "Mozilla/5.0 Farai/0.1", accept: "text/html,*/*" },
+      signal: controller.signal,
+      tls: { rejectUnauthorized: false }
+    } as RequestInit);
+    const contentType = response.headers.get("content-type") ?? undefined;
+    const isHtml = contentType ? /html|xml/i.test(contentType) : false;
+    let html = "";
+    if (isHtml && response.body) {
+      const buffer = await response.arrayBuffer();
+      html = new TextDecoder().decode(buffer.byteLength > maxBytes ? buffer.slice(0, maxBytes) : buffer);
+    } else {
+      try { await response.body?.cancel(); } catch { }
+    }
+    const headerLength = Number(response.headers.get("content-length") ?? "");
+    const contentLength: number | undefined = Number.isFinite(headerLength) ? headerLength : html ? html.length : undefined;
+    return {
+      record: {
+        url: response.url || url,
+        method: "GET",
+        statusCode: response.status,
+        ...(contentType ? { contentType } : {}),
+        ...(contentLength !== undefined ? { contentLength } : {}),
+        technologies: [],
+        forms: html ? (html.match(/<form\b/gi)?.length ?? 0) : 0,
+        xhrRequests: 0
+      },
+      html
+    };
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    return {
+      record: { url, method: "GET", failed: true, error: (error instanceof Error ? error.message : String(error)).slice(0, 240), technologies: [], forms: 0, xhrRequests: 0 } as WebCrawlRecord,
+      html: ""
+    };
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function nativeWebCrawl(args: Record<string, unknown>, signal?: AbortSignal): Promise<WebCrawlRecord[]> {
+  const targets = stringList(args.targets, "targets", 100).map(seedUrl);
+  const seeds = targets.flatMap((target) => { try { return [new URL(target)]; } catch { return []; } });
+  const depthLimit = integer(args.depth, 2, 1, 5);
+  const maxPages = integer(args.maxPagesPerDomain, 200, 1, 2_000);
+  const timeoutMs = integer(args.timeoutSeconds, 8, 1, 60) * 1_000;
+  const maxBytes = integer(args.maxResponseBytes, 2_097_152, 1_024, 8_388_608);
+  const concurrency = integer(args.concurrency, 10, 1, 50);
+  const scope = typeof args.scope === "string" ? args.scope : "registrable_domain";
+  const visited = new Set<string>();
+  const records: WebCrawlRecord[] = [];
+  let frontier = [...new Set(targets)];
+  for (let depth = 0; depth <= depthLimit && frontier.length > 0 && records.length < maxPages; depth += 1) {
+    if (signal?.aborted) throw signal.reason ?? new Error("cancelled");
+    const batch = frontier.filter((url) => !visited.has(url)).slice(0, maxPages - records.length);
+    for (const url of batch) visited.add(url);
+    const results = await mapWithConcurrency(batch, concurrency, (url) => fetchPage(url, timeoutMs, maxBytes, signal), signal);
+    const next = new Set<string>();
+    for (const { record, html } of results) {
+      records.push({ ...record, depth });
+      if (depth < depthLimit && html) {
+        for (const link of extractLinks(record.url, html)) {
+          if (visited.has(link)) continue;
+          let candidate: URL;
+          try { candidate = new URL(link); } catch { continue; }
+          if (candidate.protocol !== "http:" && candidate.protocol !== "https:") continue;
+          if (inScope(candidate, seeds, scope)) next.add(candidate.toString());
+        }
+      }
+    }
+    frontier = [...next];
+  }
+  return records;
 }
 
 export const webCrawlTool: ToolDefinition = {
   name: "web_crawl",
-  description: "Crawl one or many authorized web targets with a static-first katana profile and return normalized discovered URLs, methods, status codes, technologies, forms, and XHR counts without embedding response bodies. Enable JavaScript or headless mode only when required; use browser tools for interactive workflows or authenticated state.",
+  description: "Crawl one or many authorized web targets with a fast native host crawler and return normalized discovered URLs, methods, status codes, content types, and form counts without embedding response bodies. Static crawl only (follows same-scope links up to a bounded depth); use browser tools for JavaScript-rendered or authenticated workflows.",
   inputSchema: {
     type: "object",
     required: ["targets"],
     properties: {
       targets: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 100, uniqueItems: true }] },
-      depth: { type: "integer", minimum: 1, maximum: 10 },
+      depth: { type: "integer", minimum: 1, maximum: 5 },
       scope: { type: "string", enum: ["fqdn", "registrable_domain", "none"] },
-      javascript: { type: "boolean" },
-      headless: { type: "boolean" },
-      knownFiles: { type: "string", enum: ["none", "robots", "sitemap", "all"] },
-      ignoreQueryParameters: { type: "boolean" },
-      filterSimilar: { type: "boolean" },
-      maxPagesPerDomain: { type: "integer", minimum: 1, maximum: 20_000 },
-      maxResponseBytes: { type: "integer", minimum: 1_024, maximum: 16_777_216 },
+      maxPagesPerDomain: { type: "integer", minimum: 1, maximum: 2_000 },
+      maxResponseBytes: { type: "integer", minimum: 1_024, maximum: 8_388_608 },
       timeoutSeconds: { type: "integer", minimum: 1, maximum: 60 },
-      rateLimit: { type: "integer", minimum: 1, maximum: 1_000 },
-      concurrency: { type: "integer", minimum: 1, maximum: 100 },
-      parallelism: { type: "integer", minimum: 1, maximum: 50 }
+      concurrency: { type: "integer", minimum: 1, maximum: 50 }
     },
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 600_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "recon",
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const kali = backend(context);
-    const result = await kali.exec(buildWebCrawlCommand(args), 595_000, context.signal, 32_000_000);
-    const converted = timeoutBackgroundResult("web_crawl", kali, result);
-    if (converted) return converted;
-    const parsed = parseWebCrawlOutput(result.stdout);
+    const started = performance.now();
+    const records = await nativeWebCrawl(args, context.signal);
     return projectDiscoveryResult(context, {
       tool: "web_crawl",
-      backend: "katana",
-      result,
-      records: parsed.records,
-      malformed: parsed.malformed,
+      backend: "farai-native-crawl",
+      result: { exitCode: 0, stdout: "", stderr: "", durationMs: Math.round(performance.now() - started), timedOut: false },
+      records,
+      malformed: 0,
       noun: "endpoint",
-      outputLines: parsed.records.map(renderWebCrawl),
+      outputLines: records.map(renderWebCrawl),
       metadata: {
-        uniqueUrls: new Set(parsed.records.map((item) => item.url)).size,
-        forms: parsed.records.reduce((total, item) => total + item.forms, 0),
-        xhrRequests: parsed.records.reduce((total, item) => total + item.xhrRequests, 0)
+        uniqueUrls: new Set(records.map((item) => item.url)).size,
+        forms: records.reduce((total, item) => total + item.forms, 0),
+        failedRequests: records.filter((item) => item.failed).length
       }
     });
   }
 };
 
-function normalizeWebCrawl(value: JsonRecord): WebCrawlRecord {
-  const request = record(value.request);
-  const response = record(value.response);
-  const url = text(request?.endpoint) ?? text(request?.url) ?? text(value.endpoint) ?? text(value.url) ?? "unknown";
-  const source = text(value.source);
-  const tag = text(value.tag);
-  const error = text(value.error);
-  const statusCode = typeof response?.status_code === "number" ? response.status_code : typeof value.status_code === "number" ? value.status_code : undefined;
-  const depth = typeof value.depth === "number" ? value.depth : undefined;
-  const contentLength = typeof response?.content_length === "number" ? response.content_length : undefined;
-  return {
-    url,
-    method: text(request?.method) ?? text(value.method) ?? "GET",
-    ...(statusCode !== undefined ? { statusCode } : {}),
-    ...(source ? { source } : {}),
-    ...(tag ? { tag } : {}),
-    ...(depth !== undefined ? { depth } : {}),
-    ...(contentLength !== undefined ? { contentLength } : {}),
-    technologies: textArray(value.technologies ?? response?.technologies),
-    forms: Array.isArray(value.forms) ? value.forms.length : 0,
-    xhrRequests: Array.isArray(value.xhr_requests) ? value.xhr_requests.length : 0,
-    ...(error ? { error } : {})
-  };
-}
-
 function renderWebCrawl(item: WebCrawlRecord): string {
+  if (item.failed) return `failed ${item.method} ${item.url}${item.error ? ` · ${item.error}` : ""}`;
   return [
     `${item.method} ${item.url}`,
     item.statusCode,
-    item.tag,
-    item.technologies.length ? item.technologies.join(", ") : undefined,
-    item.forms ? `${item.forms} form${item.forms === 1 ? "" : "s"}` : undefined,
-    item.xhrRequests ? `${item.xhrRequests} xhr` : undefined,
-    item.error
+    item.contentType,
+    item.forms ? `${item.forms} form${item.forms === 1 ? "" : "s"}` : undefined
   ].filter((value) => value !== undefined && value !== "").join(" · ");
 }

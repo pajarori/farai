@@ -36,6 +36,7 @@ export type ChatRequest = {
   promptCacheKey?: string;
   temperature?: number;
   maxOutputTokens?: number | undefined;
+  serviceTier?: string | undefined;
   signal?: AbortSignal | undefined;
   sessionId: string;
 };

@@ -11,7 +11,7 @@ export const knowledgeResolveTool: ToolDefinition = {
     properties: { name: { type: "string", description: "identifier (CVE-2021-44228, CWE-89, T1190) or name fragment (log4shell, sql injection)" } }
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

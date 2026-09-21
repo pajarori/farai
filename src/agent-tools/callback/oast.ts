@@ -21,7 +21,7 @@ export const callbackOastTool: ToolDefinition = {
   description: "Start a public Interactsh out-of-band session and return unique callback domains for authorized blind SSRF, XXE, command-injection, or similar interaction tests. Trigger the payload on the target, then poll the returned process with command_poll for DNS or HTTP interactions.",
   inputSchema: { type: "object", properties: { yieldMs: { type: "number" } } },
   mutates: true,
-  timeoutMs: 15_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

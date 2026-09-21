@@ -17,7 +17,7 @@ export const campaignCheckpointTool: ToolDefinition = {
     }
   },
   mutates: true,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

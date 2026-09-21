@@ -1,7 +1,8 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject, asString } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { containerPathKind, containerRelativePath, containerStatMtime, containerWorkspace, containerWriteFile, resolveContainerPath } from "./container-fs";
+import { containerPathKind, containerReadFile, containerRelativePath, containerStatMtime, containerWorkspace, containerWriteFile, resolveContainerPath } from "./container-fs";
+import { previewWrite } from "./shared";
 import { appendDiagnosticReport } from "../../agent-lsp";
 
 export const fsWriteTool: ToolDefinition = {
@@ -13,7 +14,7 @@ export const fsWriteTool: ToolDefinition = {
     properties: { path: { type: "string" }, content: { type: "string" } }
   },
   mutates: true,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -23,16 +24,18 @@ export const fsWriteTool: ToolDefinition = {
     const workspace = containerWorkspace(context);
     const existed = (await containerPathKind(context, path)) === "file";
     const content = asString(args.content, "content");
+    const previous = existed ? await containerReadFile(context, path).catch(() => "") : "";
     await containerWriteFile(context, path, content);
     if (context.fileState) {
       const mtime = await containerStatMtime(context, path);
       context.fileState.set(context.session.id, { path: resolveContainerPath(path, workspace), content, mtime: mtime ?? Date.now() });
     }
     const diagnostic = await context.lsp?.diagnose({ path, content }).catch(() => undefined);
+    const preview = previewWrite(previous, content, !existed);
     return {
       ok: true,
       summary: `${existed ? "wrote" : "created"} ${containerRelativePath(path, workspace)}`,
-      output: appendDiagnosticReport(containerRelativePath(path, workspace), diagnostic) ?? containerRelativePath(path, workspace)
+      output: appendDiagnosticReport(preview, diagnostic) ?? preview
     };
   }
 };

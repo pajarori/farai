@@ -36,11 +36,13 @@ export type ToolProvenance = {
 };
 
 export type ToolStatus = "pending" | "running" | "running_background" | "done" | "error";
+export type ToolLifecycleState = "pending" | "running" | "background" | "succeeded" | "failed" | "cancelled";
+export type ToolErrorCategory = "cancelled" | "deadline" | "invalid_input" | "not_found" | "permission_denied" | "authentication_failed" | "precondition_failed" | "conflict" | "rate_limited" | "unreachable" | "unavailable" | "backend_failure";
 export type JobKind = "process" | "agent";
 export type JobStatus = "created" | "starting" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled" | "lost";
 export type JobCancellationPolicy = "turn" | "session" | "runtime";
 export type JobDeliveryState = "pending" | "enqueued" | "consumed" | "suppressed";
-export type MailboxKind = "user" | "job_completion" | "agent_completion" | "system" | "control";
+export type MailboxKind = "user" | "job_completion" | "agent_completion" | "agent_report" | "system" | "control";
 export type MailboxTriggerPolicy = "wake" | "queue" | "interrupt" | "control" | "context";
 export type MailboxState = "queued" | "claimed" | "consumed" | "cancelled";
 export type TurnStatus = "running" | "completed" | "failed" | "cancelled";
@@ -290,10 +292,15 @@ export type Session = {
   summary?: string;
   summaryUpdatedAt?: string;
   toolScope?: string[];
+  nickname?: string;
+  agentPath?: string;
+  serviceTier?: string;
   archivedAt?: string;
   createdAt: string;
   updatedAt: string;
 };
+
+export type SubagentForkMode = "none" | "full" | { lastTurns: number };
 
 export type Note = {
   id: string;
@@ -494,6 +501,9 @@ export type ToolCallRecord = {
   processId?: string;
   providerToolCallId?: string;
   liveOutput?: string;
+  terminalSummary?: string;
+  diagnostic?: string;
+  errorCategory?: ToolErrorCategory;
 };
 
 export type BackgroundJob = {
@@ -592,6 +602,7 @@ export type AgentPromptResult = {
 export type ToolResult = {
   ok: boolean;
   summary: string;
+  errorCategory?: ToolErrorCategory;
   output?: string;
   evidence?: Evidence[];
   status?: ToolStatus;
@@ -674,8 +685,9 @@ export type ToolContext = {
   onOutputChunk?: (chunk: string, stream: "stdout" | "stderr") => void;
   cancelJob?: (jobId: string) => Promise<BackgroundJob>;
   availableTools?: () => ToolDefinition[];
-  delegateSession?: (input: { title: string; prompt: string; lane?: string; tools?: string[]; model?: string; mode?: "attached" | "detached"; sessionId?: string; linkToolCall?: boolean; campaignRunId?: string; campaignClaimId?: string; campaignClaimOwner?: string }) => Promise<{ sessionId: string; response?: string; jobId?: string }>;
+  delegateSession?: (input: { title: string; prompt: string; lane?: string; tools?: string[]; model?: string; mode?: "attached" | "detached"; sessionId?: string; linkToolCall?: boolean; forkMode?: SubagentForkMode; serviceTier?: string; campaignRunId?: string; campaignClaimId?: string; campaignClaimOwner?: string }) => Promise<{ sessionId: string; response?: string; jobId?: string }>;
   agentControl?: AgentControl;
+  reportToParent?: (message: string) => { parentSessionId: string };
   worktreeControl?: WorktreeControl;
   requestUserInput?: (input: UserInputRequest, signal?: AbortSignal) => Promise<UserInputAnswer>;
   campaignControl?: {
@@ -741,6 +753,7 @@ export type ToolDefinition<TArgs = unknown> = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  facadeOperations?: Readonly<Record<string, string>>;
   outputSchema?: Record<string, unknown>;
   provenance?: ToolProvenance;
   mutates: boolean;

@@ -6,7 +6,7 @@ export const updatePlanTool: ToolDefinition = {
   name: "task_plan_internal",
   description: "Replace the current session plan with ordered steps and statuses.",
   inputSchema: { type: "object", required: ["plan"], properties: { plan: { type: "array", items: { type: "object", required: ["step", "status"], properties: { step: { type: "string" }, status: { type: "string", enum: ["pending", "in_progress", "completed"] } } } } } },
-  mutates: true, timeoutMs: 5000, parallel: false, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,
+  mutates: true, timeoutMs: Number.POSITIVE_INFINITY, parallel: false, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
     if (!Array.isArray(args.plan) || args.plan.length > 100) throw new Error("plan must contain at most 100 steps");
@@ -24,6 +24,8 @@ export const updatePlanTool: ToolDefinition = {
     }
     if (!context.store.replacePlan) throw new Error("store does not support atomic plans");
     const result = context.store.replacePlan(context.session.id, plan);
-    return { ok: true, summary: `plan updated: ${plan.length} step(s)`, output: JSON.stringify(result, null, 2) };
+    const marker = (status: string) => (status === "completed" ? "✔" : status === "in_progress" ? "▸" : "○");
+    const output = result.map((entry) => `${marker(entry.status)} ${entry.step}`).join("\n");
+    return { ok: true, summary: `plan updated: ${plan.length} step(s)`, output };
   }
 };

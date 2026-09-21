@@ -1,6 +1,7 @@
-import type { ToolCallRecord } from "../types";
+import type { ToolCallRecord, ToolErrorCategory } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { id } from "../utils";
+import { classifyToolError } from "./tool-error-category";
 
 export type ToolErrorState = {
   interrupted?: boolean;
@@ -8,6 +9,9 @@ export type ToolErrorState = {
   timedOut?: boolean;
   quarantined?: boolean;
   reason?: string;
+  summary?: string;
+  diagnostic?: string;
+  category?: ToolErrorCategory;
 };
 
 type ToolJournalEvent = (
@@ -69,10 +73,19 @@ export class ToolCallJournal {
   }
 
   settleError(toolCall: ToolCallRecord, error: string, state: ToolErrorState = {}, emitEvent = true): ToolCallRecord {
+    const summary = state.summary ?? error;
+    const diagnostic = state.diagnostic ?? error;
+    const errorCategory = state.category ?? classifyToolError({
+      error: diagnostic,
+      ...(state.cancelled !== undefined ? { cancelled: state.cancelled } : {}),
+      ...(state.timedOut !== undefined ? { timedOut: state.timedOut } : {})
+    });
     const payload = {
       toolCallId: toolCall.id,
       tool: toolCall.tool,
-      error,
+      error: summary,
+      diagnostic,
+      errorCategory,
       interrupted: state.interrupted ?? false,
       cancelled: state.cancelled ?? false,
       timedOut: state.timedOut ?? false,
@@ -80,7 +93,7 @@ export class ToolCallJournal {
       ...(state.reason ? { reason: state.reason } : {})
     };
     const settled = this.store.settleToolCall(
-      { ...toolCall, status: "error" },
+      { ...toolCall, status: "error", terminalSummary: summary, diagnostic, errorCategory },
       { type: "error", payload }
     ).toolCall;
     if (emitEvent) {
@@ -91,7 +104,7 @@ export class ToolCallJournal {
 
   settleRecoveredSuccess(toolCall: ToolCallRecord, summary: string): ToolCallRecord {
     return this.store.settleToolCall(
-      { ...toolCall, status: "done" },
+      { ...toolCall, status: "done", terminalSummary: summary },
       { type: "tool_result", payload: { toolCallId: toolCall.id, tool: toolCall.tool, result: `status: done\nsummary: ${summary}` } }
     ).toolCall;
   }

@@ -11,7 +11,7 @@ export const evidenceSaveTool: ToolDefinition = {
     properties: { title: { type: "string" }, content: { type: "string" } }
   },
   mutates: true,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

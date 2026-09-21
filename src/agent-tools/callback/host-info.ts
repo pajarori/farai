@@ -27,7 +27,7 @@ export const callbackHostInfoTool: ToolDefinition = {
     "List host-machine network interfaces and addresses ranked by likelihood of being reachable from a VPN-connected lab or CTF target, prioritizing tunnel interfaces. Use this before choosing a reverse-shell LHOST because the Kali container has a different network namespace from the host VPN.",
   inputSchema: { type: "object", properties: {} },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

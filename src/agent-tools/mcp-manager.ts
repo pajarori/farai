@@ -172,7 +172,7 @@ export class McpServerManager {
     for (const [name, status] of this.statusMap(scope)) {
       if (!status.proxy) continue;
       const nextPolicy = { tls: policy.tls, passThroughHosts: [...policy.passThroughHosts] };
-      const managed = this.servers.get(scopedServerKey(scope, name));
+      const managed = this.servers.get(this.managedServerKey(scope, name));
       if (managed) managed.proxyPolicy = nextPolicy;
       status.proxy.tls = nextPolicy.tls;
       status.proxy.passThroughHosts = [...nextPolicy.passThroughHosts];
@@ -183,7 +183,7 @@ export class McpServerManager {
     const scope = mcpScope(session);
     return [...(this.statusesByScope.get(scope)?.values() ?? [])].map((status) => {
       if (!status.running) return status;
-      const managed = this.servers.get(scopedServerKey(scope, status.name));
+      const managed = this.servers.get(this.managedServerKey(scope, status.name));
       if (managed?.client.isRunning()) return status;
       return {
         ...status,
@@ -226,14 +226,17 @@ export class McpServerManager {
     for (const [signature, entry] of this.backgroundRefreshes) {
       if (entry.sessionId === sessionId) this.backgroundRefreshes.delete(signature);
     }
-    const prefix = `${sessionId}:`;
+    const managedScope = this.managedScope(sessionId);
+    const prefix = `${managedScope}:`;
     const servers: ManagedMcpServer[] = [];
-    for (const [key, server] of this.servers) {
-      if (!key.startsWith(prefix)) continue;
-      this.servers.delete(key);
-      server.client.setCatalogChangeHandler(undefined);
-      server.client.setElicitationHandler(undefined);
-      servers.push(server);
+    if (managedScope === sessionId) {
+      for (const [key, server] of this.servers) {
+        if (!key.startsWith(prefix)) continue;
+        this.servers.delete(key);
+        server.client.setCatalogChangeHandler(undefined);
+        server.client.setElicitationHandler(undefined);
+        servers.push(server);
+      }
     }
     for (const [signature, owner] of this.completedRefreshes) {
       if (owner === sessionId) this.completedRefreshes.delete(signature);
@@ -253,7 +256,7 @@ export class McpServerManager {
     const effective = this.withContainerBinding(input);
     await this.refresh({ ...effective, background: false });
     const scope = mcpScope(input.session);
-    const managed = this.servers.get(scopedServerKey(input.session, serverName));
+    const managed = this.servers.get(this.managedServerKey(input.session, serverName));
     if (!managed) {
       const config = this.prepareRefreshPlan(effective).resolvedConfigs.find((candidate) => candidate.name === serverName);
       if (!config || !config.enabled) throw new Error(`MCP server is not enabled: ${serverName}`);
@@ -283,9 +286,9 @@ export class McpServerManager {
     const effective = this.withContainerBinding(input);
     await this.refresh({ ...effective, background: false });
     const scope = mcpScope(input.session);
-    const managed = this.servers.get(scopedServerKey(input.session, serverName));
+    const managed = this.servers.get(this.managedServerKey(input.session, serverName));
     if (!managed) throw new Error(`MCP server is not enabled: ${serverName}`);
-    this.suspendCatalogRefresh(scopedServerKey(scope, serverName), managed);
+    this.suspendCatalogRefresh(this.managedServerKey(scope, serverName), managed);
     await this.stopManagedServer(managed);
     const existing = this.statusMap(scope).get(serverName);
     const { error: _error, ...rest } = existing ?? idleMcpStatus(managed.catalogConfig);
@@ -304,14 +307,15 @@ export class McpServerManager {
   }
 
   hasServer(name: string, session?: Session): boolean {
-    return this.servers.has(scopedServerKey(session, name));
+    return this.servers.has(this.managedServerKey(session, name));
   }
 
   async ensureProxyReady(input: McpRefreshInput, expectedPort?: number): Promise<void> {
     await this.refresh({ ...input, background: false, includeResources: false });
     const scope = mcpScope(input.session);
+    const managedScope = this.managedScope(input.session);
     const managed = [...this.servers.entries()]
-      .filter(([key]) => key.startsWith(`${scope}:`))
+      .filter(([key]) => key.startsWith(`${managedScope}:`))
       .map(([, server]) => server)
       .find((server) => server.config.mitmproxy?.autoStartProxy
         && (expectedPort === undefined || server.config.mitmproxy.port === expectedPort));
@@ -388,6 +392,15 @@ export class McpServerManager {
     return { ...input, ...binding };
   }
 
+  private managedScope(session?: Session | string): string {
+    const scope = mcpScope(session);
+    return this.containerBindings.get(scope)?.rootSessionId ?? scope;
+  }
+
+  private managedServerKey(session: Session | string | undefined, serverName: string): string {
+    return `${this.managedScope(session)}:${serverName}`;
+  }
+
   private prepareRefreshPlan(input: McpRefreshInput): McpRefreshPlan {
     const scope = mcpScope(input.session);
     const configWorkspace = input.configWorkspace ?? input.workspace;
@@ -400,7 +413,7 @@ export class McpServerManager {
     const configs = resolvedConfigs
       .filter((config) => !this.isReserved(config))
       .filter((server) => server.enabled);
-    const active = new Set(configs.map((server) => scopedServerKey(input.session, server.name)));
+    const active = new Set(configs.map((server) => this.managedServerKey(input.session, server.name)));
     return {
       scope,
       configWorkspace,
@@ -466,7 +479,7 @@ export class McpServerManager {
         resourceTemplates: []
       });
     }
-    const scopePrefix = `${input.session?.id ?? "host"}:`;
+    const scopePrefix = `${this.managedScope(input.session)}:`;
     for (const [key, server] of this.servers) {
       if (key.startsWith(scopePrefix) && !plan.active.has(key)) {
         this.suspendCatalogRefresh(key, server);
@@ -514,7 +527,7 @@ export class McpServerManager {
 
   private async refreshOneServer(input: McpRefreshInput, scope: string, config: ExternalMcpServer, epoch: number): Promise<ServerRefreshOutcome> {
     if (!this.isRefreshCurrent(scope, epoch)) return { status: "cancelled", server: config.name };
-    const key = scopedServerKey(input.session, config.name);
+    const key = this.managedServerKey(input.session, config.name);
     const existing = this.servers.get(key);
     if (!config.autoStart && !config.required && !existing?.client.isRunning() && !existing?.activationTask) {
       return await this.loadLazyServer(input, scope, config, epoch);
@@ -630,7 +643,7 @@ export class McpServerManager {
   }
 
   private async loadLazyServer(input: McpRefreshInput, scope: string, config: ExternalMcpServer, epoch: number): Promise<ServerRefreshOutcome> {
-    const key = scopedServerKey(input.session, config.name);
+    const key = this.managedServerKey(input.session, config.name);
     let managed = this.servers.get(key);
     if (!input.force && managed && mcpCatalogSignature(managed.catalogConfig) === mcpCatalogSignature(config) && managed.client.isRunning()) {
       this.updateManagedCallbacks(managed, input);
@@ -700,7 +713,7 @@ export class McpServerManager {
     managed.resources = resourceDiscovery.resources;
     managed.resourceTemplates = resourceTemplates;
     managed.resourcesLoaded = resourceDiscovery.loaded;
-    if (this.servers.get(scopedServerKey(scope, serverName)) !== managed) return;
+    if (this.servers.get(this.managedServerKey(scope, serverName)) !== managed) return;
     const statuses = this.statusMap(scope);
     const existing = statuses.get(serverName);
     if (!existing || !existing.running) return;
@@ -720,7 +733,7 @@ export class McpServerManager {
   }
 
   private bindCatalogRefresh(scope: string, serverName: string, managed: ManagedMcpServer): void {
-    const key = scopedServerKey(scope, serverName);
+    const key = this.managedServerKey(scope, serverName);
     if (this.servers.get(key) !== managed || !managed.client.isRunning()) return;
     managed.client.setCatalogChangeHandler((change) => {
       if (this.servers.get(key) !== managed || !managed.client.isRunning()) return;
@@ -930,7 +943,7 @@ export class McpServerManager {
     const original = this.originalsByScope.get(scope)?.get(dynamicToolName);
     const lastConfigPath = this.lastConfigPathByScope.get(scope);
     if (!original) throw new Error(`Unknown MCP tool: ${dynamicToolName}${lastConfigPath ? ` (config ${lastConfigPath})` : ""}`);
-    const managed = this.servers.get(scopedServerKey(context.session, original.server));
+    const managed = this.servers.get(this.managedServerKey(context.session, original.server));
     if (!managed) throw new Error(`MCP server is not running: ${original.server}`);
     await this.activateManaged(this.refreshInputFromToolContext(context), scope, original.server, managed);
     const toolArgs = args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {};
@@ -958,7 +971,7 @@ export class McpServerManager {
 
   async callServerTool(input: McpRefreshInput & { server: string; tool: string; args?: Record<string, unknown> }): Promise<unknown> {
     await waitForMcpSignal(this.refresh({ ...input, includeResources: false }), input.signal);
-    const managed = this.servers.get(scopedServerKey(input.session, input.server));
+    const managed = this.servers.get(this.managedServerKey(input.session, input.server));
     if (!managed) throw new Error(`MCP server is not running: ${input.server}`);
     await this.activateManaged(input, mcpScope(input.session), input.server, managed);
     if (!managed.toolNames.has(input.tool)) throw new Error(`MCP tool is not available: ${input.server}.${input.tool}`);
@@ -967,7 +980,7 @@ export class McpServerManager {
 
   async listResources(input: McpRefreshInput): Promise<Array<McpResourceDescriptor & { server: string }>> {
     await waitForMcpSignal(this.refresh({ ...input, includeResources: true, background: false }), input.signal);
-    const scopePrefix = `${mcpScope(input.session)}:`;
+    const scopePrefix = `${this.managedScope(input.session)}:`;
     const resources: Array<McpResourceDescriptor & { server: string }> = [];
     for (const [key, managed] of this.servers) {
       if (!key.startsWith(scopePrefix)) continue;
@@ -983,7 +996,7 @@ export class McpServerManager {
 
   async readResource(input: McpRefreshInput & { server: string; uri: string }): Promise<unknown> {
     await waitForMcpSignal(this.refresh({ ...input, includeResources: false, background: false }), input.signal);
-    const managed = this.servers.get(scopedServerKey(input.session, input.server));
+    const managed = this.servers.get(this.managedServerKey(input.session, input.server));
     if (!managed) throw new Error(`MCP server is not running: ${input.server}`);
     await this.activateManaged(input, mcpScope(input.session), input.server, managed);
     return await managed.client.readResource(input.uri, input.signal);
@@ -1006,7 +1019,7 @@ export class McpServerManager {
 
   private async promptServer(input: McpRefreshInput & { server: string }): Promise<ManagedMcpServer> {
     await waitForMcpSignal(this.refresh({ ...input, includeResources: false, background: false }), input.signal);
-    const managed = this.servers.get(scopedServerKey(input.session, input.server));
+    const managed = this.servers.get(this.managedServerKey(input.session, input.server));
     if (!managed) throw new Error(`MCP server is not available: ${input.server}`);
     await this.activateManaged(input, mcpScope(input.session), input.server, managed);
     return managed;
@@ -1023,7 +1036,7 @@ export class McpServerManager {
       ...(input.containerLifecycle ? { containerLifecycle: input.containerLifecycle } : {}),
       includeResources: false
     }), input.signal);
-    const scopePrefix = `${input.session?.id ?? "host"}:`;
+    const scopePrefix = `${this.managedScope(input.session)}:`;
     const candidates = [...this.servers.entries()]
       .filter(([key, managed]) => key.startsWith(scopePrefix) && managed.toolNames.has(input.tool))
       .map(([, managed]) => managed)
@@ -1064,7 +1077,7 @@ export class McpServerManager {
   }
 
   private async activateManagedOnce(input: McpRefreshInput, scope: string, serverName: string, managed: ManagedMcpServer): Promise<void> {
-    const key = scopedServerKey(input.session, serverName);
+    const key = this.managedServerKey(input.session, serverName);
     this.suspendCatalogRefresh(key, managed);
     this.markServerStarting(scope, managed.catalogConfig, input.configWorkspace ?? input.workspace);
     input.onStartupEvent?.({ type: "mcp_startup_update", server: serverName, status: { state: "starting" } });
@@ -1153,7 +1166,7 @@ export class McpServerManager {
   }
 
   private updateScopeCallbacks(scope: string, input: McpRefreshInput): void {
-    const prefix = `${scope}:`;
+    const prefix = `${this.managedScope(scope)}:`;
     for (const [key, managed] of this.servers) {
       if (key.startsWith(prefix)) this.updateManagedCallbacks(managed, input);
     }
@@ -1169,7 +1182,7 @@ export class McpServerManager {
 
   private refreshPlanHealthy(input: McpRefreshInput, plan: McpRefreshPlan): boolean {
     return plan.configs.every((config) => {
-      const managed = this.servers.get(scopedServerKey(input.session, config.name));
+      const managed = this.servers.get(this.managedServerKey(input.session, config.name));
       return config.autoStart || config.required ? managed?.client.isRunning() : Boolean(managed);
     });
   }
@@ -1179,7 +1192,7 @@ export class McpServerManager {
     void this.autostartServer(input, server)
       .then(() => this.updateProxyStatus(input, scope, serverName, server))
       .catch((error) => {
-        if (this.servers.get(scopedServerKey(scope, serverName)) !== server) return;
+        if (this.servers.get(this.managedServerKey(scope, serverName)) !== server) return;
         const statuses = this.statusMap(scope);
         const existing = statuses.get(serverName);
         if (!existing || !existing.running) return;
@@ -1193,7 +1206,7 @@ export class McpServerManager {
   }
 
   private updateProxyStatus(input: McpRefreshInput, scope: string, serverName: string, server: ManagedMcpServer): void {
-    if (this.servers.get(scopedServerKey(scope, serverName)) !== server) return;
+    if (this.servers.get(this.managedServerKey(scope, serverName)) !== server) return;
     const statuses = this.statusMap(scope);
     const existing = statuses.get(serverName);
     if (!existing || !existing.running || !server.config.mitmproxy) return;
@@ -1223,11 +1236,25 @@ export class McpServerManager {
     if (server.proxyStartTask) return await server.proxyStartTask;
     const task = (async () => {
       if (!server.proxyStarted) {
-        const args: Record<string, unknown> = { port: mitmproxy.port };
-        if (mitmproxy.dumpFile) args.dump_file = mitmproxy.dumpFile;
-        if (mitmproxy.upstreamProxy) args.upstream_proxy = mitmproxy.upstreamProxy;
-        await server.client.callTool("start_proxy", args, input.signal);
-        server.proxyStarted = true;
+        const current = await this.readProxyState(server, input.signal);
+        if (current?.running) {
+          if (current.port !== mitmproxy.port) throw new Error(`managed proxy is already running on port ${current.port}, expected ${mitmproxy.port}`);
+          server.proxyStarted = true;
+        } else {
+          const args: Record<string, unknown> = { port: mitmproxy.port };
+          if (mitmproxy.dumpFile) args.dump_file = mitmproxy.dumpFile;
+          if (mitmproxy.upstreamProxy) args.upstream_proxy = mitmproxy.upstreamProxy;
+          const result = await server.client.callTool("start_proxy", args, input.signal);
+          const rendered = renderMcpToolResult(result).trim();
+          if (isMcpErrorResult(result) || proxyStartFailed(rendered)) {
+            throw new Error(rendered || "managed proxy failed to start");
+          }
+          const started = await this.readProxyState(server, input.signal);
+          if (started && (!started.running || started.port !== mitmproxy.port)) {
+            throw new Error(`managed proxy did not start on port ${mitmproxy.port}`);
+          }
+          server.proxyStarted = true;
+        }
       }
       await this.enableTransparentProxy(input, server, mitmproxy.port);
     })();
@@ -1237,6 +1264,13 @@ export class McpServerManager {
     } finally {
       if (server.proxyStartTask === task) delete server.proxyStartTask;
     }
+  }
+
+  private async readProxyState(server: ManagedMcpServer, signal?: AbortSignal): Promise<{ running: boolean; port: number } | undefined> {
+    if (!server.toolNames.has("proxy_status")) return undefined;
+    const result = await server.client.callTool("proxy_status", {}, signal);
+    if (isMcpErrorResult(result)) throw new Error(renderMcpToolResult(result) || "managed proxy status failed");
+    return parseProxyState(result);
   }
 
   private async enableTransparentProxy(input: McpRefreshInput, server: ManagedMcpServer, proxyPort: number): Promise<void> {
@@ -1277,7 +1311,7 @@ export class McpServerManager {
       description: descriptor.description ?? `External MCP tool ${descriptor.server}.${descriptor.name}`,
       inputSchema: descriptor.inputSchema ?? { type: "object", additionalProperties: true },
       mutates: descriptor.mutates,
-      timeoutMs: 120_000,
+      timeoutMs: Number.POSITIVE_INFINITY,
       parallel: false,
       renderHuman: defaultHumanRenderer,
       renderModel: defaultModelRenderer,
@@ -1777,6 +1811,31 @@ export async function ensureMcpProxyReady(input: McpRefreshInput, expectedPort?:
   await mcpServerManager.ensureProxyReady(input, expectedPort);
 }
 
+const proxyScopeUpdates = new Map<string, Promise<void>>();
+
+export async function extendMcpProxyScope(input: McpRefreshInput, domains: string[]): Promise<void> {
+  const additions = [...new Set(domains.map((domain) => domain.trim().toLowerCase()).filter(Boolean))];
+  if (additions.length === 0) return;
+  const key = input.rootSessionId ?? input.session?.id ?? "host";
+  const previous = proxyScopeUpdates.get(key) ?? Promise.resolve();
+  const task = previous.catch(() => {}).then(async () => {
+    const currentResult = await callMcpServerTool({ ...input, server: "mitmproxy-mcp", tool: "proxy_scope_get", args: {} });
+    if (isMcpErrorResult(currentResult)) throw new Error(renderMcpToolResult(currentResult));
+    const current = parseJsonObject(renderMcpToolResult(currentResult));
+    const configured = Array.isArray(current?.allowedDomains) ? current.allowedDomains.map(String).map((domain) => domain.trim().toLowerCase()).filter(Boolean) : [];
+    const allowedDomains = [...new Set([...configured, ...additions])].sort();
+    if (allowedDomains.length === new Set(configured).size) return;
+    const updateResult = await callMcpServerTool({ ...input, server: "mitmproxy-mcp", tool: "set_scope", args: { allowed_domains: allowedDomains } });
+    if (isMcpErrorResult(updateResult)) throw new Error(renderMcpToolResult(updateResult));
+  });
+  proxyScopeUpdates.set(key, task);
+  try {
+    await task;
+  } finally {
+    if (proxyScopeUpdates.get(key) === task) proxyScopeUpdates.delete(key);
+  }
+}
+
 export function configuredMcpServer(workspace: string, preferredName: string): ExternalMcpServer | undefined {
   const faraiConfig = loadConfig(workspace);
   const proxy = resolveProxyConfig(faraiConfig);
@@ -1793,6 +1852,15 @@ function isPlaywrightMcpServer(config: ExternalMcpServer): boolean {
   if (config.type !== "stdio") return false;
   const command = [config.command, ...config.args].join(" ").toLowerCase();
   return config.name === "playwright" || command.includes("playwright-mcp") || command.includes("@playwright/mcp");
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function prepareMcpServerProcess(input: McpRefreshInput, config: ExternalMcpServer): Promise<ExternalMcpServer> {
@@ -1831,7 +1899,7 @@ export async function prepareMcpServerProcess(input: McpRefreshInput, config: Ex
   });
   const result = await backend.startPersistent();
   if (result.exitCode !== 0) throw new Error(result.stderr || `Could not start MCP container ${containerName}`);
-  const containerEnv = mcpProcessEnvironment(resolved);
+  const containerEnv = { ...mcpProcessEnvironment(resolved), FARAI_ROOT_SESSION_ID: rootSessionId };
   return {
     ...resolved,
     command: "docker",
@@ -1858,14 +1926,14 @@ export function mcpToolName(server: string, tool: string): string {
 }
 
 export function renderMcpToolResult(result: unknown): string {
-  if (!result || typeof result !== "object") return String(result ?? "");
+  if (!result || typeof result !== "object") return renderMcpValue(result);
   const obj = result as Record<string, unknown>;
   const content = obj.content;
   if (Array.isArray(content)) {
     const parts = content.map((part) => renderMcpContentBlock(part)).filter(Boolean);
     return parts.join("\n");
   }
-  return JSON.stringify(result);
+  return renderMcpValue(result);
 }
 
 export function renderMcpPromptResult(server: string, prompt: string, result: McpPromptResult): string {
@@ -1888,7 +1956,7 @@ export function renderMcpPromptResult(server: string, prompt: string, result: Mc
 export function renderMcpContentBlock(part: unknown): string {
   if (!part || typeof part !== "object") return "";
   const record = part as Record<string, unknown>;
-  if (typeof record.text === "string") return record.text;
+  if (typeof record.text === "string") return renderMcpText(record.text);
   if (typeof record.data === "string") return `[${String(record.type ?? "data")} ${record.data.length} chars]`;
   if (record.type === "image") return "<image content>";
   if (record.type === "audio") return "<audio content>";
@@ -1907,7 +1975,39 @@ export function renderMcpContentBlock(part: unknown): string {
     const uri = record.uri;
     return typeof uri === "string" ? `link: ${uri}` : "link";
   }
-  return JSON.stringify(record);
+  return renderMcpValue(record);
+}
+
+function renderMcpText(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return value;
+  try { return renderMcpValue(JSON.parse(trimmed)); }
+  catch { return value; }
+}
+
+function renderMcpValue(value: unknown, depth = 0, label?: string): string {
+  const prefix = label ? `${label}: ` : "";
+  if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return `${prefix}${String(value ?? "")}`.trimEnd();
+  }
+  if (depth >= 4) return `${prefix}[details omitted]`.trimEnd();
+  if (Array.isArray(value)) {
+    if (value.length === 0) return `${prefix}none`.trimEnd();
+    return [
+      ...(label ? [`${label}: ${value.length} item${value.length === 1 ? "" : "s"}`] : []),
+      ...value.slice(0, 100).flatMap((item, index) => renderMcpValue(item, depth + 1, String(index + 1)).split("\n"))
+    ].join("\n");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return `${prefix}none`.trimEnd();
+  return [
+    ...(label ? [`${label}:`] : []),
+    ...entries.slice(0, 100).flatMap(([key, item]) => renderMcpValue(item, depth + 1, humanMcpKey(key)).split("\n").map((line) => label ? `  ${line}` : line))
+  ].join("\n");
+}
+
+function humanMcpKey(value: string): string {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[._-]+/g, " ").toLowerCase();
 }
 
 export function formatMcpInventory(statuses: McpServerRuntimeStatus[]): string {
@@ -1981,8 +2081,38 @@ function mcpScope(session?: Session | string): string {
   return typeof session === "string" ? session : session?.id ?? "host";
 }
 
-function scopedServerKey(session: Session | string | undefined, serverName: string): string {
-  return `${mcpScope(session)}:${serverName}`;
+function parseProxyState(result: unknown): { running: boolean; port: number } {
+  const text = rawMcpText(result).trim();
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("managed proxy returned an invalid status");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("managed proxy returned an invalid status");
+  const state = value as Record<string, unknown>;
+  if (typeof state.running !== "boolean") throw new Error("managed proxy returned an invalid status");
+  const port = state.port;
+  if (state.running && (!Number.isInteger(port) || Number(port) < 1 || Number(port) > 65_535)) {
+    throw new Error("managed proxy returned an invalid port");
+  }
+  return { running: state.running, port: state.running ? Number(port) : 0 };
+}
+
+function proxyStartFailed(output: string): boolean {
+  return /could(?:n't| not) start|failed to start|address already in use|port .* in use/i.test(output);
+}
+
+function rawMcpText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return JSON.stringify(result);
+  const content = (result as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return JSON.stringify(result);
+  return content.flatMap((part) => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) return [];
+    const text = (part as Record<string, unknown>).text;
+    return typeof text === "string" ? [text] : [];
+  }).join("\n");
 }
 
 function sameProcessConfig(a: ExternalMcpServer, b: ExternalMcpServer): boolean {

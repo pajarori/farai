@@ -56,10 +56,10 @@ export function overlayOptions(frame: OverlayFrame | undefined, tui: TuiStoreVal
       return tui.store.ui.agentThreads
         .map((item) => ({
           id: item.id,
-          title: item.title,
+          title: item.nickname ? `${item.title} · ${item.nickname}` : item.title,
           description: item.role === "main"
             ? ["main thread", item.model].filter(Boolean).join(" · ")
-            : [item.lane ?? "general", item.mode, item.model].filter(Boolean).join(" · "),
+            : [item.lane ?? "general", item.mode, item.currentActivity ?? item.model].filter(Boolean).join(" · "),
           category: item.role === "main" ? "main" : agentCategory(item.status),
           footer: item.sessionId === tui.store.activeSessionId ? "current" : agentStatusLabel(item.status),
           value: item

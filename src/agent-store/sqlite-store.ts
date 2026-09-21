@@ -39,6 +39,7 @@ import type {
   TurnStopReason,
   TurnStatus,
   ToolCallRecord,
+  ToolErrorCategory,
   ToolResult,
   UsageRecord,
   UsageSummary
@@ -62,8 +63,12 @@ type BackgroundToolSettlementInput = {
   toolCallId?: string;
   jobId?: string;
   outputArtifactId?: string;
+  summary?: string;
+  error?: string;
+  errorCategory?: ToolErrorCategory;
+  backgroundDurationMs?: number;
 };
-type BackgroundToolSettlement = { toolCall: ToolCallRecord; timelinePart?: Part };
+type BackgroundToolSettlement = { toolCall: ToolCallRecord; timelinePart?: Part; terminalPart?: Part };
 
 const RESUMABLE_SESSION_PREDICATE = `(
   s.summary is not null
@@ -262,7 +267,7 @@ export class SqliteStore {
     return discarded;
   }
 
-  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "campaignRunId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace">> & { emailPrimaryId?: string | null; emailSecondaryId?: string | null }): Session {
+  updateSession(sessionId: string, patch: Partial<Pick<Session, "campaignId" | "campaignRunId" | "title" | "phase" | "provider" | "model" | "toolScope" | "workspace" | "nickname" | "agentPath" | "serviceTier">> & { emailPrimaryId?: string | null; emailSecondaryId?: string | null }): Session {
     const db = this.database();
     const updated = db.transaction(() => {
       const row = db.query("select * from sessions where id = $id").get({ $id: sessionId }) as Row | null;
@@ -278,6 +283,9 @@ export class SqliteStore {
         ...(patch.model !== undefined ? { model: patch.model } : {}),
         ...(patch.toolScope !== undefined ? { toolScope: patch.toolScope.map(canonicalToolName) } : {}),
         ...(patch.workspace !== undefined ? { workspace: patch.workspace } : {}),
+        ...(patch.nickname !== undefined ? { nickname: patch.nickname } : {}),
+        ...(patch.agentPath !== undefined ? { agentPath: patch.agentPath } : {}),
+        ...(patch.serviceTier !== undefined ? { serviceTier: patch.serviceTier } : {}),
         updatedAt: nowIso()
       };
       if (patch.emailPrimaryId === null) delete next.emailPrimaryId;
@@ -1793,6 +1801,7 @@ export class SqliteStore {
     status: Extract<BackgroundJob["status"], "succeeded" | "failed" | "cancelled" | "lost">;
     result?: unknown;
     error?: string;
+    errorCategory?: ToolErrorCategory;
     outputArtifactId?: string;
     settleToolStatus?: "done" | "error";
     mailbox: Omit<SessionMailboxItem, "id" | "sequence" | "state" | "createdAt">;
@@ -1810,14 +1819,18 @@ export class SqliteStore {
                 ...(current.processId ? { processId: current.processId } : {}),
                 ...(current.toolCallId ? { toolCallId: current.toolCallId } : {}),
                 jobId: current.id,
-                ...(current.outputArtifactId ? { outputArtifactId: current.outputArtifactId } : {})
+                ...(current.outputArtifactId ? { outputArtifactId: current.outputArtifactId } : {}),
+                ...(current.error ? { error: current.error } : {}),
+                ...(input.errorCategory ? { errorCategory: input.errorCategory } : {}),
+                summary: backgroundJobSummary(current),
+                ...backgroundJobTiming(current)
               })
             : [];
           return { job: current, mailbox: mailboxItemFromRow(row), toolCalls, jobChanged: false };
         }
       }
-      const mailbox = this.enqueueMailbox(input.mailbox);
       const completedAt = nowIso();
+      const mailbox = this.enqueueMailbox(withBackgroundJobTiming(input.mailbox, current, completedAt));
       const terminalCurrent = TERMINAL_JOB_STATUSES.includes(current.status);
       const sameTerminalStatus = terminalCurrent && current.status === input.status;
       const job: BackgroundJob = {
@@ -1842,7 +1855,11 @@ export class SqliteStore {
             ...(storedJob.processId ? { processId: storedJob.processId } : {}),
             ...(storedJob.toolCallId ? { toolCallId: storedJob.toolCallId } : {}),
             jobId: storedJob.id,
-            ...(storedJob.outputArtifactId ? { outputArtifactId: storedJob.outputArtifactId } : {})
+            ...(storedJob.outputArtifactId ? { outputArtifactId: storedJob.outputArtifactId } : {}),
+            ...(storedJob.error ? { error: storedJob.error } : {}),
+            ...(input.errorCategory ? { errorCategory: input.errorCategory } : {}),
+            summary: backgroundJobSummary(storedJob),
+            ...backgroundJobTiming(storedJob)
           })
         : [];
       return { job: storedJob, mailbox, toolCalls, jobChanged: true };
@@ -1851,6 +1868,7 @@ export class SqliteStore {
     for (const item of finalized.toolCalls) {
       this.emit({ kind: "toolCall", sessionId: item.toolCall.sessionId, toolCall: item.toolCall });
       if (item.timelinePart) this.emit({ kind: "part", sessionId: item.timelinePart.sessionId, part: item.timelinePart });
+      if (item.terminalPart) this.emit({ kind: "part", sessionId: item.terminalPart.sessionId, part: item.terminalPart });
     }
     return { job: finalized.job, mailbox: finalized.mailbox, toolCalls: finalized.toolCalls.map((item) => item.toolCall) };
   }
@@ -1860,6 +1878,7 @@ export class SqliteStore {
     status: Extract<BackgroundJob["status"], "succeeded" | "failed" | "cancelled" | "lost">;
     result?: unknown;
     error?: string;
+    errorCategory?: ToolErrorCategory;
     outputArtifactId?: string;
     settleToolStatus?: "done" | "error";
     deliveryState: "suppressed";
@@ -1891,7 +1910,11 @@ export class SqliteStore {
             ...(storedJob.processId ? { processId: storedJob.processId } : {}),
             ...(storedJob.toolCallId ? { toolCallId: storedJob.toolCallId } : {}),
             jobId: storedJob.id,
-            ...(storedJob.outputArtifactId ? { outputArtifactId: storedJob.outputArtifactId } : {})
+            ...(storedJob.outputArtifactId ? { outputArtifactId: storedJob.outputArtifactId } : {}),
+            ...(storedJob.error ? { error: storedJob.error } : {}),
+            ...(input.errorCategory ? { errorCategory: input.errorCategory } : {}),
+            summary: backgroundJobSummary(storedJob),
+            ...backgroundJobTiming(storedJob)
           })
         : [];
       return { job: storedJob, toolCalls };
@@ -1900,6 +1923,7 @@ export class SqliteStore {
     for (const item of finalized.toolCalls) {
       this.emit({ kind: "toolCall", sessionId: item.toolCall.sessionId, toolCall: item.toolCall });
       if (item.timelinePart) this.emit({ kind: "part", sessionId: item.timelinePart.sessionId, part: item.timelinePart });
+      if (item.terminalPart) this.emit({ kind: "part", sessionId: item.terminalPart.sessionId, part: item.terminalPart });
     }
     return { job: finalized.job, toolCalls: finalized.toolCalls.map((item) => item.toolCall) };
   }
@@ -1974,6 +1998,8 @@ export class SqliteStore {
     toolCallId?: string;
     jobId?: string;
     outputArtifactId?: string;
+    summary?: string;
+    error?: string;
   }): ToolCallRecord[] {
     if (!input.processId && !input.toolCallId) return [];
     const db = this.database();
@@ -1981,12 +2007,13 @@ export class SqliteStore {
     for (const item of settled) {
       this.emit({ kind: "toolCall", sessionId: item.toolCall.sessionId, toolCall: item.toolCall });
       if (item.timelinePart) this.emit({ kind: "part", sessionId: item.timelinePart.sessionId, part: item.timelinePart });
+      if (item.terminalPart) this.emit({ kind: "part", sessionId: item.terminalPart.sessionId, part: item.terminalPart });
     }
     return settled.map((item) => item.toolCall);
   }
 
-  settleBackgroundProcess(sessionId: string, processId: string, status: "done" | "error"): ToolCallRecord[] {
-    return this.settleBackgroundToolCalls({ sessionId, processId, status });
+  settleBackgroundProcess(sessionId: string, processId: string, status: "done" | "error", errorCategory?: ToolErrorCategory): ToolCallRecord[] {
+    return this.settleBackgroundToolCalls({ sessionId, processId, status, ...(errorCategory ? { errorCategory } : {}) });
   }
 
   saveEvidence(evidence: Evidence, content?: string): Evidence {
@@ -2535,7 +2562,7 @@ export class SqliteStore {
   private migrate(db: Database): void {
     db.transaction(() => {
       const version = Number((db.query("pragma user_version").get() as { user_version?: number } | null)?.user_version ?? 0);
-      if (version > 11) throw new Error(`Unsupported Farai database version: ${version}`);
+      if (version > 13) throw new Error(`Unsupported Farai database version: ${version}`);
       this.ensureBaselineSchema(db);
       if (version < 2) this.addJobAndMailboxSchema(db);
       if (version < 3) this.addEventSequenceSchema(db);
@@ -2547,8 +2574,10 @@ export class SqliteStore {
       if (version < 9) this.addUsagePricingSchema(db);
       if (version < 10) this.addCampaignLifecycleSchema(db);
       if (version < 11) this.addCvssSchema(db);
+      if (version < 12) this.addToolTerminalFieldsSchema(db);
+      if (version < 13) this.addToolErrorCategorySchema(db);
       this.ensureCampaignRunInvariant(db);
-      db.exec("pragma user_version = 11");
+      db.exec("pragma user_version = 13");
     }).immediate();
   }
 
@@ -2674,6 +2703,15 @@ export class SqliteStore {
     addColumnIfMissing(db, "background_jobs", "title", "text");
     addColumnIfMissing(db, "background_jobs", "lane", "text");
     addColumnIfMissing(db, "background_jobs", "agent_mode", "text");
+  }
+
+  private addToolTerminalFieldsSchema(db: Database): void {
+    addColumnIfMissing(db, "tool_calls", "terminal_summary", "text");
+    addColumnIfMissing(db, "tool_calls", "diagnostic", "text");
+  }
+
+  private addToolErrorCategorySchema(db: Database): void {
+    addColumnIfMissing(db, "tool_calls", "error_category", "text");
   }
 
   private addRuntimeLeaseSchema(db: Database): void {
@@ -3054,6 +3092,9 @@ export class SqliteStore {
     addColumnIfMissing(db, "sessions", "summary", "text");
     addColumnIfMissing(db, "sessions", "summary_updated_at", "text");
     addColumnIfMissing(db, "sessions", "tool_scope_json", "text");
+    addColumnIfMissing(db, "sessions", "nickname", "text");
+    addColumnIfMissing(db, "sessions", "agent_path", "text");
+    addColumnIfMissing(db, "sessions", "service_tier", "text");
     addColumnIfMissing(db, "sessions", "archived_at", "text");
     addColumnIfMissing(db, "turns", "runtime_id", "text");
     addColumnIfMissing(db, "turns", "stop_reason", "text");
@@ -3098,8 +3139,8 @@ function dropColumnIfPresent(db: Database, table: string, column: string): void 
 
 function writeSessionRow(db: Database, session: Session): void {
   db.query(
-    `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, campaign_run_id, provider, model, email_primary_id, email_secondary_id, summary, summary_updated_at, tool_scope_json, archived_at, created_at, updated_at)
-     values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $campaignRun, $provider, $model, $emailPrimaryId, $emailSecondaryId, $summary, $summaryUpdated, $toolScope, $archived, $created, $updated)
+    `insert into sessions (id, workspace, mode, phase, title, parent_id, campaign_id, campaign_run_id, provider, model, email_primary_id, email_secondary_id, summary, summary_updated_at, tool_scope_json, nickname, agent_path, service_tier, archived_at, created_at, updated_at)
+     values ($id, $workspace, $mode, $phase, $title, $parent, $campaign, $campaignRun, $provider, $model, $emailPrimaryId, $emailSecondaryId, $summary, $summaryUpdated, $toolScope, $nickname, $agentPath, $serviceTier, $archived, $created, $updated)
      on conflict(id) do update set
        workspace = excluded.workspace,
        mode = excluded.mode,
@@ -3115,6 +3156,9 @@ function writeSessionRow(db: Database, session: Session): void {
        summary = excluded.summary,
        summary_updated_at = excluded.summary_updated_at,
        tool_scope_json = excluded.tool_scope_json,
+       nickname = excluded.nickname,
+       agent_path = excluded.agent_path,
+       service_tier = excluded.service_tier,
        archived_at = excluded.archived_at,
        updated_at = excluded.updated_at`
   ).run({
@@ -3133,6 +3177,9 @@ function writeSessionRow(db: Database, session: Session): void {
     $summary: session.summary ? assertPersistedText(session.summary, PERSISTENCE_LIMITS.summaryBytes, "session summary") : null,
     $summaryUpdated: session.summaryUpdatedAt ?? null,
     $toolScope: session.toolScope ? stringifyPersistedJson(session.toolScope.map(canonicalToolName), PERSISTENCE_LIMITS.structuredJsonBytes, "session tool scope") : null,
+    $nickname: session.nickname ?? null,
+    $agentPath: session.agentPath ?? null,
+    $serviceTier: session.serviceTier ?? null,
     $archived: session.archivedAt ?? null,
     $created: session.createdAt,
     $updated: session.updatedAt
@@ -3207,12 +3254,13 @@ function writeToolCallRow(db: Database, record: ToolCallRecord): void {
   const stored = { ...record, tool: canonicalToolName(record.tool) };
   const timestamp = nowIso();
   db.query(
-    `insert into tool_calls (id, session_id, tool, args_json, status, evidence_ids_json, output_artifact_id, turn_id, message_id, timeline_part_id, job_id, process_id, provider_tool_call_id, created_at, updated_at)
-     values ($id, $session, $tool, $args, $status, $evidence, $artifact, $turn, $message, $part, $job, $process, $providerToolCallId, $created, $updated)
+    `insert into tool_calls (id, session_id, tool, args_json, status, evidence_ids_json, output_artifact_id, turn_id, message_id, timeline_part_id, job_id, process_id, provider_tool_call_id, terminal_summary, diagnostic, error_category, created_at, updated_at)
+     values ($id, $session, $tool, $args, $status, $evidence, $artifact, $turn, $message, $part, $job, $process, $providerToolCallId, $terminalSummary, $diagnostic, $errorCategory, $created, $updated)
      on conflict(id) do update set tool = excluded.tool, args_json = excluded.args_json, status = case when tool_calls.status in ${TERMINAL_TOOL_CALL_STATUSES} then tool_calls.status else excluded.status end,
        evidence_ids_json = excluded.evidence_ids_json, output_artifact_id = coalesce(excluded.output_artifact_id, tool_calls.output_artifact_id),
        turn_id = coalesce(excluded.turn_id, tool_calls.turn_id), message_id = coalesce(excluded.message_id, tool_calls.message_id), timeline_part_id = coalesce(excluded.timeline_part_id, tool_calls.timeline_part_id),
-       job_id = coalesce(excluded.job_id, tool_calls.job_id), process_id = coalesce(excluded.process_id, tool_calls.process_id), provider_tool_call_id = coalesce(excluded.provider_tool_call_id, tool_calls.provider_tool_call_id), updated_at = excluded.updated_at`
+       job_id = coalesce(excluded.job_id, tool_calls.job_id), process_id = coalesce(excluded.process_id, tool_calls.process_id), provider_tool_call_id = coalesce(excluded.provider_tool_call_id, tool_calls.provider_tool_call_id),
+       terminal_summary = coalesce(tool_calls.terminal_summary, excluded.terminal_summary), diagnostic = coalesce(tool_calls.diagnostic, excluded.diagnostic), error_category = coalesce(tool_calls.error_category, excluded.error_category), updated_at = excluded.updated_at`
   ).run({
     $id: stored.id,
     $session: stored.sessionId,
@@ -3227,6 +3275,9 @@ function writeToolCallRow(db: Database, record: ToolCallRecord): void {
     $job: stored.jobId ?? null,
     $process: stored.processId ?? null,
     $providerToolCallId: stored.providerToolCallId ?? null,
+    $terminalSummary: stored.terminalSummary ? assertPersistedText(stored.terminalSummary, PERSISTENCE_LIMITS.documentTextBytes, "tool terminal summary") : null,
+    $diagnostic: stored.diagnostic ? assertPersistedText(stored.diagnostic, PERSISTENCE_LIMITS.documentTextBytes, "tool diagnostic") : null,
+    $errorCategory: stored.errorCategory ?? null,
     $created: timestamp,
     $updated: timestamp
   });
@@ -3262,6 +3313,9 @@ function settleBackgroundToolCallRows(db: Database, input: BackgroundToolSettlem
     const toolCall = {
       ...record,
       status: input.status,
+      terminalSummary: input.error ?? input.summary ?? (input.status === "done" ? "background work completed" : "background work failed"),
+      ...(input.error ? { diagnostic: input.error } : {}),
+      ...(input.errorCategory ? { errorCategory: input.errorCategory } : {}),
       ...(input.jobId ? { jobId: input.jobId } : {}),
       ...(input.outputArtifactId ? { outputArtifactId: input.outputArtifactId } : {})
     };
@@ -3270,9 +3324,98 @@ function settleBackgroundToolCallRows(db: Database, input: BackgroundToolSettlem
     if (!storedRow) throw new Error(`Tool call not found after background settlement: ${toolCall.id}`);
     const stored = toolCallFromRow(storedRow);
     const timelinePart = syncToolCallTimelineRow(db, stored);
-    settled.push({ toolCall: stored, ...(timelinePart ? { timelinePart } : {}) });
+    const terminalPart = stored.turnId && stored.messageId && (input.summary || input.error)
+      ? ensureTerminalToolPart(db, stored, backgroundTerminalPart(stored, input))
+      : undefined;
+    settled.push({
+      toolCall: stored,
+      ...(timelinePart ? { timelinePart } : {}),
+      ...(terminalPart ? { terminalPart: terminalPart.part } : {})
+    });
   }
   return settled;
+}
+
+function backgroundTerminalPart(
+  record: ToolCallRecord,
+  input: BackgroundToolSettlementInput
+): { type: "tool_result" | "error"; payload: unknown } {
+  const summary = input.error ?? input.summary ?? (input.status === "done" ? "background work completed" : "background work failed");
+  if (input.status === "error") {
+    return {
+      type: "error",
+      payload: {
+        toolCallId: record.id,
+        tool: record.tool,
+        error: summary,
+        ...(input.errorCategory ? { errorCategory: input.errorCategory } : {}),
+        reason: "background_job_failed",
+        ...(input.backgroundDurationMs !== undefined ? { backgroundDurationMs: input.backgroundDurationMs } : {})
+      }
+    };
+  }
+  return {
+    type: "tool_result",
+    payload: {
+      toolCallId: record.id,
+      tool: record.tool,
+      result: summary,
+      humanResult: summary,
+      toolResult: {
+        ok: true,
+        summary,
+        output: summary,
+        status: "done",
+        ...(input.jobId ? { jobId: input.jobId } : {}),
+        ...(input.processId ? { processId: input.processId } : {}),
+        ...(input.outputArtifactId ? { outputArtifactId: input.outputArtifactId } : {}),
+        ...(input.backgroundDurationMs !== undefined ? { metadata: { backgroundDurationMs: input.backgroundDurationMs } } : {})
+      }
+    }
+  };
+}
+
+function backgroundJobDurationMs(job: BackgroundJob): number | undefined {
+  const started = Date.parse(job.startedAt ?? job.createdAt);
+  const completed = job.completedAt ? Date.parse(job.completedAt) : Number.NaN;
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return undefined;
+  return completed - started;
+}
+
+function backgroundJobTiming(job: BackgroundJob): { backgroundDurationMs?: number } {
+  const backgroundDurationMs = backgroundJobDurationMs(job);
+  return backgroundDurationMs === undefined ? {} : { backgroundDurationMs };
+}
+
+function withBackgroundJobTiming(
+  mailbox: Omit<SessionMailboxItem, "id" | "sequence" | "state" | "createdAt">,
+  job: BackgroundJob,
+  completedAt: string
+): Omit<SessionMailboxItem, "id" | "sequence" | "state" | "createdAt"> {
+  const started = Date.parse(job.startedAt ?? job.createdAt);
+  const completed = Date.parse(completedAt);
+  const payload = mailbox.payload && typeof mailbox.payload === "object" && !Array.isArray(mailbox.payload)
+    ? mailbox.payload as Record<string, unknown>
+    : {};
+  return {
+    ...mailbox,
+    payload: {
+      ...payload,
+      ...(Number.isFinite(started) && Number.isFinite(completed) && completed >= started
+        ? { backgroundDurationMs: completed - started }
+        : {})
+    }
+  };
+}
+
+function backgroundJobSummary(job: BackgroundJob): string {
+  if (job.error) return job.error;
+  if (job.result && typeof job.result === "object") {
+    const result = job.result as Record<string, unknown>;
+    if (typeof result.output === "string" && result.output.trim()) return result.output;
+    if (typeof result.response === "string" && result.response.trim()) return result.response;
+  }
+  return job.status === "succeeded" ? "background work completed" : `background work ${job.status}`;
 }
 
 function isTerminalToolCallStatus(status: string): status is "done" | "error" {
@@ -3488,6 +3631,9 @@ function sessionFromRow(row: Row): Session {
   if (typeof row.summary === "string") session.summary = row.summary;
   if (typeof row.summary_updated_at === "string") session.summaryUpdatedAt = row.summary_updated_at;
   if (typeof row.tool_scope_json === "string") session.toolScope = (JSON.parse(row.tool_scope_json) as string[]).map(canonicalToolName);
+  if (typeof row.nickname === "string") session.nickname = row.nickname;
+  if (typeof row.agent_path === "string") session.agentPath = row.agent_path;
+  if (typeof row.service_tier === "string") session.serviceTier = row.service_tier;
   if (typeof row.archived_at === "string") session.archivedAt = row.archived_at;
   return session;
 }
@@ -3708,7 +3854,10 @@ function toolCallFromRow(row: Row): ToolCallRecord {
     ...(typeof row.timeline_part_id === "string" ? { timelinePartId: row.timeline_part_id } : {}),
     ...(typeof row.job_id === "string" ? { jobId: row.job_id } : {}),
     ...(typeof row.process_id === "string" ? { processId: row.process_id } : {}),
-    ...(typeof row.provider_tool_call_id === "string" ? { providerToolCallId: row.provider_tool_call_id } : {})
+    ...(typeof row.provider_tool_call_id === "string" ? { providerToolCallId: row.provider_tool_call_id } : {}),
+    ...(typeof row.terminal_summary === "string" ? { terminalSummary: row.terminal_summary } : {}),
+    ...(typeof row.diagnostic === "string" ? { diagnostic: row.diagnostic } : {}),
+    ...(typeof row.error_category === "string" ? { errorCategory: row.error_category as NonNullable<ToolCallRecord["errorCategory"]> } : {})
   };
 }
 

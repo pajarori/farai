@@ -28,7 +28,7 @@ export const notebookEditTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   concurrencyScope: "workspace",
   renderHuman: defaultHumanRenderer,

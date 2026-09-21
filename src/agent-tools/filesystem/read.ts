@@ -13,7 +13,7 @@ export const fsReadTool: ToolDefinition = {
     properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" }, pages: { type: "string", description: "PDF page or inclusive range, for example 1 or 2-8" } }
   },
   mutates: false,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

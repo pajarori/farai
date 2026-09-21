@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { isIP } from "node:net";
 import { forEachFileLine } from "../../../file-read";
+import { redactSensitiveText } from "../../shared/output-sanitize";
 
 export type ProxyFlowKind = "http" | "websocket" | "tcp" | "udp" | "dns";
 
@@ -18,6 +19,11 @@ type ProxyFlowBase = {
   responseBytes?: number;
   durationMs?: number;
   error?: string;
+  rootSessionId?: string;
+  sessionId?: string;
+  browserContextId?: string;
+  browserContextName?: string;
+  source?: string;
 };
 
 export type ProxyHttpFlowSummary = ProxyFlowBase & { kind: "http" };
@@ -123,6 +129,10 @@ export type ProxyFlowQuery = {
   kind?: ProxyFlowKind;
   method?: string;
   statusClass?: number;
+  rootSessionId?: string;
+  sessionId?: string;
+  browserContextId?: string;
+  includeUnattributed?: boolean;
 };
 
 const DEFAULT_LIMIT = 200;
@@ -154,7 +164,7 @@ export async function readProxyFlows(file: string, query: ProxyFlowQuery = {}): 
   return flows;
 }
 
-export async function readProxyFlowDetail(file: string, id: string): Promise<ProxyFlowDetail | undefined> {
+export async function readProxyFlowDetail(file: string, id: string, query: ProxyFlowQuery = {}): Promise<ProxyFlowDetail | undefined> {
   if (!existsSync(file)) return undefined;
   let found: ProxyFlowDetail | undefined;
   await forEachFileLine(file, { label: "proxy flow log", maxLineBytes: MAX_FLOW_LINE_BYTES, noFollow: true }, (line) => {
@@ -163,7 +173,7 @@ export async function readProxyFlowDetail(file: string, id: string): Promise<Pro
     if (!trimmed) return;
     try {
       const parsed = normalizeFlowDetail(JSON.parse(trimmed));
-      if (parsed?.id === id) found = parsed;
+      if (parsed?.id === id && matchesProxyFlow(parsed, query)) found = parsed;
     } catch {
     }
   });
@@ -181,6 +191,10 @@ export function filterProxyFlows(flows: ProxyFlowSummary[], query: ProxyFlowQuer
 }
 
 function matchesProxyFlow(flow: ProxyFlowSummary, query: ProxyFlowQuery): boolean {
+  if (query.rootSessionId && flow.rootSessionId !== query.rootSessionId) return false;
+  if (query.sessionId && flow.sessionId !== query.sessionId) return false;
+  if (query.browserContextId && flow.browserContextId !== query.browserContextId) return false;
+  if (query.includeUnattributed === false && !flow.rootSessionId) return false;
   if (query.kind && flow.kind !== query.kind) return false;
   if (query.method && flow.method.toUpperCase() !== query.method.toUpperCase()) return false;
   if (query.statusClass && (flow.kind !== "http" || typeof flow.status !== "number" || Math.floor(flow.status / 100) !== query.statusClass)) return false;
@@ -326,9 +340,10 @@ function normalizeHttpSummary(obj: Record<string, unknown>, fallback?: ProxyHttp
   const request = record(obj.request);
   const response = record(obj.response);
   const method = stringFields(obj, "method") ?? stringFields(request, "method") ?? fallback?.method;
-  const url = stringFields(obj, "url") ?? stringFields(request, "url", "pretty_url") ?? fallback?.url;
-  if (!method || !url) return undefined;
-  const location = urlLocation(url, fallback?.host, fallback?.path);
+  const rawUrl = stringFields(obj, "url") ?? stringFields(request, "url", "pretty_url") ?? fallback?.url;
+  if (!method || !rawUrl) return undefined;
+  const location = urlLocation(rawUrl, fallback?.host, fallback?.path);
+  const url = redactSensitiveText(rawUrl);
   const host = preferredHttpHost(requestAuthority(request), location.host, stringFields(obj, "host"), fallback?.host);
   return {
     id: stringFields(obj, "id") ?? fallback?.id ?? "",
@@ -337,7 +352,8 @@ function normalizeHttpSummary(obj: Record<string, unknown>, fallback?: ProxyHttp
     method,
     url,
     host,
-    path: stringFields(obj, "path") ?? location.path,
+    path: redactSensitiveText(stringFields(obj, "path") ?? location.path),
+    ...ownershipFields(obj, fallback),
     ...summaryMetrics(obj, response, fallback)
   };
 }
@@ -346,13 +362,14 @@ function normalizeWebSocketSummary(obj: Record<string, unknown>, fallback?: Prox
   const handshake = record(obj.handshake);
   const request = record(handshake?.request) ?? record(obj.request);
   const response = record(handshake?.response) ?? record(obj.response);
-  const url = stringFields(obj, "url") ?? stringFields(request, "url", "pretty_url") ?? fallback?.url;
-  if (!url) return undefined;
+  const rawUrl = stringFields(obj, "url") ?? stringFields(request, "url", "pretty_url") ?? fallback?.url;
+  if (!rawUrl) return undefined;
   const messages = arrayField(obj.messages);
   const messageCount = numberFields(obj, "messageCount", "message_count")
     ?? (Object.hasOwn(obj, "messages") ? messages.length : fallback?.messageCount)
     ?? 0;
-  const location = urlLocation(url, fallback?.host, fallback?.path);
+  const location = urlLocation(rawUrl, fallback?.host, fallback?.path);
+  const url = redactSensitiveText(rawUrl);
   const closeCode = numberFields(obj, "closeCode", "close_code") ?? fallback?.closeCode;
   const closeReason = stringFields(obj, "closeReason", "close_reason") ?? fallback?.closeReason;
   const closedByClient = booleanFields(obj, "closedByClient", "closed_by_client") ?? fallback?.closedByClient;
@@ -364,11 +381,12 @@ function normalizeWebSocketSummary(obj: Record<string, unknown>, fallback?: Prox
     method: "WS",
     url,
     host,
-    path: stringFields(obj, "path") ?? location.path,
+    path: redactSensitiveText(stringFields(obj, "path") ?? location.path),
     messageCount,
     ...(closeCode !== undefined ? { closeCode } : {}),
     ...(closeReason ? { closeReason } : {}),
     ...(closedByClient !== undefined ? { closedByClient } : {}),
+    ...ownershipFields(obj, fallback),
     ...summaryMetrics(obj, response, fallback)
   };
 }
@@ -394,6 +412,7 @@ function normalizeStreamSummary(
     host,
     path: stringFields(obj, "path") ?? `${client?.label ?? "client"} -> ${server?.label ?? host}`,
     messageCount,
+    ...ownershipFields(obj, fallback),
     ...summaryMetrics(obj, undefined, fallback)
   };
   if (kind === "tcp") {
@@ -425,6 +444,7 @@ function normalizeDnsSummary(obj: Record<string, unknown>, fallback?: ProxyDnsFl
     ...(queryType ? { queryType } : {}),
     ...(responseCode !== undefined ? { responseCode } : {}),
     answerCount,
+    ...ownershipFields(obj, fallback),
     ...summaryMetrics(obj, undefined, fallback)
   };
 }
@@ -444,7 +464,7 @@ function normalizeHttpMessage(value: unknown): ProxyHttpMessage | undefined {
   return {
     ...(httpVersion ? { httpVersion } : {}),
     headers: headersField(obj.headers),
-    ...(bodyText !== undefined ? { bodyText } : {}),
+    ...(bodyText !== undefined ? { bodyText: redactSensitiveText(bodyText) } : {}),
     ...(bodyBase64 !== undefined ? { bodyBase64 } : {}),
     ...(bodyTruncated ? { bodyTruncated: true } : {}),
     ...(reportedBytes !== undefined ? { bodyBytes: reportedBytes } : bodyText !== undefined ? { bodyBytes: Buffer.byteLength(bodyText, "utf8") } : bodyBase64 ? { bodyBytes: Buffer.from(bodyBase64, "base64").byteLength } : {})
@@ -466,7 +486,7 @@ function normalizeStreamMessage(value: unknown): ProxyStreamMessage | undefined 
     direction,
     timestamp: timestampField(obj.timestamp) ?? new Date(0).toISOString(),
     ...(messageType ? { messageType } : {}),
-    ...(contentText !== undefined ? { contentText } : {}),
+    ...(contentText !== undefined ? { contentText: redactSensitiveText(contentText) } : {}),
     ...(contentBase64 !== undefined ? { contentBase64 } : {}),
     contentBytes,
     ...(booleanFields(obj, "truncated") ? { truncated: true } : {}),
@@ -548,6 +568,21 @@ function summaryMetrics(
   };
 }
 
+function ownershipFields(obj: Record<string, unknown>, fallback?: ProxyFlowSummary): Pick<ProxyFlowBase, "rootSessionId" | "sessionId" | "browserContextId" | "browserContextName" | "source"> {
+  const rootSessionId = stringFields(obj, "rootSessionId", "root_session_id") ?? fallback?.rootSessionId;
+  const sessionId = stringFields(obj, "sessionId", "session_id") ?? fallback?.sessionId;
+  const browserContextId = stringFields(obj, "browserContextId", "browser_context_id") ?? fallback?.browserContextId;
+  const browserContextName = stringFields(obj, "browserContextName", "browser_context_name") ?? fallback?.browserContextName;
+  const source = stringFields(obj, "source", "captureSource", "capture_source") ?? fallback?.source;
+  return {
+    ...(rootSessionId ? { rootSessionId } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(browserContextId ? { browserContextId } : {}),
+    ...(browserContextName ? { browserContextName } : {}),
+    ...(source ? { source } : {})
+  };
+}
+
 function flowSearchText(flow: ProxyFlowSummary): string {
   const specific = flow.kind === "dns"
     ? `${flow.queryName} ${flow.queryType ?? ""} ${flow.responseCode ?? ""}`
@@ -605,11 +640,17 @@ function headersField(value: unknown): Array<{ name: string; value: string }> {
       if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string") return { name: entry[0], value: entry[1] };
       const obj = record(entry);
       return obj && typeof obj.name === "string" && typeof obj.value === "string" ? { name: obj.name, value: obj.value } : undefined;
-    }).filter((entry): entry is { name: string; value: string } => Boolean(entry));
+    }).filter((entry): entry is { name: string; value: string } => Boolean(entry)).map(redactHeader);
   }
   const obj = record(value);
   if (!obj) return [];
-  return Object.entries(obj).filter((entry): entry is [string, string] => typeof entry[1] === "string").map(([name, headerValue]) => ({ name, value: headerValue }));
+  return Object.entries(obj).filter((entry): entry is [string, string] => typeof entry[1] === "string").map(([name, headerValue]) => redactHeader({ name, value: headerValue }));
+}
+
+function redactHeader(header: { name: string; value: string }): { name: string; value: string } {
+  const line = redactSensitiveText(`${header.name}: ${header.value}`);
+  const separator = line.indexOf(":");
+  return { name: header.name, value: separator === -1 ? "[redacted]" : line.slice(separator + 1).trimStart() };
 }
 
 function parseMcpJson(result: unknown): unknown {

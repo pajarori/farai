@@ -1,5 +1,6 @@
 import type { ToolDefinition, ToolResult } from "../../types";
 import { callMcpCapabilityTool, isMcpErrorResult, renderMcpToolResult } from "../mcp-manager";
+import { proxyScopeDomains, rootSessionId } from "../services/mitmproxy/ownership";
 import { browserContextManager, type BrowserContextActivity } from "./context-manager";
 import { browserHumanOutput, browserObservationSignature, browserProtocolWarning } from "./observation";
 
@@ -11,6 +12,9 @@ export async function executeBrowserOperation(input: {
   operation: string;
   workspace: string;
   configWorkspace?: string;
+  rootWorkspace?: string;
+  rootSessionId?: string;
+  scopeDomains?: string[];
   session: Parameters<BrowserCapabilityCall>[0]["session"];
   args: Record<string, unknown>;
   signal?: AbortSignal;
@@ -23,6 +27,8 @@ export async function executeBrowserOperation(input: {
     const invoke = async (tool: string, args: Record<string, unknown>): Promise<unknown> => await capabilityCall({
       workspace: input.workspace,
       ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
+      ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+      ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
       ...(input.session ? { session: input.session } : {}),
       preferredServer: "playwright",
       tool,
@@ -34,7 +40,10 @@ export async function executeBrowserOperation(input: {
   const routed = await browserContextManager.runOperation({
     workspace: input.workspace,
     ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
+    ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+    ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
     session: input.session,
+    ...(input.scopeDomains ? { scopeDomains: input.scopeDomains } : {}),
     ...(browserSelector !== undefined ? { browser: browserSelector } : {}),
     ...(input.signal ? { signal: input.signal } : {})
   }, async (invoke, context) => await performBrowserOperation(input.operation, browserArgs, invoke, context));
@@ -139,7 +148,7 @@ function browserTool(input: {
     description: `${input.description} Optionally target a named browser context.`,
     inputSchema: withBrowserSelector(input.inputSchema),
     mutates: input.mutates,
-    timeoutMs: 120_000,
+    timeoutMs: Number.POSITIVE_INFINITY,
     parallel: true,
     concurrencyScope: "session",
     renderHuman: (result) => browserHumanOutput(result.output ?? "") || (result.ok ? "" : result.summary),
@@ -153,6 +162,9 @@ function browserTool(input: {
           operation: input.operation,
           workspace: context.workspace,
           ...(context.rootWorkspace ? { configWorkspace: context.rootWorkspace } : {}),
+          ...(context.rootWorkspace ? { rootWorkspace: context.rootWorkspace } : {}),
+          rootSessionId: rootSessionId(context.session, context.store.loadSession),
+          scopeDomains: proxyScopeDomains(context, [browserArgs.url]),
           session: context.session,
           args: browserArgs,
           ...(context.signal ? { signal: context.signal } : {})
@@ -216,7 +228,7 @@ const browserContextTool: ToolDefinition = {
     browser: { type: "string", description: "Context name or UUID." }
   }, ["action"]),
   mutates: true,
-  timeoutMs: 120_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: browserContextHumanOutput,
@@ -239,6 +251,9 @@ const browserContextTool: ToolDefinition = {
         const created = await browserContextManager.create({
           workspace: context.workspace,
           ...(context.rootWorkspace ? { configWorkspace: context.rootWorkspace } : {}),
+          ...(context.rootWorkspace ? { rootWorkspace: context.rootWorkspace } : {}),
+          rootSessionId: rootSessionId(context.session, context.store.loadSession),
+          scopeDomains: proxyScopeDomains(context),
           session: context.session,
           name: input.name,
           ...(context.signal ? { signal: context.signal } : {})

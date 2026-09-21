@@ -62,3 +62,25 @@ export function occurrences(text: string, search: string): number {
 export function previewEdit(oldString: string, newString: string): string {
   return ["```diff", ...oldString.split("\n").slice(0, 8).map((line) => `-${line}`), ...newString.split("\n").slice(0, 8).map((line) => `+${line}`), "```"].join("\n");
 }
+
+export function previewWrite(previous: string, next: string, isNew: boolean, maxLines = 40): string {
+  const nextLines = next.split("\n");
+  if (isNew || !previous) {
+    const shown = nextLines.slice(0, maxLines).map((line) => `+${line}`);
+    const omitted = nextLines.length - shown.length;
+    return ["```diff", ...shown, ...(omitted > 0 ? [`… +${omitted} more line${omitted === 1 ? "" : "s"}`] : []), "```"].join("\n");
+  }
+  const prevLines = previous.split("\n");
+  const removed = prevLines.slice(0, Math.ceil(maxLines / 2)).map((line) => `-${line}`);
+  const added = nextLines.slice(0, Math.ceil(maxLines / 2)).map((line) => `+${line}`);
+  const omittedPrev = prevLines.length - Math.min(prevLines.length, Math.ceil(maxLines / 2));
+  const omittedNext = nextLines.length - Math.min(nextLines.length, Math.ceil(maxLines / 2));
+  return [
+    "```diff",
+    ...removed,
+    ...(omittedPrev > 0 ? [`… -${omittedPrev} more`] : []),
+    ...added,
+    ...(omittedNext > 0 ? [`… +${omittedNext} more`] : []),
+    "```"
+  ].join("\n");
+}

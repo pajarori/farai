@@ -264,6 +264,7 @@ export function renderModelToolResultEnvelope(toolCall: ToolCallRecord, result: 
     `status: ${toolCall.status}`,
     `ok: ${result.ok ? "true" : "false"}`,
     `summary: ${result.summary || "No summary."}`,
+    ...(result.errorCategory ? [`error_category: ${result.errorCategory}`] : []),
     ...(result.jobId ? [`job_id: ${result.jobId}`] : []),
     ...(result.processId ? [`process_id: ${result.processId}`] : []),
     ...(result.outputArtifactId ? [`output_artifact_id: ${result.outputArtifactId}`] : []),

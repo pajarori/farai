@@ -11,7 +11,7 @@ export const memoryAddHypothesisTool: ToolDefinition = {
     properties: { key: { type: "string" }, text: { type: "string" }, confidence: { type: "string" } }
   },
   mutates: true,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

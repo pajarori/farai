@@ -7,6 +7,7 @@ export type ToolSpec = Readonly<{
   name: ToolName;
   description: string;
   inputSchema: Record<string, unknown>;
+  facadeOperations?: Readonly<Record<string, string>>;
   outputSchema: Record<string, unknown>;
   provenance: ToolProvenance;
   mutates: boolean;
@@ -38,6 +39,7 @@ export function toolSpec(tool: ToolDefinition): ToolSpec {
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
+    ...(tool.facadeOperations ? { facadeOperations: tool.facadeOperations } : {}),
     outputSchema: tool.outputSchema ?? defaultOutputSchema(),
     provenance: tool.provenance ?? defaultToolProvenance(tool.name),
     mutates: tool.mutates,
@@ -62,6 +64,7 @@ export function toolDefinition(registration: ToolRegistration): ToolDefinition {
     name: registration.spec.name,
     description: registration.spec.description,
     inputSchema: registration.spec.inputSchema,
+    ...(registration.spec.facadeOperations ? { facadeOperations: registration.spec.facadeOperations } : {}),
     outputSchema: registration.spec.outputSchema,
     provenance: registration.spec.provenance,
     mutates: registration.spec.mutates,

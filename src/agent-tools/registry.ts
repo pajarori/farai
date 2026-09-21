@@ -36,11 +36,11 @@ export { ToolRegistry, ToolRouter, ToolRuntime, toolDefinition, toolRegistration
 export type { ToolName, ToolPlan, ToolRegistration, ToolSearchQuery as RegistryToolSearchQuery, ToolSpec } from "./tool-registry";
 
 const browserManageTool = facadeTool("browser_manage", "Manage browser contexts and perform browser navigation, inspection, and interaction operations.", facadeDelegates(browserTools, /^browser_/), { visibility: "external" });
-const agentManageTool = facadeTool("agent_manage", "Manage bounded child agents with operation=spawn, list, wait, message, followup, interrupt, or close and operation-specific fields inside args.", facadeDelegates(agentLifecycleTools, /^agent_/), { visibility: "core" });
-const sessionManageTool = facadeTool("session_manage", "Rename the current session with operation=rename and args.title set to a concise non-empty title.", { rename: sessionRenameTool }, { visibility: "core" });
+const agentManageTool = facadeTool("agent_manage", "Manage bounded child agents with operation=spawn, list, wait, message, followup, interrupt, close, or report and that operation's fields passed directly alongside operation. As a subagent, use operation=report to send an interim finding to your parent.", facadeDelegates(agentLifecycleTools, /^agent_/), { visibility: "core" });
+const sessionManageTool = facadeTool("session_manage", "Rename the current session with operation=rename and a title field set to a concise non-empty title.", { rename: sessionRenameTool }, { visibility: "core" });
 const mailManageTool = facadeTool("mail_manage", "List, create, inspect, and wait for email resources.", facadeDelegates(emailTools, /^email_/), { visibility: "external" });
-const taskManageTool = facadeTool("task_manage", "Manage durable todos with operation=add, update, list, or plan and operation-specific fields inside args.", { add: todoAddTool, update: todoUpdateTool, list: todoListTool, plan: updatePlanTool }, { visibility: "core" });
-const worktreeManageTool = facadeTool("worktree_manage", "Manage isolated Git worktrees with operation=enter or exit and operation-specific fields inside args.", { enter: worktreeEnterTool, exit: worktreeExitTool }, { visibility: "workspace" });
+const taskManageTool = facadeTool("task_manage", "Manage durable todos with operation=add, update, list, or plan and that operation's fields passed directly alongside operation.", { add: todoAddTool, update: todoUpdateTool, list: todoListTool, plan: updatePlanTool }, { visibility: "core" });
+const worktreeManageTool = facadeTool("worktree_manage", "Manage isolated Git worktrees with operation=enter or exit and that operation's fields passed directly alongside operation.", { enter: worktreeEnterTool, exit: worktreeExitTool }, { visibility: "workspace" });
 const codeDiagnosticsTool = { ...lspInspectTool, name: "code_diagnostics", description: "Inspect code through the configured language server." };
 const proxyManageTool = facadeTool("proxy_manage", "Manage proxy scope, policy, captured flows, replay, interception, and cleanup.", facadeDelegates(proxyTools, /^proxy_/), { visibility: "external" });
 const callbackManageTool = facadeTool("callback_manage", "Inspect callback interfaces and manage listeners or OAST sessions.", facadeDelegates(callbackTools, /^callback_/), { visibility: "callback" });
@@ -68,7 +68,7 @@ const skillLoadDelegate: ToolDefinition = {
   }
 };
 const knowledgeDelegates = { ...facadeDelegates(knowledgeTools, /^(?:knowledge_|memory_|notes_|evidence_)/), skill_load: skillLoadDelegate };
-const knowledgeManageTool = facadeTool("knowledge_manage", "Search, resolve, traverse, prioritize, and persist security knowledge. Load a skill with operation=skill_load and args.name or args.skill.", knowledgeDelegates, { visibility: "workspace" });
+const knowledgeManageTool = facadeTool("knowledge_manage", "Search, resolve, traverse, prioritize, and persist security knowledge. Load a skill with operation=skill_load and a name or skill field.", knowledgeDelegates, { visibility: "workspace" });
 const mobileManageTool = facadeTool("mobile_manage", "Manage Android devices, applications, static analysis, UI automation, and Frida workflows.", facadeDelegates(androidTools, /^android_/), { visibility: "recon" });
 const findingManageTool = facadeTool("finding_manage", "Calculate CVSS and create or update security findings.", {
   calculate: reportTools.find((tool) => tool.name === "cvss_calculate")!,

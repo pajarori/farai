@@ -32,6 +32,14 @@ MAX_BODY_PREVIEW = env_int("FARAI_PROXY_BODY_PREVIEW_BYTES", 65536, 1024, 1024 *
 MAX_MESSAGE_PREVIEW = env_int("FARAI_PROXY_MESSAGE_PREVIEW_BYTES", 16384, 1024, 256 * 1024)
 MAX_MESSAGES = env_int("FARAI_PROXY_MAX_MESSAGES", 200, 1, 1000)
 REPLAY_CORRELATION_HEADER = "X-Farai-Replay-Correlation"
+CAPTURE_IDENTITY_HEADER = "X-Farai-Capture-Identity"
+CAPTURE_IDENTITY_FIELDS = {
+    "rootSessionId": "faraiRootSessionId",
+    "sessionId": "faraiSessionId",
+    "browserContextId": "faraiBrowserContextId",
+    "browserContextName": "faraiBrowserContextName",
+    "source": "faraiCaptureSource",
+}
 
 
 def env_json_strings(name: str) -> list[str]:
@@ -63,6 +71,59 @@ def pass_through_pattern(host: str) -> str:
     if host.startswith("*."):
         return rf"^(?:[^:]+\.)?{re.escape(host[2:])}(?::\d+)?$"
     return rf"^{re.escape(host)}(?::\d+)?$"
+
+
+def domain_matches(candidate: str, domain: str) -> bool:
+    normalized_candidate = candidate.strip().lower().rstrip(".")
+    normalized_domain = domain.strip().lower().lstrip("*.").rstrip(".")
+    return bool(normalized_domain) and (
+        normalized_candidate == normalized_domain
+        or normalized_candidate.endswith(f".{normalized_domain}")
+    )
+
+
+def decode_capture_identity(value: str | None) -> dict[str, str]:
+    if not value:
+        return {}
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        parsed = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    identity: dict[str, str] = {}
+    for field in CAPTURE_IDENTITY_FIELDS:
+        field_value = parsed.get(field)
+        if isinstance(field_value, str) and field_value.strip():
+            identity[field] = field_value.strip()[:256]
+    expected_root = os.environ.get("FARAI_ROOT_SESSION_ID", "").strip()
+    if expected_root and identity.get("rootSessionId") != expected_root:
+        return {}
+    return identity if identity.get("rootSessionId") and identity.get("sessionId") else {}
+
+
+def apply_capture_identity(flow: Any, identity: dict[str, str]) -> None:
+    metadata = getattr(flow, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        setattr(flow, "metadata", metadata)
+    for public_name, metadata_name in CAPTURE_IDENTITY_FIELDS.items():
+        value = identity.get(public_name)
+        if value:
+            metadata[metadata_name] = value
+
+
+def capture_identity_from_flow(flow: Any) -> dict[str, str]:
+    metadata = getattr(flow, "metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    identity = {
+        public_name: str(metadata[metadata_name])
+        for public_name, metadata_name in CAPTURE_IDENTITY_FIELDS.items()
+        if metadata.get(metadata_name)
+    }
+    return identity if identity.get("rootSessionId") and identity.get("sessionId") else {}
 
 
 class FaraiMitmController(UPSTREAM_MITM_CONTROLLER):
@@ -122,11 +183,19 @@ class FlowStore:
                     id TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
                     timestamp REAL NOT NULL,
+                    root_session_id TEXT,
+                    session_id TEXT,
+                    browser_context_id TEXT,
+                    source TEXT,
                     summary_json TEXT NOT NULL,
                     detail_json TEXT NOT NULL
                 )
                 """
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(farai_flows)")}
+            for name in ("root_session_id", "session_id", "browser_context_id", "source"):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE farai_flows ADD COLUMN {name} TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_farai_flows_timestamp "
                 "ON farai_flows(timestamp)"
@@ -134,6 +203,10 @@ class FlowStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_farai_flows_kind "
                 "ON farai_flows(kind)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_farai_flows_owner "
+                "ON farai_flows(root_session_id, session_id, browser_context_id, timestamp)"
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -147,40 +220,100 @@ class FlowStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO farai_flows(id, kind, timestamp, summary_json, detail_json)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO farai_flows(
+                    id, kind, timestamp, root_session_id, session_id,
+                    browser_context_id, source, summary_json, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     kind=excluded.kind,
                     timestamp=excluded.timestamp,
+                    root_session_id=excluded.root_session_id,
+                    session_id=excluded.session_id,
+                    browser_context_id=excluded.browser_context_id,
+                    source=excluded.source,
                     summary_json=excluded.summary_json,
                     detail_json=excluded.detail_json
                 """,
-                (summary["id"], summary["kind"], timestamp, encoded_summary, encoded_detail),
+                (
+                    summary["id"],
+                    summary["kind"],
+                    timestamp,
+                    summary.get("rootSessionId"),
+                    summary.get("sessionId"),
+                    summary.get("browserContextId"),
+                    summary.get("source"),
+                    encoded_summary,
+                    encoded_detail,
+                ),
             )
 
-    def summaries(self, limit: int, kind: str | None = None) -> list[dict[str, Any]]:
+    def summaries(
+        self,
+        limit: int,
+        kind: str | None = None,
+        root_session_id: str | None = None,
+        session_id: str | None = None,
+        browser_context_id: str | None = None,
+        include_unattributed: bool = False,
+    ) -> list[dict[str, Any]]:
         bounded_limit = max(1, min(int(limit), 1000))
         sql = "SELECT summary_json FROM farai_flows"
         params: list[Any] = []
+        conditions: list[str] = []
         if kind:
-            sql += " WHERE kind = ?"
+            conditions.append("kind = ?")
             params.append(kind)
+        if root_session_id:
+            conditions.append("root_session_id = ?")
+            params.append(root_session_id)
+        elif not include_unattributed:
+            conditions.append("1 = 0")
+        if session_id:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        if browser_context_id:
+            conditions.append("browser_context_id = ?")
+            params.append(browser_context_id)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY timestamp DESC LIMIT ?"
         params.append(bounded_limit)
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def detail(self, flow_id: str) -> dict[str, Any] | None:
+    def detail(
+        self,
+        flow_id: str,
+        root_session_id: str | None = None,
+        session_id: str | None = None,
+        browser_context_id: str | None = None,
+        include_unattributed: bool = False,
+    ) -> dict[str, Any] | None:
+        sql = "SELECT detail_json FROM farai_flows WHERE id = ?"
+        params: list[Any] = [flow_id]
+        if root_session_id:
+            sql += " AND root_session_id = ?"
+            params.append(root_session_id)
+        elif not include_unattributed:
+            sql += " AND 1 = 0"
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if browser_context_id:
+            sql += " AND browser_context_id = ?"
+            params.append(browser_context_id)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT detail_json FROM farai_flows WHERE id = ?", (flow_id,)
-            ).fetchone()
+            row = conn.execute(sql, params).fetchone()
         return json.loads(row[0]) if row else None
 
-    def clear(self) -> None:
+    def clear(self, root_session_id: str | None = None) -> None:
         with self._connect() as conn:
-            conn.execute("DELETE FROM farai_flows")
+            if root_session_id:
+                conn.execute("DELETE FROM farai_flows WHERE root_session_id = ?", (root_session_id,))
+            else:
+                conn.execute("DELETE FROM farai_flows WHERE root_session_id IS NULL")
 
 
 class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
@@ -197,6 +330,9 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
         self.replay_correlations: dict[str, dict[str, str]] = {}
 
     def request(self, flow: http.HTTPFlow) -> None:
+        capture_identity = decode_capture_identity(flow.request.headers.pop(CAPTURE_IDENTITY_HEADER, None))
+        if capture_identity:
+            apply_capture_identity(flow, capture_identity)
         correlation = flow.request.headers.get(REPLAY_CORRELATION_HEADER)
         if correlation:
             flow.request.headers.pop(REPLAY_CORRELATION_HEADER, None)
@@ -206,14 +342,20 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
                 metadata = getattr(flow, "metadata", None)
                 if isinstance(metadata, dict):
                     metadata["faraiReplayParentId"] = replay["parentFlowId"]
-        super().request(flow)
+                    for public_name, metadata_name in CAPTURE_IDENTITY_FIELDS.items():
+                        if replay.get(public_name):
+                            metadata[metadata_name] = replay[public_name]
+                    metadata[CAPTURE_IDENTITY_FIELDS["source"]] = "replay"
+        if self._is_allowed(flow):
+            super().request(flow)
         if self._should_intercept(flow):
             flow.intercept()
             self.pending_intercepts[flow.id] = flow
         self._capture(flow)
 
     def response(self, flow: http.HTTPFlow) -> None:
-        super().response(flow)
+        if self._is_allowed(flow):
+            super().response(flow)
         self._capture(flow)
 
     def error(self, flow: http.HTTPFlow) -> None:
@@ -224,7 +366,8 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
                 b"farai proxy: upstream tls verification failed; use relaxed tls or pass-through for this host\n",
                 {"Content-Type": "text/plain; charset=utf-8", "X-Farai-Proxy-Error": "upstream-tls-verification-failed"},
             )
-        super().error(flow)
+        if self._is_allowed(flow):
+            super().error(flow)
         self._capture(flow)
 
     def websocket_start(self, flow: http.HTTPFlow) -> None:
@@ -269,15 +412,44 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
     def dns_error(self, flow: dns.DNSFlow) -> None:
         self._capture(flow)
 
-    def farai_flow_summaries(self, limit: int = 20, kind: str | None = None) -> list[dict[str, Any]]:
-        return self.flows.summaries(limit, kind)
+    def farai_flow_summaries(
+        self,
+        limit: int = 20,
+        kind: str | None = None,
+        root_session_id: str | None = None,
+        session_id: str | None = None,
+        browser_context_id: str | None = None,
+        include_unattributed: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self.flows.summaries(
+            limit,
+            kind,
+            root_session_id,
+            session_id,
+            browser_context_id,
+            include_unattributed,
+        )
 
-    def farai_flow_detail(self, flow_id: str) -> dict[str, Any] | None:
-        return self.flows.detail(flow_id)
+    def farai_flow_detail(
+        self,
+        flow_id: str,
+        root_session_id: str | None = None,
+        session_id: str | None = None,
+        browser_context_id: str | None = None,
+        include_unattributed: bool = False,
+    ) -> dict[str, Any] | None:
+        return self.flows.detail(
+            flow_id,
+            root_session_id,
+            session_id,
+            browser_context_id,
+            include_unattributed,
+        )
 
-    def clear(self) -> None:
-        super().clear()
-        self.flows.clear()
+    def clear(self, root_session_id: str | None = None) -> None:
+        if root_session_id is None:
+            super().clear()
+        self.flows.clear(root_session_id)
 
     def scope_state(self) -> dict[str, Any]:
         return {"allowedDomains": list(self.scope.config.allowed_domains)}
@@ -299,16 +471,25 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
         }
         return {**self.intercept_config, "pending": len(self.pending_intercepts)}
 
-    def list_intercepts(self) -> list[dict[str, Any]]:
+    def list_intercepts(self, root_session_id: str | None = None) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for flow in self.pending_intercepts.values():
+            identity = capture_identity_from_flow(flow)
+            if root_session_id and identity.get("rootSessionId") != root_session_id:
+                continue
             summary, _, _ = serialize_http(flow)
+            summary.update(identity)
             result.append(summary)
         return sorted(result, key=lambda item: str(item.get("timestamp", "")))
 
     def begin_replay(self, parent_flow_id: str) -> tuple[str, dict[str, str]]:
         token = uuid.uuid4().hex
         state = {"parentFlowId": parent_flow_id}
+        parent = self.flows.detail(parent_flow_id, include_unattributed=True)
+        if parent:
+            for field in CAPTURE_IDENTITY_FIELDS:
+                if parent.get(field):
+                    state[field] = parent[field]
         self.replay_correlations[token] = state
         return token, state
 
@@ -323,9 +504,13 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
         url: str | None = None,
         headers: dict[str, str] | None = None,
         body: str | None = None,
+        root_session_id: str | None = None,
     ) -> dict[str, Any]:
         flow = self.pending_intercepts.pop(flow_id, None)
         if flow is None:
+            raise ValueError(f"Unknown pending intercepted flow: {flow_id}")
+        if not root_session_id or capture_identity_from_flow(flow).get("rootSessionId") != root_session_id:
+            self.pending_intercepts[flow_id] = flow
             raise ValueError(f"Unknown pending intercepted flow: {flow_id}")
         if action == "drop":
             flow.kill()
@@ -366,20 +551,24 @@ class FaraiTrafficRecorder(UPSTREAM_TRAFFIC_RECORDER):
             if parent_flow_id:
                 summary["parentFlowId"] = parent_flow_id
                 detail["parentFlowId"] = parent_flow_id
+            identity = capture_identity_from_flow(flow)
+            if identity:
+                summary.update(identity)
+                detail.update(identity)
             self.flows.save(summary, detail, timestamp)
         except Exception as exc:
             print(f"Failed to save Farai flow: {exc}", file=sys.stderr)
 
     def _is_allowed(self, flow: Any) -> bool:
-        if isinstance(flow, http.HTTPFlow):
-            return self.scope.is_allowed(flow)
         allowed_domains = self.scope.config.allowed_domains
         if not allowed_domains:
-            return True
+            return False
         candidates = endpoint_hosts(flow)
+        if isinstance(flow, http.HTTPFlow):
+            candidates.extend([flow.request.host, flow.request.pretty_host])
         if isinstance(flow, dns.DNSFlow) and flow.request:
             candidates.extend(str(question.name) for question in flow.request.questions)
-        return any(domain in candidate for domain in allowed_domains for candidate in candidates)
+        return any(domain_matches(candidate, domain) for domain in allowed_domains for candidate in candidates)
 
 
 def serialize_flow(flow: Any) -> tuple[dict[str, Any], dict[str, Any], float]:
@@ -664,8 +853,8 @@ def endpoint(connection: Any, client: bool) -> dict[str, Any]:
 
 def endpoint_hosts(flow: Any) -> list[str]:
     return [
-        endpoint(flow.client_conn, client=True)["host"],
-        endpoint(flow.server_conn, client=False)["host"],
+        endpoint(getattr(flow, "client_conn", None), client=True)["host"],
+        endpoint(getattr(flow, "server_conn", None), client=False)["host"],
     ]
 
 
@@ -733,21 +922,68 @@ def optional(target: dict[str, Any], key: str, value: Any) -> None:
 
 
 @server.mcp.tool()
-async def proxy_flow_summaries(limit: int = 20, kind: str | None = None) -> str:
+async def proxy_status() -> str:
+    controller = server.controller
+    task = getattr(controller, "proxy_task", None)
+    running = bool(
+        getattr(controller, "running", False)
+        and getattr(controller, "master", None) is not None
+        and (task is None or not task.done())
+    )
+    return json.dumps(
+        {
+            "running": running,
+            "port": int(getattr(controller, "port", 0)) if running else None,
+        },
+        indent=2,
+    )
+
+
+@server.mcp.tool()
+async def proxy_flow_summaries(
+    limit: int = 20,
+    kind: str | None = None,
+    root_session_id: str | None = None,
+    session_id: str | None = None,
+    browser_context_id: str | None = None,
+    include_unattributed: bool = False,
+) -> str:
     """Return HTTP, WebSocket, TCP, UDP, and DNS flow summaries."""
     recorder = server.controller.recorder
     if not isinstance(recorder, FaraiTrafficRecorder):
         return "[]"
-    return json.dumps(recorder.farai_flow_summaries(limit, kind), indent=2)
+    return json.dumps(
+        recorder.farai_flow_summaries(
+            limit,
+            kind,
+            root_session_id,
+            session_id,
+            browser_context_id,
+            include_unattributed,
+        ),
+        indent=2,
+    )
 
 
 @server.mcp.tool()
-async def proxy_flow_inspect(flow_id: str) -> str:
+async def proxy_flow_inspect(
+    flow_id: str,
+    root_session_id: str | None = None,
+    session_id: str | None = None,
+    browser_context_id: str | None = None,
+    include_unattributed: bool = False,
+) -> str:
     """Return protocol-aware detail for a captured flow."""
     recorder = server.controller.recorder
     if not isinstance(recorder, FaraiTrafficRecorder):
         return "Couldn't find that flow."
-    detail = recorder.farai_flow_detail(flow_id)
+    detail = recorder.farai_flow_detail(
+        flow_id,
+        root_session_id,
+        session_id,
+        browser_context_id,
+        include_unattributed,
+    )
     return json.dumps(detail, indent=2) if detail else "Couldn't find that flow."
 
 
@@ -758,12 +994,13 @@ async def proxy_replay_correlated(
     headers_json: str | None = None,
     body: str | None = None,
     timeout: float = 30.0,
+    root_session_id: str | None = None,
 ) -> str:
     """Replay an HTTP flow and return its exact captured descendant flow id."""
     recorder = server.controller.recorder
     if not isinstance(recorder, FaraiTrafficRecorder):
         return json.dumps({"ok": False, "error": "Farai recorder is unavailable."})
-    if recorder.farai_flow_detail(flow_id) is None:
+    if recorder.farai_flow_detail(flow_id, root_session_id=root_session_id) is None:
         return json.dumps({"ok": False, "error": f"Couldn't find flow {flow_id}."})
     try:
         headers = json.loads(headers_json) if headers_json else {}
@@ -808,6 +1045,16 @@ async def proxy_scope_get() -> str:
     if not isinstance(recorder, FaraiTrafficRecorder):
         return json.dumps({"allowedDomains": []})
     return json.dumps(recorder.scope_state(), indent=2)
+
+
+@server.mcp.tool()
+async def proxy_clear_flows(root_session_id: str) -> str:
+    """Delete captured flows owned by one root session."""
+    recorder = server.controller.recorder
+    if not isinstance(recorder, FaraiTrafficRecorder):
+        raise RuntimeError("Farai recorder is unavailable.")
+    recorder.clear(root_session_id)
+    return json.dumps({"cleared": True})
 
 
 @server.mcp.tool()
@@ -865,12 +1112,12 @@ async def proxy_intercept_get() -> str:
 
 
 @server.mcp.tool()
-async def proxy_intercept_list() -> str:
+async def proxy_intercept_list(root_session_id: str | None = None) -> str:
     """List requests currently paused in Farai's interception queue."""
     recorder = server.controller.recorder
     if not isinstance(recorder, FaraiTrafficRecorder):
         return "[]"
-    return json.dumps(recorder.list_intercepts(), indent=2)
+    return json.dumps(recorder.list_intercepts(root_session_id), indent=2) if root_session_id else "[]"
 
 
 @server.mcp.tool()
@@ -881,6 +1128,7 @@ async def proxy_intercept_resolve(
     url: str | None = None,
     headers_json: str | None = None,
     body: str | None = None,
+    root_session_id: str | None = None,
 ) -> str:
     """Forward, edit, or drop one request from Farai's interception queue."""
     recorder = server.controller.recorder
@@ -893,7 +1141,7 @@ async def proxy_intercept_resolve(
     ):
         raise ValueError("headers_json must encode a string-to-string object.")
     return json.dumps(
-        recorder.resolve_intercept(flow_id, action, method, url, headers, body),
+        recorder.resolve_intercept(flow_id, action, method, url, headers, body, root_session_id),
         indent=2,
     )
 

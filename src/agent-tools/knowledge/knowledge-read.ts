@@ -12,7 +12,7 @@ export const knowledgeReadTool: ToolDefinition = {
     properties: { record_id: { type: "string", description: "record id returned by knowledge_search" } }
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

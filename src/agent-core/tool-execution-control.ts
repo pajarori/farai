@@ -187,6 +187,36 @@ export function normalizeToolTimeout(timeoutMs: number): number {
   return Math.max(1, Math.floor(timeoutMs));
 }
 
+export const BACKGROUND_HANDOFF_TIMEOUT_MS = 30_000;
+
+export const MODEL_DEADLINE_ARG = "deadlineSeconds";
+
+const MIN_MODEL_DEADLINE_SECONDS = 1;
+const MAX_MODEL_DEADLINE_SECONDS = 21_600;
+
+export const modelDeadlineProperty = {
+  type: "integer",
+  minimum: MIN_MODEL_DEADLINE_SECONDS,
+  maximum: MAX_MODEL_DEADLINE_SECONDS,
+  description: "optional: abort this call after this many seconds if it hasn't finished. omit to run without an overall deadline; a long-running call still hands off to a pollable background job on its own."
+} as const;
+
+export function readModelDeadlineMs(args: unknown): number | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  const raw = (args as Record<string, unknown>)[MODEL_DEADLINE_ARG];
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return undefined;
+  const clampedSeconds = Math.min(MAX_MODEL_DEADLINE_SECONDS, Math.max(MIN_MODEL_DEADLINE_SECONDS, raw));
+  return Math.round(clampedSeconds * 1_000);
+}
+
+export function stripModelDeadlineArg<T>(args: T): T {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+  if (!(MODEL_DEADLINE_ARG in (args as Record<string, unknown>))) return args;
+  const clone = { ...(args as Record<string, unknown>) };
+  delete clone[MODEL_DEADLINE_ARG];
+  return clone as T;
+}
+
 export function toolOperationTimeout(timeoutMs: number): number {
   const deadline = normalizeToolTimeout(timeoutMs);
   if (!Number.isFinite(deadline)) return deadline;

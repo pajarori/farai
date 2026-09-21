@@ -195,7 +195,7 @@ export const androidFridaInstallTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 360_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -223,7 +223,7 @@ export const androidFridaStatusTool: ToolDefinition = {
   description: "Check whether frida is ready: frida-tools in the container, and frida-server binary, process, and listening port on the device. Run this before other frida tools; if frida-tools is missing run android_frida_install, then android_frida_setup.",
   inputSchema: { type: "object", properties: { serial: SERIAL_PROP }, additionalProperties: false },
   mutates: false,
-  timeoutMs: 40_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -268,7 +268,7 @@ export const androidFridaSetupTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 500_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -322,7 +322,7 @@ export const androidFridaPsTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 40_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -359,7 +359,7 @@ export const androidFridaRunTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 620_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -405,7 +405,7 @@ export const androidFridaBypassTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 620_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

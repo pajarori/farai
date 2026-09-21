@@ -13,7 +13,7 @@ export const callbackStopTool: ToolDefinition = {
     properties: { name: { type: "string" } }
   },
   mutates: true,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

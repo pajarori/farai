@@ -9,7 +9,7 @@ import { toolLifecycleFamily } from "../../tool-lifecycle";
 import { useTuiDimensions } from "../../context/terminal";
 import { parseDirectoryResults, parseNmap, splitHttpResponse, unifiedEditDiff } from "../../tool-renderers";
 import { useTuiStore } from "../../context/store";
-import { args, tailLines } from "./text-utils";
+import { args } from "./text-utils";
 import {
   isActiveToolStatus,
   shortToolName,
@@ -23,8 +23,6 @@ import { createPrimaryClickGesture } from "../../input/mouse";
 import { loadToolAttachmentBytes } from "../../../tool-attachment";
 import { fitTerminalPair } from "../../terminal-text";
 import { humanizeToolOutput } from "../../../agent-tools/shared/renderers";
-
-const TOOL_OUTPUT_PREVIEW_LINES = 5;
 
 type ToolRowProps = {
   row: Extract<TimelineRow, { kind: "tool" }>;
@@ -65,9 +63,6 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
   const result = () => props.row.result ?? "";
   const fullResult = () => props.row.fullResult ?? result();
-  const mcpInvocation = () => props.row.mcp
-    ? `${props.row.mcp.server}.${props.row.mcp.tool}${props.row.argsSummary ? ` · ${props.row.argsSummary}` : ""}`
-    : "";
   const mcpResult = () => props.row.mcp ? mcpContentLines(props.row.mcp.result) : [];
   const isMcp = () => Boolean(props.row.mcp);
   const active = () => isActiveToolStatus(props.row.status);
@@ -76,12 +71,18 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
   const detailOutput = () => {
     if (isMcp() && mcpResult().length > 0) return mcpResult().join("\n");
     if (active()) return props.row.liveOutput ?? "";
-    return fullResult();
+    const output = fullResult();
+    const diagnostic = props.row.diagnostic;
+    if (!diagnostic || output.includes(diagnostic)) return output;
+    return [output, "diagnostic", diagnostic].filter(Boolean).join("\n\n");
   };
   const hasInput = () => Object.keys(input()).length > 0;
   const header = () => {
-    const title = isMcp() ? `${active() ? "calling" : "called"} ${mcpInvocation()}` : presentation().title;
-    const right = [presentation().showOutcome !== false ? presentation().outcome : undefined, formatActivityDuration(props.row.durationMs)].filter(Boolean).join(" · ");
+    const title = presentation().title;
+    const elapsed = props.row.backgroundDurationMs !== undefined
+      ? `bg ${formatActivityDuration(props.row.backgroundDurationMs)}`
+      : formatActivityDuration(props.row.durationMs);
+    const right = [presentation().showOutcome !== false ? presentation().outcome : undefined, elapsed].filter(Boolean).join(" · ");
     return fitTerminalPair(title, right, Math.max(1, dims().width - 4), 8, 2);
   };
   const headerColor = () => active() ? COLOR.accent : toolColor(props.row.status, props.row.tool);
@@ -90,11 +91,7 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
   const semanticPreview = () => presentation().preview.filter((line) => line.trim() !== presentation().outcome?.trim());
   const visibleOutputLines = () => presentation().detail === "summary"
     ? []
-    : presentation().preview.length > 0
-    ? semanticPreview()
-    : active()
-      ? tailLines(visibleOutput(), 3)
-      : previewOutputLines(visibleOutput(), TOOL_OUTPUT_PREVIEW_LINES);
+    : semanticPreview();
   return (
     <box style={{ flexDirection: "column", marginBottom: 1 }}>
       <box style={{ flexDirection: "row" }} {...toggleClick}>
@@ -103,7 +100,7 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
         <Show when={header().right}><text fg={presentation().warning ? COLOR.warning : COLOR.dim}>{`  ${header().right}`}</text></Show>
       </box>
 
-      <Show when={!expanded() && !isMcp() && visibleOutput()}>
+      <Show when={!expanded() && !isMcp() && visibleOutputLines().length > 0}>
         <box style={{ flexDirection: "column", paddingLeft: 2 }} {...previewClick}>
           <Index each={visibleOutputLines()}>
             {(line, index) => <text fg={COLOR.dim}>{`${active() ? "│ " : index === 0 ? "└ " : "  "}${truncateLine(line(), contentWidth())}`}</text>}
@@ -111,9 +108,9 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
         </box>
       </Show>
 
-      <Show when={!expanded() && isMcp() && mcpResult().length > 0}>
+      <Show when={!expanded() && isMcp() && visibleOutputLines().length > 0}>
         <box style={{ flexDirection: "column", paddingLeft: 2 }} {...previewClick}>
-          <For each={previewOutputLines(mcpResult().join("\n"), TOOL_OUTPUT_PREVIEW_LINES)}>
+          <For each={visibleOutputLines()}>
             {(line, index) => <text fg={COLOR.dim}>{`${index() === 0 ? "└ " : "  "}${truncateLine(line, contentWidth())}`}</text>}
           </For>
         </box>
@@ -126,7 +123,7 @@ function StandardToolRow(props: ToolRowProps): JSX.Element {
       </Show>
 
       <Show when={expanded()}>
-        <ExpandedPanel onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
+        <ExpandedPanel id={`${props.row.id}:expanded`} onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
           <text fg={COLOR.dim}>{active() ? "live output" : "result"}</text>
           <Show when={detailOutput()} fallback={<text fg={COLOR.dim}>{toolEmptyState(props.row.status)}</text>}>
             {(output) => <ToolResult tool={props.row.tool} input={input()} text={output()} width={dims().width} />}
@@ -178,7 +175,7 @@ export function ActivityRow(props: ActivityRowProps): JSX.Element {
         </box>
       </Show>
       <Show when={expanded()}>
-        <ExpandedPanel onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
+        <ExpandedPanel id={`${props.row.id}:expanded`} onClick={() => tui.actions.cellExpandedToggle(props.row.id)}>
           <For each={props.row.items}>{(item, index) => {
             const itemInput = () => args(item.args);
             const output = () => item.fullResult ?? item.result ?? item.liveOutput ?? "";
@@ -277,10 +274,12 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
   const metadata = () => props.row.toolResult?.metadata ?? {};
   const activity = () => props.row.jobId ? tui.store.snapshot.subagents.find((item) => item.id === props.row.jobId) : undefined;
   const expanded = () => Boolean(tui.store.ui.expandedCells[props.row.id]);
+  const kind = (): "spawn" | "task" => props.row.tool === "agent_manage" || props.row.tool === "agent_spawn" ? "spawn" : "task";
   const title = () => {
     const value = metadata().title ?? input().title;
     if (typeof value === "string" && value.trim()) return value.trim();
-    return titleFromPrompt(String(input().prompt ?? ""), typeof input().lane === "string" ? `${input().lane} task` : "subagent task");
+    const fallback = typeof input().lane === "string" ? `${input().lane} task` : "subagent task";
+    return titleFromPrompt(String(input().prompt ?? ""), kind() === "spawn" ? `spawn ${fallback}` : fallback);
   };
   const lane = () => typeof metadata().lane === "string"
     ? metadata().lane as string
@@ -289,7 +288,7 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
       : "general";
   const mode = () => metadata().mode === "detached" || input().mode === "detached" ? "background" : "attached";
   const lifecycleStatus = () => activity()?.status ?? metadata().status;
-  const status = () => delegationStatus(props.row.status, lifecycleStatus(), mode());
+  const status = () => delegationStatus(props.row.status, lifecycleStatus(), mode(), kind());
   const active = () => status() === "starting" || status() === "running";
   const prompt = () => String(input().prompt ?? "").trim();
   const result = () => activity()?.summary ?? activity()?.error ?? props.row.fullResult ?? props.row.toolResult?.output ?? "";
@@ -306,15 +305,15 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
       }}
     >
       <box style={{ flexDirection: "row" }} {...toggleClick}>
-        <TranscriptMarker color={delegationColor(status())} glyph={delegationGlyph(status())} spinning={active()} animated={props.animated} />
-        <text fg={delegationColor(status())}>{headline().left}</text>
-        <Show when={headline().right}><text fg={delegationColor(status())}>{`  ${headline().right}`}</text></Show>
+        <TranscriptMarker color={delegationColor(status(), kind())} glyph={delegationGlyph(status(), kind())} spinning={active()} animated={props.animated} />
+        <text fg={delegationColor(status(), kind())}>{headline().left}</text>
+        <Show when={headline().right}><text fg={delegationColor(status(), kind())}>{`  ${headline().right}`}</text></Show>
       </box>
       <box style={{ paddingLeft: 2 }}>
-        <text fg={COLOR.dim}>{truncateLine([lane(), mode(), duration()].filter(Boolean).join(" · "), width())}</text>
+        <text fg={COLOR.dim}>{truncateLine([kind() === "spawn" ? "spawn" : "delegated", lane(), mode(), duration()].filter(Boolean).join(" · "), width())}</text>
       </box>
       <Show when={expanded()}>
-        <ExpandedPanel onClick={toggle}>
+        <ExpandedPanel id={`${props.row.id}:expanded`} onClick={toggle}>
           <text fg={COLOR.dim}>{active() ? "live result" : "result"}</text>
           <Show when={result()} fallback={<text fg={COLOR.dim}>{active() ? "work is still in progress" : "no result available"}</text>}>
             {(value) => (
@@ -339,30 +338,32 @@ function AgentTaskRow(props: ToolRowProps): JSX.Element {
   );
 }
 
-function delegationStatus(status: string, metadataStatus: unknown, mode: string): string {
+function delegationStatus(status: string, metadataStatus: unknown, mode: string, kind: "spawn" | "task"): string {
   if (metadataStatus === "cancelled") return "cancelled";
   if (metadataStatus === "lost") return "failed";
   if (metadataStatus === "failed") return "failed";
-  if (metadataStatus === "returned" || metadataStatus === "succeeded") return mode === "background" ? "completed" : "returned";
+  if (metadataStatus === "returned" || metadataStatus === "succeeded") return kind === "spawn" ? "launched" : mode === "background" ? "completed" : "returned";
   if (status === "failed" || status === "error" || status === "denied") return "failed";
   if (status === "running_background") return "running";
-  if (status === "pending" || status === "running") return "starting";
-  if (status === "done") return mode === "background" ? "completed" : "returned";
+  if (status === "pending" || status === "running") return kind === "spawn" ? "spawning" : "starting";
+  if (status === "done") return kind === "spawn" ? "launched" : mode === "background" ? "completed" : "returned";
   return status;
 }
 
-function delegationGlyph(status: string): string {
+function delegationGlyph(status: string, kind: "spawn" | "task"): string {
+  if (status === "launched") return "↗";
   if (status === "completed" || status === "returned") return "✓";
   if (status === "failed") return "×";
   if (status === "cancelled") return "-";
-  return "•";
+  return kind === "spawn" ? "…" : "•";
 }
 
-function delegationColor(status: string): string {
+function delegationColor(status: string, kind: "spawn" | "task"): string {
   if (status === "failed") return COLOR.error;
   if (status === "cancelled") return COLOR.dim;
+  if (status === "launched") return COLOR.accent;
   if (status === "completed" || status === "returned") return COLOR.success;
-  return COLOR.accent;
+  return kind === "spawn" ? COLOR.dim : COLOR.accent;
 }
 
 function agentDuration(startedAt: string | undefined, completedAt: string | undefined): string | undefined {
@@ -434,19 +435,6 @@ function ToolResult(props: ToolResultProps): JSX.Element {
       </Show>
     </box>
   );
-}
-
-function previewOutputLines(text: string, limit: number): string[] {
-  const lines = text.split("\n").filter((line) => line.trim().length > 0);
-  if (lines.length === 0) return ["(no output)"];
-  if (lines.length <= limit) return lines;
-  const head = Math.max(1, Math.floor(limit / 2));
-  const tail = Math.max(1, limit - head - 1);
-  return [
-    ...lines.slice(0, head),
-    `… +${lines.length - head - tail} lines (ctrl+t for full transcript)`,
-    ...lines.slice(lines.length - tail)
-  ];
 }
 
 function toolColor(status: string, tool?: string): string {

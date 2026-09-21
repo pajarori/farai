@@ -112,7 +112,7 @@ export const subdomainEnumTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 100_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

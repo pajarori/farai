@@ -5,8 +5,11 @@ import { evidenceResult } from "../shared/evidence-result";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { timeoutBackgroundResult } from "../shared/background-result";
 import { loadConfig, resolveProxyConfig } from "../../agent-core/config";
-import { ensureMcpProxyReady, managedProxyForSession } from "../mcp-manager";
+import { ensureMcpProxyReady, extendMcpProxyScope, managedProxyForSession } from "../mcp-manager";
 import { processOutput } from "../shared/process-output";
+import { parseHttpResponseChain } from "../shared/http-response";
+import { encodeProxyCaptureIdentity, PROXY_CAPTURE_IDENTITY_HEADER, proxyCaptureIdentity, proxyScopeDomains } from "../services/mitmproxy/ownership";
+import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
 
 export const httpRequestTool: ToolDefinition = {
   name: "http_request",
@@ -28,7 +31,7 @@ export const httpRequestTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 45_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -43,39 +46,62 @@ export const httpRequestTool: ToolDefinition = {
     if (proxyConfig.mode === "off" && network === "proxy") throw new Error("managed proxy capture is disabled by proxy.mode=off");
     if (proxyConfig.mode === "transparent" && network === "direct") throw new Error("direct routing is unavailable while transparent proxy mode is active");
     let proxyUrl: string | undefined;
+    let captureIdentity: string | undefined;
     if (network === "proxy") {
-      await ensureMcpProxyReady({
+      const identity = proxyCaptureIdentity(context, "http_request");
+      const proxyInput = {
         workspace: context.workspace,
         configWorkspace,
         session: context.session,
+        rootSessionId: identity.rootSessionId,
         ...(context.rootWorkspace ? { rootWorkspace: context.rootWorkspace } : {}),
         ...(context.signal ? { signal: context.signal } : {})
-      });
+      };
+      await ensureMcpProxyReady(proxyInput);
+      await extendMcpProxyScope(proxyInput, proxyScopeDomains(context, [args.url]));
       const proxy = managedProxyForSession(context.session);
       if (!proxy?.running) throw new Error("managed proxy did not become ready");
       if (proxyConfig.mode === "explicit") proxyUrl = `http://127.0.0.1:${proxy.port}`;
+      captureIdentity = encodeProxyCaptureIdentity(identity);
     }
-    const result = await kali.exec(httpRequestCommand(args, proxyUrl ? { proxyUrl } : {}));
+    const result = await kali.exec(httpRequestCommand(args, {
+      ...(proxyUrl ? { proxyUrl } : {}),
+      ...(captureIdentity ? { captureIdentity } : {})
+    }), BACKGROUND_HANDOFF_TIMEOUT_MS);
     const converted = timeoutBackgroundResult("http_request", kali, result);
     if (converted) return converted;
-    const output = processOutput(result.stdout, result.stderr);
+    const rawOutput = processOutput(result.stdout, result.stderr);
+    const response = parseHttpResponseChain(rawOutput);
+    const output = response.originText;
     const evidence = evidenceResult(context, "http response", output, result.exitCode === 0 && !result.timedOut);
+    const rawArtifact = response.proxyHandshake
+      ? context.store.saveOutputArtifact({ sessionId: context.session.id, ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}), content: rawOutput })
+      : undefined;
     if (upstreamTlsVerificationFailed(output)) {
       return {
         ...evidence,
         ok: false,
         summary: "upstream tls verification failed in managed proxy",
-        output: "farai's managed proxy rejected the upstream certificate in strict tls mode. switch the proxy to relaxed tls or add this host to pass-through.\n\n" + (evidence.output ?? "")
+        output: "farai's managed proxy rejected the upstream certificate in strict tls mode. switch the proxy to relaxed tls or add this host to pass-through.\n\n" + (evidence.output ?? ""),
+        ...(rawArtifact ? { outputArtifactId: rawArtifact.id } : {})
       };
     }
-    return evidence;
+    return {
+      ...evidence,
+      ...(rawArtifact ? { outputArtifactId: rawArtifact.id } : {}),
+      metadata: {
+        ...(response.origin?.statusCode ? { statusCode: response.origin.statusCode } : {}),
+        redirects: response.blocks.filter((block) => block.kind === "origin").map((block) => block.statusCode).filter((code): code is number => code !== undefined),
+        proxyHandshake: Boolean(response.proxyHandshake)
+      }
+    };
   }
 };
 
-export function httpRequestCommand(args: Record<string, unknown>, options: { proxyUrl?: string } = {}): string {
+export function httpRequestCommand(args: Record<string, unknown>, options: { proxyUrl?: string; captureIdentity?: string } = {}): string {
   const url = asString(args.url, "url");
   const command = ["curl", "-sS", "-i", "--max-time", "30"];
-  if (options.proxyUrl) command.push("--proxy", options.proxyUrl);
+  if (options.proxyUrl) command.push("--proxy", options.proxyUrl, "--suppress-connect-headers");
   if (args.followRedirects === true) command.push("-L");
   if (args.pathAsIs === true) command.push("--path-as-is");
   if (args.httpVersion === "1.0") command.push("--http1.0");
@@ -86,9 +112,11 @@ export function httpRequestCommand(args: Record<string, unknown>, options: { pro
   if (args.headers && typeof args.headers === "object" && !Array.isArray(args.headers)) {
     for (const [name, value] of Object.entries(args.headers as Record<string, unknown>)) {
       if (typeof value !== "string" || /[\r\n]/.test(name) || /[\r\n]/.test(value)) throw new Error("headers must contain single-line string names and values");
+      if (name.toLowerCase() === PROXY_CAPTURE_IDENTITY_HEADER.toLowerCase()) throw new Error(`${PROXY_CAPTURE_IDENTITY_HEADER} is reserved for managed proxy ownership`);
       command.push("--header", `${name}: ${value}`);
     }
   }
+  if (options.captureIdentity) command.push("--header", `${PROXY_CAPTURE_IDENTITY_HEADER}: ${options.captureIdentity}`);
   if (typeof args.body === "string") command.push("--data-binary", args.body);
   command.push(url);
   return command.map(shellQuote).join(" ");

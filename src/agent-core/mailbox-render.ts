@@ -83,36 +83,47 @@ function completionFields(item: SessionMailboxItem): {
   status: string;
   rawSummary: string;
   title?: string;
+  nickname?: string;
   jobId?: string;
   processId?: string;
   childSessionId?: string;
   outputArtifactId?: string;
+  backgroundDurationMs?: number;
 } {
   const payload = item.payload && typeof item.payload === "object" && !Array.isArray(item.payload)
     ? item.payload as Record<string, unknown>
     : {};
-  const status = typeof payload.status === "string"
-    ? payload.status
-    : typeof payload.error === "string"
-      ? "failed"
-      : "succeeded";
-  const rawSummary = typeof payload.summary === "string"
-    ? payload.summary
-    : typeof payload.response === "string"
-      ? payload.response
+  const isReport = item.kind === "agent_report";
+  const status = isReport
+    ? "report"
+    : typeof payload.status === "string"
+      ? payload.status
       : typeof payload.error === "string"
-      ? payload.error
-      : `Background job ${status}.`;
+        ? "failed"
+        : "succeeded";
+  const rawSummary = typeof payload.message === "string"
+    ? payload.message
+    : typeof payload.summary === "string"
+      ? payload.summary
+      : typeof payload.response === "string"
+        ? payload.response
+        : typeof payload.error === "string"
+        ? payload.error
+        : `Background job ${status}.`;
   return {
     mailboxKind: item.kind,
     sequence: item.sequence,
     status,
     rawSummary,
     ...(typeof payload.title === "string" ? { title: payload.title } : {}),
+    ...(typeof payload.nickname === "string" ? { nickname: payload.nickname } : {}),
     ...(typeof payload.jobId === "string" ? { jobId: boundedIdentifier(payload.jobId) } : {}),
     ...(typeof payload.processId === "string" ? { processId: boundedIdentifier(payload.processId) } : {}),
     ...(typeof payload.childSessionId === "string" ? { childSessionId: boundedIdentifier(payload.childSessionId) } : {}),
-    ...(typeof payload.outputArtifactId === "string" ? { outputArtifactId: boundedIdentifier(payload.outputArtifactId) } : {})
+    ...(typeof payload.outputArtifactId === "string" ? { outputArtifactId: boundedIdentifier(payload.outputArtifactId) } : {}),
+    ...(typeof payload.backgroundDurationMs === "number" && Number.isFinite(payload.backgroundDurationMs) && payload.backgroundDurationMs >= 0
+      ? { backgroundDurationMs: payload.backgroundDurationMs }
+      : {})
   };
 }
 
@@ -122,16 +133,18 @@ function completionRecord(
   truncated: boolean
 ): Record<string, unknown> {
   return {
-    kind: "background_job_completion",
+    kind: fields.mailboxKind === "agent_report" ? "subagent_report" : "background_job_completion",
     mailboxKind: fields.mailboxKind,
     sequence: fields.sequence,
     status: fields.status,
     summary: truncated ? `${summary}${TRUNCATED_SUMMARY_MARKER}` : summary,
     ...(fields.title ? { title: fields.title } : {}),
+    ...(fields.nickname ? { nickname: fields.nickname } : {}),
     ...(fields.jobId ? { jobId: fields.jobId } : {}),
     ...(fields.processId ? { processId: fields.processId } : {}),
     ...(fields.childSessionId ? { childSessionId: fields.childSessionId } : {}),
-    ...(fields.outputArtifactId ? { outputArtifactId: fields.outputArtifactId } : {})
+    ...(fields.outputArtifactId ? { outputArtifactId: fields.outputArtifactId } : {}),
+    ...(fields.backgroundDurationMs !== undefined ? { backgroundDurationMs: fields.backgroundDurationMs } : {})
   };
 }
 

@@ -16,6 +16,7 @@ import { readBoundedFileText } from "../file-read";
 import { ResponseSizeLimitError } from "../http-response";
 import { faraiDockerEnvironment } from "../agent-container/docker-environment";
 import { openLoopbackAuthCallback, withDeadline, type LoopbackAuthCallback } from "../agent-core/oauth-loopback";
+import { sanitizeToolOutput } from "./shared/output-sanitize";
 
 type ExternalMcpServerCommon = {
   name: string;
@@ -177,7 +178,7 @@ type RawMcpPrompt = {
 };
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
-const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
+const DEFAULT_TOOL_TIMEOUT_MS = 2_147_483_647;
 export const DEFAULT_MITMPROXY_PORT = 31_337;
 const MAX_TCP_PORT = 65_535;
 const MAX_STDIO_BUFFER_BYTES = 10 * 1024 * 1024;
@@ -1079,15 +1080,15 @@ export class McpStdioClient implements McpClientTransport {
   private processError(state: McpProcessState, error: unknown): Error {
     if (error instanceof Error && error.message.startsWith("MCP ")) return error;
     const message = error instanceof Error ? error.message : String(error);
-    const stderr = state.stderr.text().trim();
-    return new Error(`MCP ${this.server.name} transport error: ${message}${stderr ? `: ${stderr}` : ""}`);
+    const diagnostic = mcpProcessDiagnostic(state.stderr.text());
+    return new Error(`MCP ${this.server.name} transport error: ${message}${diagnostic ? `: ${diagnostic}` : ""}`);
   }
 
   private exitError(state: McpProcessState, code: number | null, signal: NodeJS.Signals | null): Error {
     if (state.failure) return state.failure;
     const status = code !== null ? ` with code ${code}` : signal ? ` from ${signal}` : "";
-    const stderr = state.stderr.text().trim();
-    return new Error(`MCP process exited${status}${stderr ? `: ${stderr}` : ""}`);
+    const diagnostic = mcpProcessDiagnostic(state.stderr.text());
+    return new Error(`MCP process exited${status}${diagnostic ? `: ${diagnostic}` : ""}`);
   }
 
   private async waitForExit(state: McpProcessState, timeoutMs: number): Promise<boolean> {
@@ -1109,6 +1110,17 @@ export class McpStdioClient implements McpClientTransport {
     state.buffer = Buffer.alloc(0);
     state.stderr.clear();
   }
+}
+
+function mcpProcessDiagnostic(stderr: string): string {
+  const sanitized = sanitizeToolOutput(stderr);
+  if (/address already in use|port[^\n]*already in use|eaddrinuse/i.test(sanitized)) return "configured endpoint is already in use";
+  return sanitized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/^processing request of type\b/i.test(line))
+    .slice(-3)
+    .join(" · ");
 }
 
 export class McpHttpClient implements McpClientTransport {

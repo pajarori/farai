@@ -36,20 +36,47 @@ export function hasSharedWorkspaceEdits(tools: string[] | undefined): boolean {
   return tools.map(canonicalToolName).some((tool) => SHARED_WORKSPACE_EDIT_TOOLS.has(tool));
 }
 
+const SUBAGENT_NICKNAMES = [
+  "atlas", "beacon", "cobalt", "delta", "echo", "flint", "gauss", "harbor",
+  "indigo", "juno", "koda", "lyra", "maple", "nova", "onyx", "pulsar",
+  "quartz", "raven", "sable", "tundra", "umbra", "vega", "willow", "zephyr"
+];
+
+export function pickSubagentNickname(taken: Iterable<string>): string {
+  const used = new Set([...taken].map((name) => name.toLowerCase()));
+  for (const name of SUBAGENT_NICKNAMES) if (!used.has(name)) return name;
+  for (let suffix = 2; ; suffix += 1) {
+    for (const name of SUBAGENT_NICKNAMES) {
+      const candidate = `${name}-${suffix}`;
+      if (!used.has(candidate)) return candidate;
+    }
+  }
+}
+
+export function childAgentPath(parentPath: string | undefined, nickname: string): string {
+  return `${parentPath?.trim() || "root"}/${nickname}`;
+}
+
 export function buildSubagentTaskPrompt(input: {
   title: string;
   task: string;
   lane?: string;
   lanePrompt?: string;
   parentSessionId: string;
+  nickname?: string;
+  agentPath?: string;
+  inheritedContext?: string;
   tools?: string[];
 }): string {
   return [
     "you are a subagent working for a parent farai session.",
+    ...(input.nickname ? [`your nickname: ${input.nickname}`] : []),
+    ...(input.agentPath ? [`your agent path: ${input.agentPath}`] : []),
     `parent session: ${input.parentSessionId}`,
     `task: ${input.title}`,
     ...(input.lane ? [`lane: ${input.lane}`] : []),
     ...(input.tools?.length ? [`tool scope: ${input.tools.join(", ")}`] : []),
+    ...(input.inheritedContext ? [`inherited parent conversation (context only; do not repeat what is already established here):\n${input.inheritedContext}`] : []),
     "work autonomously on the delegated task. you may delegate concrete independent subtasks when useful. avoid repeating parent work or broadening the task without evidence.",
     "preserve exact evidence and return one concise result with status, summary, claims, artifacts, changes, coverage, uncertainty, next actions, and metrics. distinguish proven, candidate, disproven, and inconclusive claims. the parent owns synthesis and the final answer.",
     ...(input.lanePrompt ? [input.lanePrompt] : []),

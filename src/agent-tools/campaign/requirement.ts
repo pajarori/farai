@@ -20,7 +20,7 @@ export const campaignRequirementTool: ToolDefinition = {
     }
   },
   mutates: true,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   visibility: "core",
   renderHuman: defaultHumanRenderer,

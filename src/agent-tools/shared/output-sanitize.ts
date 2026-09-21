@@ -1,4 +1,12 @@
 const CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
+const SENSITIVE_NAME = "(?:access[_-]?token|api[_-]?key|auth(?:orization)?|bearer|client[_-]?secret|cookie|credential|id[_-]?token|pass(?:word|wd|phrase)?|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|secret|session(?:id)?|set[_-]?cookie|token|x[_-]?api[_-]?key)";
+const HEADER_RE = new RegExp(`^(\\s*${SENSITIVE_NAME}\\s*:\\s*).*$`, "gim");
+const QUERY_RE = new RegExp(`([?&]${SENSITIVE_NAME}=)[^&#\\s]*`, "gi");
+const FORM_RE = new RegExp(`(^|[&;\\s])(${SENSITIVE_NAME}=)[^&;\\s]*`, "gim");
+const JSON_STRING_RE = new RegExp(`("${SENSITIVE_NAME}"\\s*:\\s*")[^"]*(")`, "gi");
+const JSON_SCALAR_RE = new RegExp(`("${SENSITIVE_NAME}"\\s*:\\s*)(?!")[^,}\\s]+`, "gi");
+const AUTH_SCHEME_RE = /\b(bearer|basic)\s+[a-z0-9._~+\/-]+=*/gi;
+const URL_CREDENTIAL_RE = /\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 
 export function sanitizeToolOutput(value: string): string {
   if (!value) return value;
@@ -14,7 +22,7 @@ export function sanitizeToolOutput(value: string): string {
 
 function binaryPreview(value: string, label: string): string {
   const bytes = Buffer.from(value, "utf8");
-  const strings = printableStrings(bytes).slice(0, 24);
+  const strings = printableStrings(bytes).slice(0, 24).map(redactSensitiveText);
   const hex = [...bytes.subarray(0, 192)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .reduce<string[]>((lines, byte, index) => {
@@ -57,7 +65,18 @@ export function isBinaryLike(value: string): boolean {
 }
 
 function sanitizeText(value: string): string {
-  return stripTerminalSequences(value).replace(CONTROL_RE, "");
+  return redactSensitiveText(stripTerminalSequences(value).replace(CONTROL_RE, ""));
+}
+
+export function redactSensitiveText(value: string): string {
+  return value
+    .replace(HEADER_RE, "$1[redacted]")
+    .replace(QUERY_RE, "$1[redacted]")
+    .replace(FORM_RE, "$1$2[redacted]")
+    .replace(JSON_STRING_RE, "$1[redacted]$2")
+    .replace(JSON_SCALAR_RE, "$1\"[redacted]\"")
+    .replace(AUTH_SCHEME_RE, "$1 [redacted]")
+    .replace(URL_CREDENTIAL_RE, "$1[redacted]@");
 }
 
 function stripTerminalSequences(value: string): string {
@@ -116,12 +135,11 @@ function byteLength(value: string): number {
 }
 
 function splitHttpResponse(value: string): { head: string; body: string } | undefined {
-  if (!value.startsWith("HTTP/")) return undefined;
-  const separator = value.includes("\r\n\r\n") ? "\r\n\r\n" : "\n\n";
-  const index = value.indexOf(separator);
-  if (index === -1) return undefined;
+  const response = parseHttpResponseChain(value).origin;
+  if (!response) return undefined;
   return {
-    head: value.slice(0, index),
-    body: value.slice(index + separator.length)
+    head: response.headers,
+    body: response.body
   };
 }
+import { parseHttpResponseChain } from "./http-response";

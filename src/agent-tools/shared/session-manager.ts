@@ -358,7 +358,7 @@ export class SessionManager {
   private async reapExpired(): Promise<void> {
     const now = Date.now();
     const expired = [...this.sessions.values()]
-      .filter((managed) => now - managed.lastUsedAt >= this.idleTimeoutMs)
+      .filter((managed) => managed.terminal && now - managed.lastUsedAt >= this.idleTimeoutMs)
       .map((managed) => managed.sessionId);
     await Promise.allSettled(expired.map((sessionId) => this.stop(sessionId)));
     this.scheduleReap();
@@ -367,8 +367,9 @@ export class SessionManager {
   private scheduleReap(): void {
     if (this.reapTimer) clearTimeout(this.reapTimer);
     this.reapTimer = undefined;
-    if (this.sessions.size === 0) return;
-    const nextExpiry = Math.min(...[...this.sessions.values()].map((managed) => managed.lastUsedAt + this.idleTimeoutMs));
+    const terminal = [...this.sessions.values()].filter((managed) => managed.terminal);
+    if (terminal.length === 0) return;
+    const nextExpiry = Math.min(...terminal.map((managed) => managed.lastUsedAt + this.idleTimeoutMs));
     this.reapTimer = setTimeout(() => {
       this.reapTimer = undefined;
       void this.reapIdle();

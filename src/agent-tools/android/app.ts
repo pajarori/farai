@@ -24,7 +24,7 @@ export const androidApkPullTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 120_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -67,7 +67,7 @@ export const androidInstallTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 120_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -103,7 +103,7 @@ function appLifecycleTool(name: string, verb: "start" | "stop"): ToolDefinition 
       additionalProperties: false
     },
     mutates: true,
-    timeoutMs: 30_000,
+    timeoutMs: Number.POSITIVE_INFINITY,
     parallel: false,
     renderHuman: defaultHumanRenderer,
     renderModel: defaultModelRenderer,
@@ -144,7 +144,7 @@ export const androidDeeplinkTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -180,7 +180,7 @@ export const androidPullFileTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

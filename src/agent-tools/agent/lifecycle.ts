@@ -1,4 +1,4 @@
-import type { AgentLifecycleEntry, ToolDefinition, ToolResult } from "../../types";
+import type { AgentLifecycleEntry, SubagentForkMode, ToolDefinition, ToolResult } from "../../types";
 import { normalizeSessionTitle, titleFromPrompt } from "../../session-title";
 import { assertObject, asString, maybeString } from "../../utils";
 
@@ -34,7 +34,10 @@ const spawnProperties = {
   lane: { type: "string", description: "capability profile from the available subagent lanes (for example recon for basic attack-surface discovery), or an explicitly configured specialist lane; omit to inherit the full parent scope" },
   tools: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" }, description: "optional exact tool-name subset; omit to use the selected lane's normal scope, and never request tools unavailable to the parent" },
   model: { type: "string", description: "optional deliberate model override; omit to inherit the parent model" },
-  mode: { type: "string", enum: ["attached", "detached"], description: "use the string attached to wait for the result, or detached to return immediately; omit for attached. there is no detached boolean field" }
+  mode: { type: "string", enum: ["attached", "detached"], description: "use the string attached to wait for the result, or detached to return immediately; omit for attached. there is no detached boolean field" },
+  inheritHistory: { type: "string", enum: ["none", "recent", "full"], description: "whether the child inherits the parent conversation as context: none (default, a clean bounded task), recent (the last few parent turns), or full. prefer none unless the task genuinely needs parent context" },
+  historyTurns: { type: "integer", minimum: 1, maximum: 50, description: "when inheritHistory is recent, how many recent parent turns to include; omit for a small default" },
+  serviceTier: { type: "string", description: "optional provider service tier for the child (for example priority or flex); omit to inherit provider defaults" }
 } as const;
 
 function parseDelegation(args: Record<string, unknown>, context: Parameters<ToolDefinition["run"]>[1], resumeSessionId?: string) {
@@ -48,7 +51,11 @@ function parseDelegation(args: Record<string, unknown>, context: Parameters<Tool
     : undefined;
   if (Array.isArray(args.tools) && !tools?.length) throw new Error("tools must contain at least one non-empty tool name");
   const title = normalizeSessionTitle(maybeString(args.title) ?? (resumeSessionId ? childTitle(context, resumeSessionId) : titleFromPrompt(prompt, lane ? `${lane} task` : "subagent task")));
-  return { title, prompt, mode, lane, tools, model };
+  const inheritHistory = maybeString(args.inheritHistory);
+  const historyTurns = typeof args.historyTurns === "number" && Number.isInteger(args.historyTurns) ? Math.max(1, Math.min(50, args.historyTurns)) : 5;
+  const forkMode: SubagentForkMode = inheritHistory === "full" ? "full" : inheritHistory === "recent" ? { lastTurns: historyTurns } : "none";
+  const serviceTier = maybeString(args.serviceTier);
+  return { title, prompt, mode, lane, tools, model, forkMode, serviceTier };
 }
 
 async function delegate(args: Record<string, unknown>, context: Parameters<ToolDefinition["run"]>[1], resumeSessionId?: string): Promise<ToolResult> {
@@ -60,7 +67,9 @@ async function delegate(args: Record<string, unknown>, context: Parameters<ToolD
     ...(resumeSessionId ? { sessionId: resumeSessionId } : {}),
     ...(input.lane ? { lane: input.lane } : {}),
     ...(input.tools?.length ? { tools: input.tools } : {}),
-    ...(input.model ? { model: input.model } : {})
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.forkMode && input.forkMode !== "none" && !resumeSessionId ? { forkMode: input.forkMode } : {}),
+    ...(input.serviceTier ? { serviceTier: input.serviceTier } : {})
   });
   return {
     ok: true,
@@ -92,7 +101,7 @@ export const agentListTool: ToolDefinition = {
   description: "List every child agent owned by the current session with its sessionId, title, mode, lane, and lifecycle state. Call with an empty object. Use returned sessionId values with agent_wait, agent_message, agent_followup, agent_interrupt, or agent_close; do not use a background job id where a session id is required.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   mutates: false,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: agentResultRenderer,
@@ -112,7 +121,7 @@ export const agentWaitTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 65_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: agentResultRenderer,
@@ -139,7 +148,7 @@ export const agentMessageTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: agentResultRenderer,
@@ -196,7 +205,7 @@ export const agentInterruptTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 15_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: agentResultRenderer,
@@ -213,7 +222,7 @@ export const agentCloseTool: ToolDefinition = {
   description: "Stop any outstanding child-agent work and archive that child session. Use this when the child is no longer needed; use agent_interrupt when only the current turn should stop and future follow-up may still be useful.",
   inputSchema: { type: "object", required: ["sessionId"], properties: { sessionId: { type: "string", description: "child session id returned by agent_spawn or agent_list" } }, additionalProperties: false },
   mutates: true,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   renderHuman: agentResultRenderer,
@@ -225,6 +234,33 @@ export const agentCloseTool: ToolDefinition = {
   }
 };
 
+export const agentReportTool: ToolDefinition = {
+  name: "agent_report",
+  description: "As a subagent, send a bounded progress note or interim finding to your parent agent. The parent reads it on its next turn, or promptly if it is idle; this does not start a new parent turn. Use it to surface important findings before your task is fully complete.",
+  inputSchema: {
+    type: "object",
+    required: ["message"],
+    properties: {
+      message: { type: "string", description: "concise report for the parent agent: what you found or where you are" }
+    },
+    additionalProperties: false
+  },
+  mutates: true,
+  timeoutMs: Number.POSITIVE_INFINITY,
+  parallel: true,
+  concurrencyScope: "session",
+  renderHuman: agentResultRenderer,
+  renderModel: agentResultRenderer,
+  run: async (args, context) => {
+    assertObject(args, "args");
+    if (!context.reportToParent) throw new Error("agent_report is unavailable in this runtime");
+    const message = asString(args.message, "message").trim();
+    if (!message) throw new Error("message must be a non-empty string");
+    const { parentSessionId } = context.reportToParent(message);
+    return { ok: true, summary: "report delivered to parent", output: `delivered to ${parentSessionId}` };
+  }
+};
+
 export const agentLifecycleTools: ToolDefinition[] = [
   agentSpawnTool,
   agentListTool,
@@ -232,5 +268,6 @@ export const agentLifecycleTools: ToolDefinition[] = [
   agentMessageTool,
   agentFollowupTool,
   agentInterruptTool,
-  agentCloseTool
+  agentCloseTool,
+  agentReportTool
 ];

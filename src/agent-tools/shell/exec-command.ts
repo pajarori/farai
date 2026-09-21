@@ -12,7 +12,7 @@ import { proxiedShellCommand, upstreamTlsVerificationFailed } from "./exec";
 export const execCommandTool: ToolDefinition = {
   name: "command_run_legacy", description: "Execute a shell command in the managed workspace with bounded output; use command_input with the returned processId for long-running sessions.",
   inputSchema: { type: "object", required: ["cmd"], properties: { cmd: { type: "string" }, workdir: { type: "string" }, yield_time_ms: { type: "number" }, tty: { type: "boolean" }, max_output_tokens: { type: "number" }, network: { type: "string", enum: ["direct", "proxy"] } } },
-  mutates: true, timeoutMs: 120000, parallel: false, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,
+  mutates: true, timeoutMs: Number.POSITIVE_INFINITY, parallel: false, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args"); const cmd = asString(args.cmd, "cmd");
     const yieldMs = clampYieldMs(args.yield_time_ms);

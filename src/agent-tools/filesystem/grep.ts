@@ -12,7 +12,7 @@ export const fsGrepTool: ToolDefinition = {
     properties: { pattern: { type: "string" }, path: { type: "string" }, include: { type: "string" }, limit: { type: "number" } }
   },
   mutates: false,
-  timeoutMs: 15_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

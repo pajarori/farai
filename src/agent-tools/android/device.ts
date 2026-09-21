@@ -17,7 +17,7 @@ export const androidConnectTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -42,7 +42,7 @@ export const androidDevicesTool: ToolDefinition = {
   description: "List android devices adb can currently see, with serial, connection state, and model. Use this to pick a serial before other android tools, or to confirm android_connect worked.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   mutates: false,
-  timeoutMs: 15_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -76,7 +76,7 @@ export const androidShellTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 60_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -108,7 +108,7 @@ export const androidPackagesTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -139,7 +139,7 @@ export const androidDeviceInfoTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -183,7 +183,7 @@ export const androidLogcatTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

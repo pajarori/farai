@@ -1,12 +1,21 @@
 import type { ToolResult } from "../types";
 import { parseDirectoryResults, parseNmap, splitHttpResponse } from "./tool-renderers";
 import { truncateTerminal } from "./terminal-text";
-import { isActiveToolStatus, toolDefinition, toolTitle } from "./tool-presentation";
+import {
+  TOOL_TITLE_MAX_WIDTH,
+  canonicalToolLifecycleState,
+  compactToolText,
+  isActiveToolStatus,
+  toolDefinition,
+  toolTitle
+} from "./tool-presentation";
 import { resolveToolLifecycle, type ToolLifecycleFamily, type ToolLifecycleInput, type ToolLifecyclePolicy } from "./tool-lifecycle";
+import { collapsedToolError, collapsedToolLines, collapsedToolPreview, collapsedToolText } from "./collapsed-tool-text";
 
 export type ToolActivityFamily = ToolLifecycleFamily;
 
 export type ToolActivityPresentation = {
+  state: import("../types").ToolLifecycleState;
   family: ToolActivityFamily;
   title: string;
   compact: string;
@@ -41,7 +50,7 @@ function isCommandTool(tool: string): boolean {
 }
 
 function commandText(tool: string, args: Record<string, unknown>): string | undefined {
-  return stringValue(tool === "command_run" ? args.cmd : args.command);
+  return stringValue(tool === "command_run" ? args.command ?? args.cmd : args.command);
 }
 
 export function presentToolActivity(input: ToolActivityInput): ToolActivityPresentation {
@@ -58,17 +67,23 @@ export function presentToolActivity(input: ToolActivityInput): ToolActivityPrese
   const lifecycle = resolveToolLifecycle(lifecycleInput);
   const tool = lifecycle.tool;
   const args = lifecycle.args;
-  const active = isActiveToolStatus(input.status);
+  const state = canonicalToolLifecycleState(input.status, input.toolResult);
+  const active = state === "pending" || state === "running" || state === "background";
   const text = active ? input.liveOutput ?? input.result ?? "" : input.result ?? input.fullResult ?? "";
   const metadata = input.toolResult?.metadata ?? {};
   const family = lifecycle.family;
-  const title = tool === "email_wait" && !active && metadata.timedOut === true
+  const rawTitle = tool === "email_wait" && !active && metadata.timedOut === true
     ? emailWaitTimeoutTitle(args)
-    : toolTitle(tool, args, input.status, 240);
+    : toolTitle(tool, args, input.status, TOOL_TITLE_MAX_WIDTH);
   const warning = hasWarning(input.toolResult, text);
-  const preview = toolPreview(tool, args, text, metadata, active);
-  const outcome = toolOutcome(tool, args, text, metadata, input.toolResult, active);
+  const title = collapsedToolText(rawTitle) ?? (active ? `running ${lifecycle.noun}` : `completed ${lifecycle.noun}`);
+  const preview = collapsedToolLines(toolPreview(tool, args, text, metadata, active));
+  const outcome = collapsedToolText(toolOutcome(tool, args, text, metadata, input.toolResult, active));
+  const groupPast = collapsedToolText(lifecycle.groupPast);
+  const groupActive = collapsedToolText(lifecycle.groupActive);
+  const groupItem = collapsedToolText(lifecycle.groupItem);
   return {
+    state,
     family,
     title,
     compact: compactActivityLabel(tool, args, title),
@@ -76,10 +91,10 @@ export function presentToolActivity(input: ToolActivityInput): ToolActivityPrese
     ...(outcome ? { outcome } : {}),
     preview,
     ...(lifecycle.groupKey ? { groupKey: lifecycle.groupKey } : {}),
-    ...(lifecycle.groupPast ? { groupPast: lifecycle.groupPast } : {}),
-    ...(lifecycle.groupActive ? { groupActive: lifecycle.groupActive } : {}),
+    ...(groupPast ? { groupPast } : {}),
+    ...(groupActive ? { groupActive } : {}),
     ...(lifecycle.groupMutations !== undefined ? { groupMutations: lifecycle.groupMutations } : {}),
-    ...(lifecycle.groupItem ? { groupItem: lifecycle.groupItem } : {}),
+    ...(groupItem ? { groupItem } : {}),
     ...(lifecycle.groupNoun ? { groupNoun: lifecycle.groupNoun } : {}),
     ...(lifecycle.groupMaxItems !== undefined ? { groupMaxItems: lifecycle.groupMaxItems } : {}),
     ...(lifecycle.detail ? { detail: lifecycle.detail } : {}),
@@ -90,8 +105,9 @@ export function presentToolActivity(input: ToolActivityInput): ToolActivityPrese
 }
 
 export function activityStatus(items: readonly ToolActivityInput[]): "running" | "error" | "done" {
-  if (items.some((item) => isActiveToolStatus(item.status) || item.toolResult?.status === "running_background")) return "running";
-  if (items.some((item) => item.status === "error" || item.toolResult?.ok === false)) return "error";
+  const states = items.map((item) => canonicalToolLifecycleState(item.status, item.toolResult));
+  if (states.some((state) => state === "pending" || state === "running" || state === "background")) return "running";
+  if (states.some((state) => state === "failed" || state === "cancelled")) return "error";
   return "done";
 }
 
@@ -112,19 +128,14 @@ export function formatActivityDuration(durationMs: number | undefined): string |
 }
 
 function compactActivityLabel(tool: string, args: Record<string, unknown>, title: string): string {
-  if (isCommandTool(tool)) return (commandText(tool, args) ?? title).replace(/\s+/g, " ").trim();
-  if (tool === "http_request") {
-    const method = (stringValue(args.method) ?? "get").toLowerCase();
-    return `${method} ${stringValue(args.url) ?? "request"}`;
-  }
-  if (tool === "browser_navigate") return `opened ${stringValue(args.url) ?? "page"}`;
-  if (tool === "proxy_flow_get") return `flow ${stringValue(args.flowId) ?? "request"}`;
-  return title;
+  void tool;
+  void args;
+  return compactToolText(title, TOOL_TITLE_MAX_WIDTH);
 }
 
 function emailWaitTimeoutTitle(args: Record<string, unknown>): string {
   const filter = stringValue(args.subject) ?? stringValue(args.from);
-  return truncateTerminal(`no matching email${filter ? ` · ${filter}` : ""}`, 240);
+  return truncateTerminal(`no matching email${filter ? ` · ${compactToolText(filter)}` : ""}`, TOOL_TITLE_MAX_WIDTH);
 }
 
 function toolOutcome(
@@ -136,7 +147,7 @@ function toolOutcome(
   active: boolean
 ): string | undefined {
   if (active) return liveOutcome(text);
-  if (result?.ok === false) return firstMeaningfulLine(text) ?? result.summary;
+  if (result?.ok === false) return firstMeaningfulLine(text) ?? cleanSummary(result.summary) ?? collapsedToolError(result.errorCategory);
   if (tool === "network_scan" || (isCommandTool(tool) && /^\s*(?:sudo\s+)?nmap\b/i.test(commandText(tool, args) ?? ""))) {
     const ports = parseNmap(text);
     if (ports.length > 0) return ports.slice(0, 6).map((row) => `${row.port}/${row.service}`).join(", ") + (ports.length > 6 ? ` · +${ports.length - 6}` : "");
@@ -166,6 +177,10 @@ function toolOutcome(
     const provider = stringValue(metadata.provider);
     return `${results.length} result${results.length === 1 ? "" : "s"}${provider ? ` · ${provider}` : ""}`;
   }
+  if (tool === "knowledge_search") {
+    const hits = numberValue(metadata.hits) ?? 0;
+    return `${hits} found`;
+  }
   if (tool === "web_fetch") {
     const contentType = stringValue(metadata.contentType)?.split(";", 1)[0];
     const bytes = numberValue(metadata.bytes);
@@ -179,7 +194,7 @@ function toolOutcome(
   if (tool === "email_list") return `${arrayValue(metadata.emails).length} email${arrayValue(metadata.emails).length === 1 ? "" : "s"}`;
   if (tool === "email_create") {
     const email = objectValue(metadata.email);
-    return email ? `${String(email.address ?? "email")} · ${String(email.id ?? "")}`.replace(/ · $/, "") : cleanSummary(result?.summary);
+    return email ? String(email.address ?? "email") : cleanSummary(result?.summary);
   }
   if (tool === "email_inbox") return `${arrayValue(metadata.messages).length} message${arrayValue(metadata.messages).length === 1 ? "" : "s"}`;
   if (tool === "email_read" || tool === "email_wait") {
@@ -237,6 +252,7 @@ function toolPreview(
     });
     return [...withMore(names.slice(0, 4), names.length, 4), ...errors.slice(0, 2)];
   }
+  if (tool === "knowledge_search") return [];
   const structuredRecon = structuredReconPreview(tool, metadata);
   if (structuredRecon.length) return structuredRecon;
   if (tool === "web_directory") {
@@ -258,17 +274,20 @@ function toolPreview(
   if (tool === "email_read" || tool === "email_wait") return emailMessagePreview([metadata.message]);
   if (tool.startsWith("proxy_")) {
     const flow = proxyOutcome(metadata, undefined, text);
-    if (flow) return [flow, ...semanticLines(text, 3).filter((line) => line !== flow)];
+    if (flow) return [flow];
   }
-  if (active) return boundedTailLines(text, 4);
-  return boundedPreviewLines(text, 5);
+  if (active) return collapsedToolPreview(text, 4, true);
+  return collapsedToolPreview(text, 5);
 }
 
 function structuredReconOutcome(tool: string, metadata: Record<string, unknown>): string | undefined {
   const records = numberValue(metadata.recordCount) ?? arrayValue(metadata.records).length;
   if (tool === "dns_resolve") {
     const resolved = numberValue(metadata.resolvedNames) ?? records;
-    return `${resolved} resolved name${resolved === 1 ? "" : "s"}`;
+    const wildcard = numberValue(metadata.wildcardNames) ?? 0;
+    const timedOut = numberValue(metadata.timedOutNames) ?? 0;
+    const errors = numberValue(metadata.errorNames) ?? 0;
+    return `${resolved} resolved name${resolved === 1 ? "" : "s"}${wildcard ? ` · ${wildcard} wildcard` : ""}${timedOut ? ` · ${timedOut} timed out` : ""}${errors ? ` · ${errors} failed` : ""}`;
   }
   if (tool === "service_probe") {
     const live = numberValue(metadata.liveServices) ?? records;
@@ -293,7 +312,14 @@ function structuredReconOutcome(tool: string, metadata: Record<string, unknown>)
   }
   if (tool === "url_discover") {
     const urls = numberValue(metadata.uniqueUrls) ?? records;
-    return `${urls} url${urls === 1 ? "" : "s"}`;
+    const sourceHealth = arrayValue(metadata.sources).flatMap((value) => {
+      const source = objectValue(value);
+      return source ? [source] : [];
+    });
+    const failed = sourceHealth.filter((source) => source.status === "failed" || source.status === "unknown").length;
+    const certainty = stringValue(metadata.certainty);
+    if (urls === 0 && certainty === "confirmed_empty") return "0 urls · all sources checked";
+    return `${urls} url${urls === 1 ? "" : "s"}${failed ? ` · ${failed} source${failed === 1 ? "" : "s"} degraded` : ""}`;
   }
   if (tool === "vulnerability_lookup") return `${records} vulnerabilit${records === 1 ? "y" : "ies"}`;
   return undefined;
@@ -314,9 +340,17 @@ function formatStructuredReconRecord(tool: string, item: Record<string, unknown>
   if (tool === "dns_resolve") {
     const recordMap = objectValue(item.records);
     const answers = recordMap ? Object.entries(recordMap).flatMap(([type, values]) => arrayValue(values).map((value) => `${type.toUpperCase()} ${String(value)}`)).slice(0, 4) : [];
-    return `${String(item.name ?? "name")}${answers.length ? ` · ${answers.join(" · ")}` : " · no answers"}`;
+    if (item.wildcard === true) return `${String(item.name ?? "name")} · wildcard DNS match`;
+    if (answers.length) return `${String(item.name ?? "name")} · ${answers.join(" · ")}`;
+    if (item.status === "not_found") return `${String(item.name ?? "name")} · not found`;
+    if (item.status === "timeout") return `${String(item.name ?? "name")} · resolver timeout`;
+    if (item.status === "error") return `${String(item.name ?? "name")} · resolver error`;
+    return `${String(item.name ?? "name")} · no answers`;
   }
-  if (tool === "service_probe") return [item.statusCode ?? "?", item.finalUrl ?? item.url ?? item.input, item.title, item.webServer].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  if (tool === "service_probe") {
+    if (item.failed === true) return `failed ${String(item.input ?? "target")}${item.error ? ` · ${String(item.error)}` : ""}`;
+    return [item.statusCode ?? "?", item.finalUrl ?? item.url ?? item.input, item.title, item.webServer].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
+  }
   if (tool === "web_crawl") return [item.method ?? "GET", item.url, item.statusCode, item.tag].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
   if (tool === "vulnerability_scan") return [String(item.severity ?? "unknown").toUpperCase(), item.templateId, item.name, item.matchedAt].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
   if (tool === "tls_inspect") return [`${String(item.host ?? "host")}${item.port ? `:${String(item.port)}` : ""}`, item.version, item.cipher, item.commonName].filter((value) => value !== undefined && value !== "").map(String).join(" · ");
@@ -330,7 +364,7 @@ function emailResourcePreview(values: unknown[]): string[] {
     const email = objectValue(value);
     if (!email) return [];
     const roles = arrayValue(email.roles).map(String).join(" · ");
-    return [`${String(email.address ?? "email")} · ${String(email.type ?? email.provider ?? "email")}${roles ? ` · ${roles}` : ""}`, `id: ${String(email.id ?? "unknown")}`];
+    return [`${String(email.address ?? "email")} · ${String(email.type ?? email.provider ?? "email")}${roles ? ` · ${roles}` : ""}`];
   });
   return withMore(rows.slice(0, 6), rows.length, 6);
 }
@@ -339,7 +373,7 @@ function emailMessagePreview(values: unknown[]): string[] {
   const rows = values.flatMap((value) => {
     const message = objectValue(value);
     if (!message) return [];
-    return [`${String(message.from ?? "sender")} · ${String(message.subject ?? "(no subject)")}`, `id: ${String(message.id ?? "unknown")}`];
+    return [`${String(message.from ?? "sender")} · ${String(message.subject ?? "(no subject)")}`];
   });
   return withMore(rows.slice(0, 6), rows.length, 6);
 }
@@ -383,7 +417,7 @@ function hasWarning(result: ToolResult | undefined, text: string): boolean {
 }
 
 function liveOutcome(text: string): string | undefined {
-  const lines = tailSemanticLines(text, 1);
+  const lines = collapsedToolPreview(text, 1, true);
   return lines[0];
 }
 
@@ -391,36 +425,19 @@ function semanticLines(text: string, limit: number): string[] {
   return text.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim().length > 0).slice(0, limit);
 }
 
-function tailSemanticLines(text: string, limit: number): string[] {
-  return text.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim().length > 0).slice(-limit);
-}
-
-function boundedPreviewLines(text: string, limit: number): string[] {
-  const lines = semanticLines(text, Number.MAX_SAFE_INTEGER);
-  if (lines.length <= limit) return lines;
-  const head = Math.max(1, Math.floor(limit / 2));
-  const tail = Math.max(1, limit - head - 1);
-  return [...lines.slice(0, head), `… +${lines.length - head - tail} lines`, ...lines.slice(-tail)];
-}
-
-function boundedTailLines(text: string, limit: number): string[] {
-  const lines = semanticLines(text, Number.MAX_SAFE_INTEGER);
-  if (lines.length <= limit) return lines;
-  return [`… ${lines.length - limit} earlier lines`, ...lines.slice(-limit)];
-}
-
 function withMore(lines: string[], total: number, shown: number): string[] {
   return total > shown ? [...lines, `… +${total - shown} more`] : lines;
 }
 
 function firstMeaningfulLine(text: string): string | undefined {
-  return semanticLines(text, 1)[0];
+  return collapsedToolPreview(text, 1)[0];
 }
 
 function cleanSummary(summary: string | undefined): string | undefined {
   if (!summary?.trim()) return undefined;
+  if (/^exit=\d+$/i.test(summary.trim())) return undefined;
   if (/^(?:exit=\d+\s+)?duration=\d+ms(?:\s+timedOut=\w+)?$/i.test(summary.trim())) return undefined;
-  return summary.trim().replace(/\bprocessId=[^\s]+/g, "").replace(/\bjobId=[^\s]+/g, "").replace(/\s+/g, " ").trim();
+  return collapsedToolText(summary);
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {

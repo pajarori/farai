@@ -4,6 +4,7 @@ import { timeoutBackgroundResult } from "../shared/background-result";
 import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { inputFileCommand, integer, optionalStringList, parseJsonLines, projectDiscoveryResult, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
+import { BACKGROUND_HANDOFF_TIMEOUT_MS } from "../../agent-core/tool-execution-control";
 
 const PUBLIC_SOURCES = ["alienvault", "commoncrawl", "waybackarchive"] as const;
 
@@ -13,11 +14,23 @@ export type UrlDiscoverRecord = JsonRecord & {
   sources: string[];
 };
 
+export type UrlSourceHealth = JsonRecord & {
+  source: string;
+  status: "ok" | "empty" | "failed" | "unknown";
+  records: number;
+  error?: string;
+};
+
+function selectedUrlSources(args: Record<string, unknown>): string[] {
+  const sources = optionalStringList(args.sources, "sources", PUBLIC_SOURCES.length);
+  const selected = sources.length ? sources : [...PUBLIC_SOURCES];
+  if (selected.some((value) => !PUBLIC_SOURCES.includes(value as typeof PUBLIC_SOURCES[number]))) throw new Error("sources contains a provider that requires credentials or is unsupported");
+  return selected;
+}
+
 export function buildUrlDiscoverCommand(args: Record<string, unknown>): string {
   const domains = stringList(args.domains, "domains", 500);
-  const sources = optionalStringList(args.sources, "sources", PUBLIC_SOURCES.length);
-  const selectedSources = sources.length ? sources : [...PUBLIC_SOURCES];
-  if (selectedSources.some((value) => !PUBLIC_SOURCES.includes(value as typeof PUBLIC_SOURCES[number]))) throw new Error("sources contains a provider that requires credentials or is unsupported");
+  const selectedSources = selectedUrlSources(args);
   const command = [
     "-jsonl", "-silent", "-nc", "-duc", "-cs", "-s", selectedSources.join(","),
     "-timeout", String(integer(args.timeoutSeconds, 30, 1, 120)), "-max-time", String(integer(args.maxMinutes, 10, 1, 60)),
@@ -32,6 +45,25 @@ export function buildUrlDiscoverCommand(args: Record<string, unknown>): string {
 export function parseUrlDiscoverOutput(raw: string): { records: UrlDiscoverRecord[]; malformed: number } {
   const parsed = parseJsonLines(raw);
   return { records: parsed.records.map(normalizeUrlDiscover), malformed: parsed.malformed };
+}
+
+export function urlSourceHealth(sources: string[], records: UrlDiscoverRecord[], stderr: string, exitCode: number | null): UrlSourceHealth[] {
+  const diagnosticLines = stderr.split("\n").map((line) => line.trim()).filter(Boolean);
+  return sources.map((source) => {
+    const count = records.filter((record) => record.sources.includes(source)).length;
+    const sourceErrors = diagnosticLines.filter((line) => line.toLowerCase().includes(source) && /\b(?:error|fail|timeout|unavailable|forbidden|unauthoriz|rate.?limit)\b/i.test(line));
+    if (sourceErrors.length) return { source, status: "failed", records: count, error: sourceErrors.at(-1)!.slice(0, 240) };
+    if (count > 0) return { source, status: "ok", records: count };
+    if (exitCode === 0) return { source, status: "empty", records: 0 };
+    return { source, status: "unknown", records: 0 };
+  });
+}
+
+export function urlDiscoveryCertainty(health: UrlSourceHealth[], recordCount: number): "results" | "confirmed_empty" | "partial" | "unknown" {
+  if (recordCount > 0) return health.some((source) => source.status === "failed" || source.status === "unknown") ? "partial" : "results";
+  if (health.length > 0 && health.every((source) => source.status === "empty" || source.status === "ok")) return "confirmed_empty";
+  if (health.some((source) => source.status === "empty" || source.status === "ok")) return "partial";
+  return "unknown";
 }
 
 export const urlDiscoverTool: ToolDefinition = {
@@ -52,7 +84,7 @@ export const urlDiscoverTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 900_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "recon",
   renderHuman: defaultHumanRenderer,
@@ -60,12 +92,13 @@ export const urlDiscoverTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const kali = backend(context);
-    const result = await kali.exec(buildUrlDiscoverCommand(args), 895_000, context.signal, 32_000_000);
+    const result = await kali.exec(buildUrlDiscoverCommand(args), BACKGROUND_HANDOFF_TIMEOUT_MS, context.signal, 32_000_000);
     const converted = timeoutBackgroundResult("url_discover", kali, result);
     if (converted) return converted;
     const parsed = parseUrlDiscoverOutput(result.stdout);
     const limit = args.limit === undefined ? undefined : integer(args.limit, 1_000, 1, 10_000);
     const records = limit === undefined ? parsed.records : parsed.records.slice(0, limit);
+    const sourceHealth = urlSourceHealth(selectedUrlSources(args), parsed.records, result.stderr, result.exitCode);
     return projectDiscoveryResult(context, {
       tool: "url_discover",
       backend: "urlfinder",
@@ -78,7 +111,9 @@ export const urlDiscoverTool: ToolDefinition = {
         uniqueUrls: new Set(records.map((item) => item.url)).size,
         discoveredUrls: parsed.records.length,
         ...(limit === undefined ? {} : { resultLimit: limit, resultsLimited: parsed.records.length > records.length }),
-        sources: [...new Set(records.flatMap((item) => item.sources))]
+        sources: sourceHealth,
+        sourceNames: [...new Set(records.flatMap((item) => item.sources))],
+        certainty: urlDiscoveryCertainty(sourceHealth, parsed.records.length)
       }
     });
   }

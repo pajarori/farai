@@ -313,7 +313,7 @@ function defaultEvalSuite(): EvalSuite {
           stopReasons: ["final_response"],
           plannerErrorsAtMost: 0,
           toolErrorsAtMost: 0,
-          toolCalls: [{ tool: "knowledge_manage", status: "done", argsInclude: { operation: "add", args: { text: "remember local target context", tags: ["user"] } } }]
+          toolCalls: [{ tool: "knowledge_manage", status: "done", argsInclude: { operation: "add", text: "remember local target context", tags: ["user"] } }]
         }
       },
       {

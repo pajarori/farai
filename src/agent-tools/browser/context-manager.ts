@@ -1,7 +1,10 @@
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { Session } from "../../types";
 import { id, nowIso } from "../../utils";
 import { McpStdioClient, type ExternalMcpServer } from "../mcp-adapter";
-import { configuredMcpServer, ensureMcpProxyReady, prepareMcpServerProcess } from "../mcp-manager";
+import { configuredMcpServer, ensureMcpProxyReady, extendMcpProxyScope, prepareMcpServerProcess } from "../mcp-manager";
+import { encodeProxyCaptureIdentity, PROXY_CAPTURE_IDENTITY_HEADER } from "../services/mitmproxy/ownership";
 
 export type BrowserContextStatus = "starting" | "ready" | "busy" | "closing";
 
@@ -18,8 +21,11 @@ type BrowserContextEntry = BrowserContextActivity & {
   client?: BrowserMcpClient;
   tools: Set<string>;
   mutex: AsyncMutex;
+  scopeDomains: Set<string>;
   ready: Promise<void>;
   lifecycle: AbortController;
+  proxyPort?: number;
+  captureInitFile?: string;
   stopTask?: Promise<void>;
 };
 
@@ -29,9 +35,20 @@ type BrowserMcpClient = Pick<McpStdioClient, "initialize" | "listTools" | "callT
 
 type BrowserContextManagerOptions = {
   resolveServer?: (workspace: string) => ExternalMcpServer | undefined;
-  ensureProxy?: (input: { workspace: string; configWorkspace?: string; session: Session; signal?: AbortSignal }, port: number) => Promise<void>;
+  ensureProxy?: typeof ensureMcpProxyReady;
+  configureProxyScope?: typeof extendMcpProxyScope;
   prepareServer?: typeof prepareMcpServerProcess;
   createClient?: (config: ExternalMcpServer) => BrowserMcpClient;
+};
+
+type BrowserContextInput = {
+  workspace: string;
+  configWorkspace?: string;
+  rootWorkspace?: string;
+  rootSessionId?: string;
+  session: Session;
+  scopeDomains?: string[];
+  signal?: AbortSignal;
 };
 
 const MAX_BROWSER_CONTEXTS_PER_SESSION = 8;
@@ -64,7 +81,7 @@ export class BrowserContextManager {
     };
   }
 
-  async create(input: { workspace: string; configWorkspace?: string; session: Session; name: string; signal?: AbortSignal }): Promise<BrowserContextActivity> {
+  async create(input: BrowserContextInput & { name: string }): Promise<BrowserContextActivity> {
     return await this.createNamed(input, false);
   }
 
@@ -75,12 +92,8 @@ export class BrowserContextManager {
     return toActivity(entry);
   }
 
-  async runOperation<T>(input: {
-    workspace: string;
-    configWorkspace?: string;
-    session: Session;
+  async runOperation<T>(input: BrowserContextInput & {
     browser?: string;
-    signal?: AbortSignal;
   }, operation: (invoke: (tool: string, args: Record<string, unknown>) => Promise<unknown>, context: BrowserContextActivity) => Promise<T>): Promise<{ context: BrowserContextActivity; value: T }> {
     const entry = input.browser
       ? this.resolve(input.session.id, input.browser)
@@ -89,6 +102,18 @@ export class BrowserContextManager {
       ? AbortSignal.any([input.signal, entry.lifecycle.signal])
       : entry.lifecycle.signal;
     await waitForSignal(entry.ready, signal);
+    const scopeAdditions = input.scopeDomains?.filter((domain) => !entry.scopeDomains.has(domain)) ?? [];
+    if (entry.proxyPort !== undefined && scopeAdditions.length) {
+      await waitForSignal((this.options.configureProxyScope ?? extendMcpProxyScope)({
+        workspace: input.workspace,
+        ...(input.configWorkspace ? { configWorkspace: input.configWorkspace } : {}),
+        ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+        ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
+        session: input.session,
+        signal
+      }, scopeAdditions), signal);
+      for (const domain of scopeAdditions) entry.scopeDomains.add(domain);
+    }
     return await entry.mutex.run(async () => {
       signal.throwIfAborted();
       if (entry.status === "closing") throw new Error("Browser context is closing");
@@ -124,7 +149,7 @@ export class BrowserContextManager {
     }
   }
 
-  private async createNamed(input: { workspace: string; configWorkspace?: string; session: Session; name: string; signal?: AbortSignal }, allowDefault: boolean): Promise<BrowserContextActivity> {
+  private async createNamed(input: BrowserContextInput & { name: string }, allowDefault: boolean): Promise<BrowserContextActivity> {
     input.signal?.throwIfAborted();
     if (this.sessionStopTasks.has(input.session.id)) throw new Error("Browser session is stopping");
     const name = normalizeBrowserName(input.name);
@@ -146,7 +171,7 @@ export class BrowserContextManager {
       ? this.options.resolveServer(configWorkspace)
       : configuredMcpServer(configWorkspace, "playwright");
     if (!base) throw new Error("No enabled Playwright MCP server is configured");
-    const config = isolatedBrowserConfig(base, contextId);
+    let config = isolatedBrowserConfig(base, contextId);
     let resolveReady = () => {};
     let rejectReady = (_error: unknown) => {};
     const ready = new Promise<void>((resolve, reject) => {
@@ -162,6 +187,7 @@ export class BrowserContextManager {
       sessionId: input.session.id,
       tools: new Set(),
       mutex: new AsyncMutex(),
+      scopeDomains: new Set(),
       ready,
       lifecycle: new AbortController()
     };
@@ -174,17 +200,35 @@ export class BrowserContextManager {
     try {
       const managedProxyPort = loopbackProxyPort(config);
       if (managedProxyPort !== undefined) {
-        await waitForSignal((this.options.ensureProxy ?? ensureMcpProxyReady)({
+        entry.proxyPort = managedProxyPort;
+        const proxyInput = {
           workspace: input.workspace,
           configWorkspace,
           session: input.session,
+          ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+          ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
           signal
-        }, managedProxyPort), signal);
+        };
+        await waitForSignal((this.options.ensureProxy ?? ensureMcpProxyReady)(proxyInput, managedProxyPort), signal);
+        const scopeDomains = input.scopeDomains ?? [];
+        await waitForSignal((this.options.configureProxyScope ?? extendMcpProxyScope)(proxyInput, scopeDomains), signal);
+        for (const domain of scopeDomains) entry.scopeDomains.add(domain);
+        const captureInit = await writeCaptureInit(input.workspace, input.session.id, contextId, {
+          rootSessionId: input.rootSessionId ?? input.session.id,
+          sessionId: input.session.id,
+          browserContextId: contextId,
+          browserContextName: name,
+          source: "browser"
+        });
+        entry.captureInitFile = captureInit.absolute;
+        config = withCaptureInit(config, captureInit.relative);
       }
       const prepared = await waitForSignal((this.options.prepareServer ?? prepareMcpServerProcess)({
         workspace: input.workspace,
         configWorkspace,
         session: input.session,
+        ...(input.rootWorkspace ? { rootWorkspace: input.rootWorkspace } : {}),
+        ...(input.rootSessionId ? { rootSessionId: input.rootSessionId } : {}),
         signal
       }, config), signal);
       const client = this.createClient(prepared);
@@ -225,6 +269,7 @@ export class BrowserContextManager {
           await entry.client?.stop();
         });
       } finally {
+        if (entry.captureInitFile) await rm(entry.captureInitFile, { force: true }).catch(() => {});
         const contexts = this.contexts.get(entry.sessionId);
         if (contexts?.get(entry.id) === entry) contexts.delete(entry.id);
         if (contexts?.size === 0) this.contexts.delete(entry.sessionId);
@@ -286,6 +331,29 @@ function isolatedBrowserConfig(base: ExternalMcpServer, contextId: string): Exte
     required: false,
     autoStart: false
   };
+}
+
+function withCaptureInit(config: ExternalMcpServer, path: string): ExternalMcpServer {
+  return { ...config, args: [...config.args, "--init-page", path] };
+}
+
+async function writeCaptureInit(
+  workspace: string,
+  sessionId: string,
+  contextId: string,
+  identity: { rootSessionId: string; sessionId: string; browserContextId: string; browserContextName: string; source: string }
+): Promise<{ absolute: string; relative: string }> {
+  const relative = join(".farai", "mcp-runtime", safePathPart(sessionId), safePathPart(contextId), "capture-init.ts");
+  const absolute = join(workspace, relative);
+  const encoded = encodeProxyCaptureIdentity(identity);
+  const source = `export default async ({ page }) => { await page.context().setExtraHTTPHeaders(${JSON.stringify({ [PROXY_CAPTURE_IDENTITY_HEADER]: encoded })}); };\n`;
+  await mkdir(dirname(absolute), { recursive: true });
+  await writeFile(absolute, source, { encoding: "utf8", mode: 0o600 });
+  return { absolute, relative: relative.split("\\").join("/") };
+}
+
+function safePathPart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
 
 function loopbackProxyPort(config: ExternalMcpServer): number | undefined {

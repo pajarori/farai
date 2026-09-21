@@ -24,6 +24,7 @@ import { DEFAULT_KALI_IMAGE, type ContainerStatus } from "../agent-container/kal
 import type { SqliteStore, StoreChange } from "../agent-store/sqlite-store";
 import type { ServiceStatus } from "../agent-tools/services/types";
 import { sessionDisplayName } from "../session-title";
+import { presentToolActivity } from "./tool-activity";
 import { serviceRegistry } from "../agent-tools/services/registry";
 import { proxyFlowDetailFromMcpInspect, proxyFlowsFromMcpTrafficSummary, readProxyFlowDetail, readProxyFlows, type ProxyFlowDetail, type ProxyFlowQuery, type ProxyFlowSummary } from "../agent-tools/services/mitmproxy/flows";
 import { callMcpServerTool, listMcpServerStatuses, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
@@ -95,6 +96,9 @@ export type SubagentActivity = {
   mode: "attached" | "detached";
   status: BackgroundJob["status"];
   model?: string;
+  nickname?: string;
+  agentPath?: string;
+  currentActivity?: string;
   summary?: string;
   error?: string;
   createdAt: string;
@@ -114,6 +118,9 @@ export type AgentThreadSummary = {
   mode: "attached" | "detached";
   status: BackgroundJob["status"] | "idle";
   model?: string;
+  nickname?: string;
+  agentPath?: string;
+  currentActivity?: string;
   summary?: string;
   error?: string;
   createdAt: string;
@@ -269,6 +276,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
 
   let activeSessionId: string | undefined;
   let unsubscribeStore: (() => void) | undefined;
+  let unsubscribeChildActivity: (() => void) | undefined;
   let unsubscribeBrowserContexts: (() => void) | undefined;
   let unsubscribeDisposableInboxes: (() => void) | undefined;
   let eventSubscription: EventSubscription | undefined;
@@ -348,6 +356,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
 
   function subscribeStore(sessionId: string, cursor = store.latestEventSequence(sessionId)): void {
     unsubscribeStore?.();
+    unsubscribeChildActivity?.();
     eventSubscription?.close();
     eventCursor = cursor;
     eventSubscription = subscribeSessionEvents(store, sessionId, eventCursor, (event) => {
@@ -382,6 +391,25 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
           }
           break;
       }
+    });
+    unsubscribeChildActivity = store.subscribe("*", (change: StoreChange) => {
+      if (change.sessionId === sessionId) return;
+      if (change.kind !== "toolCall" && change.kind !== "turn" && change.kind !== "job") return;
+      let parentId: string | undefined;
+      try {
+        parentId = store.loadSession(change.sessionId).parentId;
+      } catch {
+        return;
+      }
+      if (parentId !== sessionId) return;
+      enqueue({
+        type: "activity.changed",
+        sessionId,
+        state: {
+          backgroundActivities: summarizeBackgroundActivities(store, sessionId),
+          subagents: summarizeSubagents(store, sessionId)
+        }
+      });
     });
   }
 
@@ -547,6 +575,8 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
     async listProxyFlows(options = {}) {
       if (activeSessionId) {
         const session = runtime.loadSession(activeSessionId);
+        const rootSessionId = agentRootSessionId(store, activeSessionId);
+        const ownedOptions: ProxyFlowQuery = { ...options, rootSessionId, includeUnattributed: false };
         try {
           await runtime.refreshMcp(session);
           let mcpResult: unknown;
@@ -554,16 +584,20 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
             mcpResult = await callMcpServerTool({
               workspace: session.workspace,
               configWorkspace: runtime.workspace,
+              rootWorkspace: runtime.workspace,
+              rootSessionId,
               session,
               server: "mitmproxy-mcp",
               tool: "proxy_flow_summaries",
-              args: { limit: options.limit ?? 300, ...(options.kind ? { kind: options.kind } : {}) }
+              args: { limit: options.limit ?? 300, ...(options.kind ? { kind: options.kind } : {}), root_session_id: rootSessionId }
             });
           } catch {
             try {
               mcpResult = await callMcpServerTool({
                 workspace: session.workspace,
                 configWorkspace: runtime.workspace,
+                rootWorkspace: runtime.workspace,
+                rootSessionId,
                 session,
                 server: "mitmproxy-mcp",
                 tool: "get_flow_summary_v2",
@@ -573,6 +607,8 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
               mcpResult = await callMcpServerTool({
                 workspace: session.workspace,
                 configWorkspace: runtime.workspace,
+                rootWorkspace: runtime.workspace,
+                rootSessionId,
                 session,
                 server: "mitmproxy-mcp",
                 tool: "get_traffic_summary",
@@ -580,7 +616,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
               });
             }
           }
-          const flows = proxyFlowsFromMcpTrafficSummary(mcpResult, options);
+          const flows = proxyFlowsFromMcpTrafficSummary(mcpResult, ownedOptions);
           if (flows.length > 0 || listMcpServerStatuses(activeSessionId).some((status) => status.name === "mitmproxy-mcp" && status.running)) return flows;
         } catch {
         }
@@ -591,48 +627,58 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
         : services[0];
       const flowJsonl = typeof selected?.metadata?.flowJsonl === "string" ? selected.metadata.flowJsonl : undefined;
       if (!flowJsonl) return [];
-      return await readProxyFlows(flowJsonl, options);
+      const query = activeSessionId
+        ? { ...options, rootSessionId: agentRootSessionId(store, activeSessionId), includeUnattributed: false }
+        : options;
+      return await readProxyFlows(flowJsonl, query);
     },
     async getProxyFlow(id) {
       if (activeSessionId) {
         const session = runtime.loadSession(activeSessionId);
+        const rootSessionId = agentRootSessionId(store, activeSessionId);
         try {
           try {
             const mcpResult = await callMcpServerTool({
               workspace: session.workspace,
               configWorkspace: runtime.workspace,
+              rootWorkspace: runtime.workspace,
+              rootSessionId,
               session,
               server: "mitmproxy-mcp",
               tool: "proxy_flow_inspect",
-              args: { flow_id: id }
+              args: { flow_id: id, root_session_id: rootSessionId }
             });
             const detail = proxyFlowDetailFromMcpInspect(mcpResult);
-            if (detail) return detail;
+            if (detail?.rootSessionId === rootSessionId) return detail;
           } catch {
           }
           try {
             const compatibleResult = await callMcpServerTool({
               workspace: session.workspace,
               configWorkspace: runtime.workspace,
+              rootWorkspace: runtime.workspace,
+              rootSessionId,
               session,
               server: "mitmproxy-mcp",
               tool: "inspect_flow_v2",
               args: { flow_id: id }
             });
             const compatibleDetail = proxyFlowDetailFromMcpInspect(compatibleResult);
-            if (compatibleDetail) return compatibleDetail;
+            if (compatibleDetail?.rootSessionId === rootSessionId) return compatibleDetail;
           } catch {
           }
           const legacyResult = await callMcpServerTool({
             workspace: session.workspace,
             configWorkspace: runtime.workspace,
+            rootWorkspace: runtime.workspace,
+            rootSessionId,
             session,
             server: "mitmproxy-mcp",
             tool: "inspect_flow",
             args: { flow_id: id, full_body: false }
           });
           const legacyDetail = proxyFlowDetailFromMcpInspect(legacyResult);
-          if (legacyDetail) return legacyDetail;
+          if (legacyDetail?.rootSessionId === rootSessionId) return legacyDetail;
         } catch {
         }
       }
@@ -640,7 +686,10 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       for (const service of services) {
         const flowJsonl = typeof service.metadata?.flowJsonl === "string" ? service.metadata.flowJsonl : undefined;
         if (!flowJsonl) continue;
-        const detail = await readProxyFlowDetail(flowJsonl, id);
+        const detail = await readProxyFlowDetail(flowJsonl, id, activeSessionId ? {
+          rootSessionId: agentRootSessionId(store, activeSessionId),
+          includeUnattributed: false
+        } : {});
         if (detail) return detail;
       }
       return undefined;
@@ -875,6 +924,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
           subscribeStore(sessionId);
         } else {
           unsubscribeStore?.(); unsubscribeStore = undefined;
+          unsubscribeChildActivity?.(); unsubscribeChildActivity = undefined;
           eventSubscription?.close(); eventSubscription = undefined;
         }
       } else {
@@ -900,6 +950,7 @@ export function createRuntimePort(runtime: AgentRuntime, options: PortOptions = 
       if (disposed) return;
       disposed = true;
       unsubscribeStore?.(); unsubscribeStore = undefined;
+      unsubscribeChildActivity?.(); unsubscribeChildActivity = undefined;
       unsubscribeBrowserContexts?.(); unsubscribeBrowserContexts = undefined;
       unsubscribeDisposableInboxes?.(); unsubscribeDisposableInboxes = undefined;
       eventSubscription?.close(); eventSubscription = undefined;
@@ -974,6 +1025,13 @@ export function subagentActivityFromJob(job: BackgroundJob): SubagentActivity | 
   };
 }
 
+function subagentCurrentActivity(store: SqliteStore, childSessionId: string): string | undefined {
+  const calls = store.listToolCalls(childSessionId, 10);
+  const active = calls.find((call) => call.status === "running" || call.status === "running_background") ?? calls[0];
+  if (!active) return undefined;
+  return presentToolActivity({ tool: active.tool, args: active.args, status: "running" }).title;
+}
+
 function summarizeSubagents(store: SqliteStore, sessionId: string): SubagentActivity[] {
   return store.listJobs(sessionId, 100)
     .map(subagentActivityFromJob)
@@ -981,10 +1039,14 @@ function summarizeSubagents(store: SqliteStore, sessionId: string): SubagentActi
     .map((item) => {
       try {
         const child = store.loadSession(item.childSessionId);
+        const currentActivity = ACTIVE_BACKGROUND_JOB_STATUSES.has(item.status) ? subagentCurrentActivity(store, item.childSessionId) : undefined;
         return {
           ...item,
           title: sessionDisplayName(child),
-          ...(child.model ? { model: child.model } : {})
+          ...(child.model ? { model: child.model } : {}),
+          ...(child.nickname ? { nickname: child.nickname } : {}),
+          ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+          ...(currentActivity ? { currentActivity } : {})
         };
       } catch {
         return item;
@@ -1031,6 +1093,7 @@ function summarizeAgentThreads(store: SqliteStore, sessionId: string): AgentThre
         continue;
       }
       const activity = subagentActivityFromJob(job)!;
+      const currentActivity = ACTIVE_BACKGROUND_JOB_STATUSES.has(activity.status) ? subagentCurrentActivity(store, child.id) : undefined;
       threads.push({
         id: child.id,
         sessionId: child.id,
@@ -1042,6 +1105,9 @@ function summarizeAgentThreads(store: SqliteStore, sessionId: string): AgentThre
         mode: activity.mode,
         status: activity.status,
         ...(child.model ? { model: child.model } : activity.model ? { model: activity.model } : {}),
+        ...(child.nickname ? { nickname: child.nickname } : {}),
+        ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+        ...(currentActivity ? { currentActivity } : {}),
         ...(activity.summary ? { summary: activity.summary } : {}),
         ...(activity.error ? { error: activity.error } : {}),
         createdAt: activity.createdAt,

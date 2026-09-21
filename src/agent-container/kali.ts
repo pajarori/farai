@@ -74,6 +74,7 @@ export type KaliBackendOptions = {
   rootSessionId?: string;
   rootWorkspace?: string;
   lifecycle?: ContainerLifecyclePort;
+  cacheReadiness?: boolean;
 };
 
 export type ProcessRunner = (command: string, args: string[]) => Promise<ContainerExecResult>;
@@ -86,7 +87,11 @@ export type TransparentProxyOptions = {
 const kaliSessions = new SpawnSessionStore();
 const kaliPtySessions = new PtySessionStore();
 const containerStartLocks = new Map<string, Promise<ContainerExecResult>>();
+const imageReadyUntil = new Map<string, number>();
+const containerReadyUntil = new Map<string, number>();
 let globalContainerStartChain: Promise<unknown> = Promise.resolve();
+const IMAGE_READY_TTL_MS = 10 * 60_000;
+const CONTAINER_READY_TTL_MS = 30_000;
 
 const CONTAINER_EXEC_MARKER_DIR = "/tmp/farai-exec";
 const CONTAINER_EXEC_WRAPPER = [
@@ -211,6 +216,7 @@ export class KaliContainerBackend implements ExecutionBackend {
   private readonly onOutputChunk: OutputChunkListener | undefined;
   private readonly lifecycle: ContainerLifecyclePort | undefined;
   private readonly identity: ManagedContainerIdentity | undefined;
+  private readonly cacheReadiness: boolean;
 
   constructor(options: KaliBackendOptions) {
     this.image = options.image ?? DEFAULT_KALI_IMAGE;
@@ -224,6 +230,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     this.signal = options.signal;
     this.onOutputChunk = options.onOutputChunk;
     this.lifecycle = options.lifecycle;
+    this.cacheReadiness = options.cacheReadiness ?? (!options.processRunner && !options.pullRunner);
     this.identity = options.rootSessionId ? {
       containerName: this.containerName,
       rootSessionId: options.rootSessionId,
@@ -251,10 +258,14 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   async ensureImage(): Promise<ContainerExecResult> {
+    if (this.cacheReadiness && (imageReadyUntil.get(this.image) ?? 0) > Date.now()) {
+      return { exitCode: 0, stdout: "image ready", stderr: "", durationMs: 0, timedOut: false };
+    }
     const local = await this.resolveImage();
     if (local.exists) {
       const remote = await this.remoteImageDigest();
       if (!remote || (local.repoDigest !== undefined && local.repoDigest === remote)) {
+        this.markImageReady();
         return { exitCode: 0, stdout: "image ready", stderr: "", durationMs: 0, timedOut: false };
       }
     }
@@ -262,6 +273,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     const pulled = await this.pullRunner("docker", ["pull", this.image]);
     if (pulled.exitCode !== 0) {
       if (local.exists) {
+        this.markImageReady();
         return { exitCode: 0, stdout: pulled.stdout || "using local kali image", stderr: "", durationMs: Date.now() - started, timedOut: false };
       }
       return {
@@ -275,6 +287,7 @@ export class KaliContainerBackend implements ExecutionBackend {
     if (!resolved.exists) {
       return { exitCode: 1, stdout: "", stderr: resolved.error ?? `kali image ${this.image} is still missing after pull`, durationMs: Date.now() - started, timedOut: false };
     }
+    this.markImageReady();
     return { exitCode: 0, stdout: pulled.stdout || "image pulled", stderr: "", durationMs: Date.now() - started, timedOut: false };
   }
 
@@ -379,23 +392,36 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   private async startPersistentUnlocked(): Promise<ContainerExecResult> {
+    let result: ContainerExecResult;
     if (this.identity && this.lifecycle?.withLease) {
-      return await this.lifecycle.withLease(this.identity, () => this.startPersistentBody());
+      result = await this.lifecycle.withLease(this.identity, () => this.startPersistentBody());
+    } else {
+      if (this.identity && this.lifecycle) await this.lifecycle.acquire(this.identity);
+      result = await this.startPersistentBody();
     }
-    if (this.identity && this.lifecycle) await this.lifecycle.acquire(this.identity);
-    return await this.startPersistentBody();
+    if (result.exitCode === 0 && this.cacheReadiness) containerReadyUntil.set(this.containerName, Date.now() + CONTAINER_READY_TTL_MS);
+    return result;
+  }
+
+  private async persistentIsRunning(): Promise<boolean> {
+    const result = await this.processRunner("docker", ["inspect", "-f", "{{.State.Running}}", this.containerName]);
+    return result.exitCode === 0 && result.stdout.trim() === "true";
   }
 
   private async startPersistentBody(): Promise<ContainerExecResult> {
     try {
+      if (this.cacheReadiness && (containerReadyUntil.get(this.containerName) ?? 0) > Date.now()) {
+        if (await this.persistentIsRunning()) {
+          return { exitCode: 0, stdout: "container ready", stderr: "", durationMs: 0, timedOut: false };
+        }
+        containerReadyUntil.delete(this.containerName);
+      }
       const ensured = await this.ensureImage();
       if (ensured.exitCode !== 0) {
-        if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
         return ensured;
       }
       const status = await this.status();
       if (status.dockerError) {
-        if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
         return {
           exitCode: 1,
           stdout: "",
@@ -420,13 +446,11 @@ export class KaliContainerBackend implements ExecutionBackend {
       if (status.persistentExists && !status.persistentRunning && status.persistentImageCurrent && (!this.identity || status.persistentIdentityCurrent)) {
         const started = Date.now();
         const result = await this.processRunner("docker", ["start", this.containerName]);
-        if (result.exitCode !== 0 && this.identity && this.lifecycle) this.lifecycle.release(this.identity);
         return { ...result, durationMs: Date.now() - started, timedOut: false };
       }
       return await withGlobalContainerStartLock(async () => {
         const removed = await this.processRunner("docker", ["rm", "-f", "-v", this.containerName]);
         if (removed.exitCode !== 0 && !containerDoesNotExist(removed)) {
-          if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
           return { ...removed, stderr: removed.stderr || `could not remove stale Kali container ${this.containerName}` };
         }
         const worktrees = join(this.rootWorkspace, ".farai", "worktrees");
@@ -451,11 +475,9 @@ export class KaliContainerBackend implements ExecutionBackend {
           "sleep",
           "infinity"
         ]);
-        if (result.exitCode !== 0 && this.identity && this.lifecycle) this.lifecycle.release(this.identity);
         return { ...result, durationMs: Date.now() - started, timedOut: false };
       });
     } catch (error) {
-      if (this.identity && this.lifecycle) this.lifecycle.release(this.identity);
       throw error;
     }
   }
@@ -478,6 +500,7 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   async stopPersistent(): Promise<ContainerExecResult> {
+    containerReadyUntil.delete(this.containerName);
     const previous = containerStartLocks.get(this.containerName);
     if (previous) await previous.catch(() => undefined);
     if (this.identity && this.lifecycle) return await this.lifecycle.remove(this.identity);
@@ -521,6 +544,25 @@ export class KaliContainerBackend implements ExecutionBackend {
   }
 
   async exec(
+    command: string,
+    timeoutMs = this.timeoutMs,
+    signal = this.signal,
+    maxOutputChars = 8_000
+  ): Promise<ContainerExecResult & { backgroundSessionId?: string }> {
+    const first = await this.execAttempt(command, timeoutMs, signal, maxOutputChars);
+    if (first.exitCode === 0 || first.backgroundSessionId || signal?.aborted) return first;
+    if (!containerVanished(first.stdout, first.stderr)) return first;
+    if (!(await this.recoverPersistent())) return first;
+    return this.execAttempt(command, timeoutMs, signal, maxOutputChars);
+  }
+
+  private async recoverPersistent(): Promise<boolean> {
+    containerReadyUntil.delete(this.containerName);
+    const restarted = await this.startPersistent();
+    return restarted.exitCode === 0;
+  }
+
+  private async execAttempt(
     command: string,
     timeoutMs = this.timeoutMs,
     signal = this.signal,
@@ -619,6 +661,10 @@ export class KaliContainerBackend implements ExecutionBackend {
   private async ensurePersistentRunning(): Promise<void> {
     const result = await this.startPersistent();
     if (result.exitCode !== 0) throw new Error(result.stderr || "Could not start Kali container for background execution");
+  }
+
+  private markImageReady(): void {
+    if (this.cacheReadiness) imageReadyUntil.set(this.image, Date.now() + IMAGE_READY_TTL_MS);
   }
 
   async startSession(command: string, opts: { yieldMs: number; signal?: AbortSignal; kind?: SessionKind; pty?: boolean }): Promise<BackendSessionResult> {
@@ -817,3 +863,8 @@ async function runProcess(command: string, args: string[], timeoutMs = 15_000): 
 function containerDoesNotExist(result: ContainerExecResult): boolean {
   return /no such (container|object)/i.test(`${result.stdout}\n${result.stderr}`);
 }
+
+function containerVanished(stdout: string, stderr: string): boolean {
+  return /no such (container|object)|is not running|is not paused|container .* is restarting/i.test(`${stdout}\n${stderr}`);
+}
+

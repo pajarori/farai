@@ -11,7 +11,7 @@ export const fsListTool: ToolDefinition = {
     properties: { path: { type: "string" }, limit: { type: "number" } }
   },
   mutates: false,
-  timeoutMs: 15_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

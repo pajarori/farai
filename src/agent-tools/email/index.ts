@@ -16,7 +16,7 @@ const emailListTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   visibility: "external",
@@ -45,7 +45,7 @@ const emailCreateTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 45_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   concurrencyScope: "session",
   visibility: "external",
@@ -81,7 +81,7 @@ const emailInboxTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 45_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   visibility: "external",
@@ -122,7 +122,7 @@ const emailReadTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 45_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   visibility: "external",
@@ -157,7 +157,7 @@ const emailWaitTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 610_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   concurrencyScope: "session",
   visibility: "external",

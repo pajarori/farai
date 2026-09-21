@@ -86,7 +86,7 @@ export const androidUiDumpTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 40_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -116,7 +116,7 @@ export const androidUiHierarchyTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 40_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -137,7 +137,7 @@ export const androidScreenshotTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 40_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -173,7 +173,7 @@ export const androidUiTapTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 20_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -202,7 +202,7 @@ export const androidUiTapElementTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 40_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -237,7 +237,7 @@ export const androidUiTypeTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 20_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -268,7 +268,7 @@ export const androidUiSwipeTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 20_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -302,7 +302,7 @@ export const androidUiKeyTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: true,
-  timeoutMs: 20_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -326,7 +326,7 @@ export const androidUiWindowSizeTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 20_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,
@@ -359,7 +359,7 @@ export const androidUiWaitForTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 130_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

@@ -202,6 +202,7 @@ export function buildChatRequest(input: PlannerInput, signal?: AbortSignal): Cha
     toolChoice: input.toolChoice ?? "auto",
     promptCacheKey: promptCacheKey(input.session),
     sessionId: input.session.id,
+    ...(input.session.serviceTier ? { serviceTier: input.session.serviceTier } : {}),
     ...(signal ? { signal } : {})
   };
 }

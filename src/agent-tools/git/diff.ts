@@ -12,7 +12,7 @@ export const gitDiffTool: ToolDefinition = {
     properties: { path: { type: "string" }, staged: { type: "boolean" } }
   },
   mutates: false,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

@@ -4,8 +4,22 @@ import { sanitizeToolOutput } from "../shared/output-sanitize";
 
 export type JsonRecord = Record<string, unknown>;
 
+function coerceStringListInput(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+    }
+  }
+  return [value];
+}
+
 export function stringList(value: unknown, name: string, max = 500): string[] {
-  const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  const values = coerceStringListInput(value);
   const normalized = values.map((item) => typeof item === "string" ? item.trim() : "").filter(Boolean);
   if (!normalized.length) throw new Error(`${name} must contain at least one non-empty string`);
   if (normalized.length > max) throw new Error(`${name} cannot contain more than ${max} items`);
@@ -16,6 +30,21 @@ export function stringList(value: unknown, name: string, max = 500): string[] {
 export function optionalStringList(value: unknown, name: string, max = 100): string[] {
   if (value === undefined) return [];
   return stringList(value, name, max);
+}
+
+export async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T) => Promise<R>, signal?: AbortSignal): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let index = 0;
+  const worker = async (): Promise<void> => {
+    while (index < items.length) {
+      if (signal?.aborted) throw signal.reason ?? new Error("cancelled");
+      const current = index;
+      index += 1;
+      results[current] = await mapper(items[current]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  return results;
 }
 
 export function integer(value: unknown, fallback: number, minimum: number, maximum: number): number {
@@ -82,8 +111,10 @@ export function projectDiscoveryResult<T extends JsonRecord>(
     outputLines: string[];
     noun: string;
     metadata?: Record<string, unknown>;
+    resultCount?: number;
   }
 ): ToolResult {
+  const resultCount = options.resultCount ?? options.records.length;
   const metadataRecords = options.records.slice(0, 200);
   const outputLines = options.outputLines.slice(0, 100);
   const omittedOutputLines = Math.max(0, options.outputLines.length - outputLines.length);
@@ -93,16 +124,17 @@ export function projectDiscoveryResult<T extends JsonRecord>(
     ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}),
     content: raw
   }) : undefined;
-  const ok = options.records.length > 0 || (options.result.exitCode === 0 && !options.result.timedOut);
-  const partial = options.records.length > 0 && (options.result.exitCode !== 0 || options.result.timedOut);
+  const ok = resultCount > 0 || (options.result.exitCode === 0 && !options.result.timedOut);
+  const partial = resultCount > 0 && (options.result.exitCode !== 0 || options.result.timedOut);
   const diagnostics = compactDiagnostics(options.result.stderr);
   const diagnosticWarning = diagnostics && (options.result.exitCode !== 0 || /\b(?:warn|error|fatal|failed|unauthoriz|timed?\s*out)\b/i.test(diagnostics)) ? diagnostics : "";
-  const emptySuccess = options.records.length === 0 && options.result.exitCode === 0 && !options.result.timedOut;
+  const emptySuccess = resultCount === 0 && options.result.exitCode === 0 && !options.result.timedOut;
+  const failureCategory = reconFailureCategory(options.result, resultCount, diagnostics);
   const emptyMessage = emptySuccess ? `${options.tool}: completed with no ${options.noun}s found` : `${options.tool}: no output`;
   let summary: string;
   if (!ok) summary = `${options.tool}: failed`;
   else if (emptySuccess) summary = `${options.tool}: completed, no ${options.noun}s found`;
-  else summary = `${options.tool}: ${options.records.length} ${options.noun}${options.records.length === 1 ? "" : "s"}${partial ? " (partial)" : ""}`;
+  else summary = `${options.tool}: ${resultCount} ${options.noun}${resultCount === 1 ? "" : "s"}${partial ? " (partial)" : ""}`;
   const output = [
     ...outputLines,
     ...(omittedOutputLines ? [`… +${omittedOutputLines} more ${options.noun}${omittedOutputLines === 1 ? "" : "s"} in artifact`] : []),
@@ -121,15 +153,25 @@ export function projectDiscoveryResult<T extends JsonRecord>(
       ...(options.metadata ?? {}),
       backend: options.backend,
       recordCount: options.records.length,
+      resultCount,
       records: metadataRecords,
       recordsTruncated: options.records.length > metadataRecords.length,
       partial,
+      failureCategory,
       malformedJsonLines: options.malformed,
       exitCode: options.result.exitCode,
       durationMs: options.result.durationMs,
       ...(artifact ? { outputArtifact: artifact } : {})
     }
   };
+}
+
+function reconFailureCategory(result: BackendExecResult, recordCount: number, diagnostics: string): "success" | "no_findings" | "deadline" | "unreachable" | "backend_failure" | "partial" {
+  if (recordCount > 0) return result.exitCode === 0 && !result.timedOut ? "success" : "partial";
+  if (result.timedOut || result.exitCode === 124 || /\b(?:deadline|timed?\s*out|timeout|killed)\b/i.test(diagnostics)) return "deadline";
+  if (/\b(?:could not resolve|connection refused|connection reset|host unreachable|network is unreachable|no route to host|temporary failure in name resolution)\b/i.test(diagnostics)) return "unreachable";
+  if (result.exitCode === 0) return "no_findings";
+  return "backend_failure";
 }
 
 export function text(value: unknown): string | undefined {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, CampaignRun, Message, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
+import type { AgentLifecycleEntry, AgentPromptResult, BackgroundJob, CampaignRun, Message, Note, PendingSteerInput, PendingUserInput, QueuedUserInput, Session, SessionEvent, SessionMailboxItem, SubagentForkMode, ToolCallRecord, ToolContext, ToolDefinition, ToolResult, Turn, UserInputAnswer, UserInputRequest } from "../types";
 import { SqliteStore } from "../agent-store/sqlite-store";
 import { getTool, listToolsForSession, refreshMcpTools } from "../agent-tools/registry";
 import { formatMcpInventory, getMcpPrompt, getMcpPromptDescriptor, listMcpServerStatuses, probeMcpServer as probeMcpServerConfig, renderMcpPromptResult, renderMcpServerInstructionContext, requestMcpFormElicitation, startMcpServer, stopMcpServer, stopMcpToolsForSession, type McpRefreshInput, type McpServerProbeResult, type McpServerRuntimeStatus } from "../agent-tools/mcp-manager";
@@ -38,7 +38,7 @@ import type { HookDefinition, HookEvent } from "./hooks/types";
 import { callMcpServerTool } from "./../agent-tools/mcp-manager";
 import type { PlannerContextBlock } from "./context-builder";
 import { resolveLane } from "./subagents/lanes";
-import { buildSubagentTaskPrompt, hasSharedWorkspaceEdits, resolveSubagentToolScope } from "./subagents/scope";
+import { buildSubagentTaskPrompt, childAgentPath, hasSharedWorkspaceEdits, pickSubagentNickname, resolveSubagentToolScope } from "./subagents/scope";
 import { SubagentGate } from "./subagents/gate";
 import { SessionActor } from "./session-actor";
 import { SessionMailbox } from "./session-mailbox";
@@ -71,8 +71,11 @@ import {
   ToolExecutionLease,
   toolConcurrencyKey,
   toolForExecution,
-  toolOperationTimeout
+  toolOperationTimeout,
+  readModelDeadlineMs,
+  stripModelDeadlineArg
 } from "./tool-execution-control";
+import { classifyToolError, normalizeFailedToolResult } from "./tool-error-category";
 import { validateToolArgs } from "./tool-input-validation";
 import { normalizeToolResult } from "./tool-result-normalization";
 import { atomicWriteFile } from "./atomic-file";
@@ -82,6 +85,7 @@ import { ToolCatalog } from "../agent-tools/catalog";
 import { repositories, type FaraiRepositories } from "../agent-store/repositories";
 import { ThreadManager } from "./thread-manager";
 import { TurnEngine } from "./turn-engine";
+import { hydrateReconAction, reconExecutionWaves } from "./recon-orchestration";
 
 export { activeBackgroundJobs } from "./loop/background";
 export type { ActiveBackgroundJob } from "./loop/background";
@@ -150,7 +154,7 @@ const INTERNAL_META_STREAM_PREFIXES = [
 ] as const;
 
 type ToolPlannerAction = Extract<PlannerAction, { kind: "tool" }>;
-type ToolActionOutcome = { shouldContinue: boolean; resetAutoContinue?: boolean; cancelled?: boolean };
+type ToolActionOutcome = { shouldContinue: boolean; resetAutoContinue?: boolean; cancelled?: boolean; record?: ToolCallRecord };
 type StepControl = { contextOverflow?: boolean; cancelled?: boolean; timedOut?: boolean; empty?: boolean; shouldContinue: boolean };
 type ProviderSlot = { contextMessage: Message; assistantMessage: Message };
 type ProviderCatalogPayload = { key: string; tools: ProviderToolDef[] };
@@ -221,7 +225,7 @@ class ModelCallDeadlineError extends Error {
   }
 }
 
-export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "campaignRunId" | "toolScope" | "workspace">> & {
+export type SessionPatch = Partial<Pick<Session, "title" | "provider" | "model" | "phase" | "campaignId" | "campaignRunId" | "toolScope" | "workspace" | "nickname" | "agentPath" | "serviceTier">> & {
   emailPrimaryId?: string | null;
   emailSecondaryId?: string | null;
 };
@@ -261,6 +265,7 @@ export class AgentRuntime {
   private readonly shutdownController = new AbortController();
   private readonly actors = new Map<string, SessionActor>();
   private readonly steeringWaiters = new Map<string, Set<() => void>>();
+  private readonly agentCompletionWaiters = new Map<string, Set<() => void>>();
   private readonly modelCallsByTurn = new Map<string, number>();
   private readonly providerCatalogs = new Map<string, ProviderToolDef[]>();
   private readonly streamingParts = new Map<string, StreamingPartsState>();
@@ -443,6 +448,8 @@ export class AgentRuntime {
     this.turnControllers.clear();
     for (const waiters of this.steeringWaiters.values()) for (const wake of waiters) wake();
     this.steeringWaiters.clear();
+    for (const waiters of this.agentCompletionWaiters.values()) for (const wake of waiters) wake();
+    this.agentCompletionWaiters.clear();
     for (const controller of this.activeToolControllers) controller.abort("runtime shutdown");
     this.userInputs.rejectAll(new Error("runtime shutdown"));
     for (const controller of this.subagentControllers.values()) controller.abort("runtime shutdown");
@@ -748,6 +755,27 @@ export class AgentRuntime {
     }
   }
 
+  private renderInheritedHistory(sessionId: string, forkMode: SubagentForkMode): string | undefined {
+    if (forkMode === "none") return undefined;
+    const turns = this.store.listTurns(sessionId, 1_000).filter((turn) => turn.status === "completed");
+    const selected = forkMode === "full" ? turns : turns.slice(-Math.max(1, forkMode.lastTurns));
+    if (!selected.length) return undefined;
+    const turnIds = new Set(selected.map((turn) => turn.id));
+    const lines: string[] = [];
+    for (const message of this.store.listMessages(sessionId, 5_000)) {
+      if (!turnIds.has(message.turnId) || (message.role !== "user" && message.role !== "assistant")) continue;
+      const text = message.parts
+        .filter((part) => part.type === "text")
+        .map((part) => (part.payload as { text?: unknown }).text)
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        .join("\n")
+        .trim();
+      if (text) lines.push(`${message.role}: ${text}`);
+    }
+    if (!lines.length) return undefined;
+    return takeBytes(lines.join("\n\n"), 16 * 1024, "tail");
+  }
+
   private completedAssistantText(sessionId: string): string | undefined {
     const turn = this.store.listTurns(sessionId, 1_000).at(-1);
     if (!turn || turn.status !== "completed") return undefined;
@@ -798,6 +826,7 @@ export class AgentRuntime {
       tool,
       status: job.status
     });
+    if (job.kind === "agent") this.notifyAgentCompletionWaiters(item.sessionId);
     if (item.triggerPolicy === "wake" && this.recovered && !this.shuttingDown) void this.mailboxDispatcher.wakeCompletion(item.sessionId, "wake");
   }
 
@@ -1095,7 +1124,7 @@ export class AgentRuntime {
     try {
       for (const job of activeBackgroundJobs(this.store.listToolCalls(sessionId, 200))) {
         if (!sessionManager.isTracked(job.processId)) {
-          this.settleBackgroundProcess(sessionId, job.processId, "error");
+          this.settleBackgroundProcess(sessionId, job.processId, "error", "unavailable");
           settled += 1;
         }
       }
@@ -1159,32 +1188,47 @@ export class AgentRuntime {
     };
   }
 
-  private waitForSteering(sessionId: string): { promise: Promise<void>; cancel: () => void } {
+  private registerWaiter(waiters: Map<string, Set<() => void>>, sessionId: string): { promise: Promise<void>; cancel: () => void } {
     let settled = false;
     let resolve!: () => void;
     const promise = new Promise<void>((done) => { resolve = done; });
+    const set = waiters.get(sessionId) ?? new Set<() => void>();
     const wake = () => {
       if (settled) return;
       settled = true;
-      this.steeringWaiters.get(sessionId)?.delete(wake);
+      set.delete(wake);
+      if (set.size === 0) waiters.delete(sessionId);
       resolve();
     };
-    const waiters = this.steeringWaiters.get(sessionId) ?? new Set<() => void>();
-    waiters.add(wake);
-    this.steeringWaiters.set(sessionId, waiters);
-    return {
-      promise,
-      cancel: () => {
-        if (settled) return;
-        settled = true;
-        waiters.delete(wake);
-        if (waiters.size === 0) this.steeringWaiters.delete(sessionId);
-      }
-    };
+    set.add(wake);
+    waiters.set(sessionId, set);
+    return { promise, cancel: wake };
+  }
+
+  private notifyWaiters(waiters: Map<string, Set<() => void>>, sessionId: string): void {
+    for (const wake of [...(waiters.get(sessionId) ?? [])]) wake();
+  }
+
+  private waitForSteering(sessionId: string): { promise: Promise<void>; cancel: () => void } {
+    return this.registerWaiter(this.steeringWaiters, sessionId);
   }
 
   private notifySteeringWaiters(sessionId: string): void {
-    for (const wake of [...(this.steeringWaiters.get(sessionId) ?? [])]) wake();
+    this.notifyWaiters(this.steeringWaiters, sessionId);
+  }
+
+  private wakeParentIfIdle(sessionId: string): void {
+    if (!this.recovered || this.shuttingDown) return;
+    if (this.hasRunningTurn(sessionId) || this.compactionControllers.has(sessionId)) return;
+    void this.mailboxDispatcher.wakePending(sessionId);
+  }
+
+  private waitForAgentCompletion(sessionId: string): { promise: Promise<void>; cancel: () => void } {
+    return this.registerWaiter(this.agentCompletionWaiters, sessionId);
+  }
+
+  private notifyAgentCompletionWaiters(sessionId: string): void {
+    this.notifyWaiters(this.agentCompletionWaiters, sessionId);
   }
 
   updateSession(sessionId: string, patch: SessionPatch): Session {
@@ -2040,9 +2084,7 @@ export class AgentRuntime {
       if (toolBatch.length === 0) return false;
       if (this.store.loadTurn(turn.id).status === "cancelled") { toolBatch.splice(0); return true; }
       const batch = toolBatch.splice(0);
-      const outcomes = await Promise.all(batch.map((action) =>
-        this.executePlannerToolAction(session, turn, assistantMessage, planner.name, action, step, sawResponse)
-      ));
+      const outcomes = await this.executePlannerToolBatch(session, turn, assistantMessage, planner.name, batch, step, sawResponse);
       for (const outcome of outcomes) {
         if (outcome.shouldContinue) shouldContinue = true;
         if (outcome.resetAutoContinue) autoContinue.streak = 0;
@@ -2107,7 +2149,7 @@ export class AgentRuntime {
       if (signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") return { cancelled: true, shouldContinue: false };
       for (let attempt = 1; ; attempt += 1) {
         this.emitPlannerAttempt(session, turn, assistantMessage, plannerName, attempt, plannerInput, context);
-        const dispatched: Array<Promise<ToolActionOutcome>> = [];
+        const queuedTools: ToolPlannerAction[] = [];
         const content = new BoundedTextAccumulator(providerLimits.contentBytes, "provider content", providerLimits.sseEvents);
         const reasoning = new BoundedTextAccumulator(providerLimits.reasoningBytes, "provider reasoning", providerLimits.sseEvents);
         let finishReason: string | undefined;
@@ -2179,7 +2221,7 @@ export class AgentRuntime {
                 continue;
               }
               const action: ToolPlannerAction = { kind: "tool", tool: toolName, args, rationale: "", ...(toolCallId ? { toolCallId } : {}) };
-              dispatched.push(this.executePlannerToolAction(session, turn, assistantMessage, plannerName, action, step, false));
+              queuedTools.push(action);
             } else if (event.type === "message_complete") {
               finishReason = event.finishReason;
             } else if (event.type === "usage") {
@@ -2197,7 +2239,9 @@ export class AgentRuntime {
           if (signal.aborted || interrupted) void iterator.return?.();
         } catch (error) {
           this.persistModelUsage(provider, session, turn, usage, Date.now() - requestStarted);
-          const outcomes = await Promise.allSettled(dispatched);
+          const outcomes = signal.aborted || interrupted
+            ? []
+            : await this.executePlannerToolBatchSettled(session, turn, assistantMessage, plannerName, queuedTools, step, false);
           this.clearToolInputPreviews(session.id, turn.id);
           lastError = error instanceof Error ? error.message : String(error);
           if (signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") {
@@ -2207,8 +2251,8 @@ export class AgentRuntime {
               : { cancelled: true, shouldContinue };
           }
           this.prepareStreamingRetry(session.id, turn.id);
-          if (dispatched.length === 0 && isContextOverflowError(error)) return { contextOverflow: true, shouldContinue: true };
-          const retry = plannerRetryState(error, attempt, dispatched.length === 0);
+          if (queuedTools.length === 0 && isContextOverflowError(error)) return { contextOverflow: true, shouldContinue: true };
+          const retry = plannerRetryState(error, attempt, queuedTools.length === 0);
           const errorPayload = {
             turnId: turn.id,
             planner: plannerName,
@@ -2242,7 +2286,6 @@ export class AgentRuntime {
         }
 
         if (signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") {
-          await Promise.allSettled(dispatched);
           this.clearToolInputPreviews(session.id, turn.id);
           return timedOut()
             ? { timedOut: true, shouldContinue: false }
@@ -2266,9 +2309,9 @@ export class AgentRuntime {
         const respondText = duplicateReasoning || internalMeta
           ? ""
           : candidateRespondText ? rawRespondText : "";
-        if (!respondText && (rawRespondText || separated.reasoningText || internalMeta) && (dispatched.length > 0 || duplicateReasoning || internalMeta)) this.discardStreamingText(session.id, turn.id);
-        if (!rawRespondText && (separated.visibleText.trim() || separated.reasoningText) && dispatched.length === 0) this.discardStreamingText(session.id, turn.id);
-        const outcomes = await Promise.all(dispatched);
+        if (!respondText && (rawRespondText || separated.reasoningText || internalMeta) && (queuedTools.length > 0 || duplicateReasoning || internalMeta)) this.discardStreamingText(session.id, turn.id);
+        if (!rawRespondText && (separated.visibleText.trim() || separated.reasoningText) && queuedTools.length === 0) this.discardStreamingText(session.id, turn.id);
+        const outcomes = await this.executePlannerToolBatch(session, turn, assistantMessage, plannerName, queuedTools, step, false);
         const toolCancelled = outcomes.some((outcome) => outcome.cancelled);
         for (const outcome of outcomes) {
           if (outcome.shouldContinue) shouldContinue = true;
@@ -2283,10 +2326,10 @@ export class AgentRuntime {
         const truncated = isProviderIncompleteFinishReason(finishReason);
         if (respondText) {
           if (await this.applyRespond(session, turn, assistantMessage, plannerName, respondText, truncated, false, responses, autoContinue)) shouldContinue = true;
-        } else if (dispatched.length === 0 && !sawParseError && !reasoningText && userAuthored && !truncated) {
+        } else if (queuedTools.length === 0 && !sawParseError && !reasoningText && userAuthored && !truncated) {
           const fallback = "Completed without model-visible response.";
           if (await this.applyRespond(session, turn, assistantMessage, plannerName, fallback, truncated, true, responses, autoContinue)) shouldContinue = true;
-        } else if (respondText === "" && dispatched.length === 0 && !sawParseError && (reasoningText || truncated)) {
+        } else if (respondText === "" && queuedTools.length === 0 && !sawParseError && (reasoningText || truncated)) {
           if (reasoningText) this.queueVisibleResponseContinuation(session.id);
           if (truncated) this.queueTruncatedResponseContinuation(session.id);
           shouldContinue = true;
@@ -2639,6 +2682,65 @@ export class AgentRuntime {
     return responses;
   }
 
+  private async executePlannerToolBatch(
+    session: Session,
+    turn: Turn,
+    assistantMessage: Message,
+    plannerName: string,
+    actions: ToolPlannerAction[],
+    step: number,
+    sawResponse: boolean
+  ): Promise<ToolActionOutcome[]> {
+    const observations: Array<{ tool: string; metadata: Record<string, unknown> }> = [];
+    const outcomes: ToolActionOutcome[] = [];
+    for (const wave of reconExecutionWaves(actions)) {
+      if (this.store.loadTurn(turn.id).status === "cancelled") break;
+      const hydrated = wave.map((action) => hydrateReconAction(action, observations));
+      const waveOutcomes = await Promise.all(hydrated.map((action) =>
+        this.executePlannerToolAction(session, turn, assistantMessage, plannerName, action, step, sawResponse)
+      ));
+      outcomes.push(...waveOutcomes);
+      for (const outcome of waveOutcomes) {
+        if (!outcome.record) continue;
+        const metadata = this.toolResultMetadata(session.id, outcome.record.id);
+        if (metadata) observations.push({ tool: canonicalToolName(outcome.record.tool), metadata });
+      }
+      if (waveOutcomes.some((outcome) => outcome.cancelled)) break;
+    }
+    return outcomes;
+  }
+
+  private async executePlannerToolBatchSettled(
+    session: Session,
+    turn: Turn,
+    assistantMessage: Message,
+    plannerName: string,
+    actions: ToolPlannerAction[],
+    step: number,
+    sawResponse: boolean
+  ): Promise<Array<PromiseSettledResult<ToolActionOutcome>>> {
+    try {
+      const outcomes = await this.executePlannerToolBatch(session, turn, assistantMessage, plannerName, actions, step, sawResponse);
+      return outcomes.map((value) => ({ status: "fulfilled", value }));
+    } catch (reason) {
+      return [{ status: "rejected", reason }];
+    }
+  }
+
+  private toolResultMetadata(sessionId: string, toolCallId: string): Record<string, unknown> | undefined {
+    for (const part of this.store.listPartsByType(sessionId, "tool_result", 10_000)) {
+      const payload = part.payload;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+      const record = payload as Record<string, unknown>;
+      if (record.toolCallId !== toolCallId) continue;
+      const toolResult = record.toolResult;
+      if (!toolResult || typeof toolResult !== "object" || Array.isArray(toolResult)) return undefined;
+      const metadata = (toolResult as Record<string, unknown>).metadata;
+      return metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as Record<string, unknown> : undefined;
+    }
+    return undefined;
+  }
+
   private async executePlannerToolAction(
     session: Session,
     turn: Turn,
@@ -2700,7 +2802,8 @@ export class AgentRuntime {
       const detachedAgent = isDetachedAgentCall(action.tool, action.args) && record.status === "running_background";
       return {
         shouldContinue: !detachedAgent && (record.status === "done" || record.status === "error" || record.status === "running_background"),
-        resetAutoContinue: !detachedAgent && (record.status === "done" || record.status === "error" || record.status === "running_background")
+        resetAutoContinue: !detachedAgent && (record.status === "done" || record.status === "error" || record.status === "running_background"),
+        record
       };
     } catch (error) {
       if (gateController.signal.aborted || this.store.loadTurn(turn.id).status === "cancelled") {
@@ -3246,7 +3349,9 @@ export class AgentRuntime {
     this.activeToolControllers.add(controller);
     const lease = new ToolExecutionLease();
     this.activeToolLeases.add(lease);
-    const deadline = new ToolExecutionDeadline(tool.name, tool.timeoutMs, controller.signal);
+    const effectiveTimeoutMs = readModelDeadlineMs(toolCall.args) ?? tool.timeoutMs;
+    const runArgs = stripModelDeadlineArg(toolCall.args);
+    const deadline = new ToolExecutionDeadline(tool.name, effectiveTimeoutMs, controller.signal);
     const turnId = owner?.turn.id ?? toolCall.turnId;
     const messageId = owner?.assistantMessage.id ?? toolCall.messageId;
     if (turnId) {
@@ -3299,7 +3404,7 @@ export class AgentRuntime {
       ...(this.knowledge() ? { knowledge: leasedToolCapability(this.knowledge()!, lease) } : {}),
       store: leasedToolCapability(this.store as unknown as ToolContext["store"], lease),
       signal: deadline.signal,
-      timeoutMs: toolOperationTimeout(tool.timeoutMs),
+      timeoutMs: toolOperationTimeout(effectiveTimeoutMs),
       executionBackend: this.executionBackend ?? this.containerBackend(session.workspace, session.id) as unknown as ToolExecutionBackend,
       availableTools: () => {
         lease.assertActive();
@@ -3335,7 +3440,28 @@ export class AgentRuntime {
               if (missing.length) throw new Error(`unknown child session: ${missing.join(", ")}`);
             }
             if (entries.length === 0 || entries.some((entry) => !entry.running) || Date.now() - started >= timeoutMs) return entries;
-            await new Promise<void>((resolve) => setTimeout(resolve, 200));
+            const completion = this.waitForAgentCompletion(session.id);
+            const steer = this.waitForSteering(session.id);
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let onAbort: (() => void) | undefined;
+            const remaining = Math.max(0, timeoutMs - (Date.now() - started));
+            try {
+              await Promise.race([
+                completion.promise,
+                steer.promise,
+                new Promise<void>((resolve) => { timer = setTimeout(resolve, remaining); }),
+                new Promise<void>((_resolve, reject) => {
+                  if (!signal) return;
+                  onAbort = () => reject(signal.reason ?? new Error("agent wait cancelled"));
+                  signal.addEventListener("abort", onAbort, { once: true });
+                })
+              ]);
+            } finally {
+              completion.cancel();
+              steer.cancel();
+              if (timer) clearTimeout(timer);
+              if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+            }
           }
         },
         message: (childSessionId, text) => {
@@ -3452,7 +3578,24 @@ export class AgentRuntime {
         }
         return this.jobs.cancel(jobId, false);
       },
-      delegateSession: async ({ title, prompt, lane, tools, model, mode = "attached", sessionId: resumeSessionId, linkToolCall = true, campaignRunId, campaignClaimId, campaignClaimOwner }) => {
+      reportToParent: (message) => {
+        lease.assertActive();
+        const trimmed = message.trim();
+        if (!trimmed) throw new Error("report message must be a non-empty string");
+        const parentSessionId = session.parentId;
+        if (!parentSessionId) throw new Error("agent_report is only available to a subagent with a parent");
+        this.mailbox.enqueue({
+          sessionId: parentSessionId,
+          kind: "agent_report",
+          payload: { childSessionId: session.id, title: session.title, nickname: session.nickname, agentPath: session.agentPath, message: trimmed },
+          triggerPolicy: "context",
+          dedupeKey: `report:${session.id}:${crypto.randomUUID()}`
+        });
+        this.notifyAgentCompletionWaiters(parentSessionId);
+        this.wakeParentIfIdle(parentSessionId);
+        return { parentSessionId };
+      },
+      delegateSession: async ({ title, prompt, lane, tools, model, mode = "attached", sessionId: resumeSessionId, linkToolCall = true, forkMode = "none", serviceTier, campaignRunId, campaignClaimId, campaignClaimOwner }) => {
         lease.assertActive();
         const previousJob = resumeSessionId
           ? this.store.listJobs(session.id, 10_000).find((job) => job.kind === "agent" && job.childSessionId === resumeSessionId)
@@ -3506,18 +3649,28 @@ export class AgentRuntime {
           editsSharedWorkspace = hasSharedWorkspaceEdits(scopedTools);
           const childModel = model ?? laneDef?.model;
           child = await this.forkSession(session.id, title);
-          if (childModel && childModel !== child.model) this.updateSession(child.id, { model: childModel });
-          if (scopedTools?.length) this.updateSession(child.id, { toolScope: scopedTools });
+          const liveSiblingNicknames = this.store.listSessions(10_000, { includeArchived: false })
+            .filter((candidate) => candidate.parentId === session.id && candidate.id !== child.id && candidate.nickname)
+            .map((candidate) => candidate.nickname!);
+          const nickname = pickSubagentNickname(liveSiblingNicknames);
+          child = this.updateSession(child.id, { nickname, agentPath: childAgentPath(session.agentPath, nickname) });
+          if (childModel && childModel !== child.model) child = this.updateSession(child.id, { model: childModel });
+          if (scopedTools?.length) child = this.updateSession(child.id, { toolScope: scopedTools });
+          if (serviceTier) child = this.updateSession(child.id, { serviceTier });
         }
         if (campaignRun) {
           child = this.updateSession(child.id, { campaignId: campaignRun.campaignId, campaignRunId: campaignRun.id });
         }
+        const inheritedContext = !resumeSessionId && forkMode !== "none" ? this.renderInheritedHistory(session.id, forkMode) : undefined;
         const workerPrompt = buildSubagentTaskPrompt({
           title,
           task: prompt,
           ...(effectiveLane ? { lane: effectiveLane } : {}),
           ...(laneDef?.prompt ? { lanePrompt: laneDef.prompt } : {}),
           parentSessionId: session.id,
+          ...(child.nickname ? { nickname: child.nickname } : {}),
+          ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+          ...(inheritedContext ? { inheritedContext } : {}),
           ...(scopedTools?.length ? { tools: scopedTools } : {})
         });
         const job = this.jobs.startAgent({
@@ -3627,7 +3780,7 @@ export class AgentRuntime {
     await this.fireHooks(session, "tool.pre", toolCall.tool, { tool: toolCall.tool, toolCallId: toolCall.id, args: toolCall.args });
     try {
       lease.assertActive();
-      const operation = Promise.resolve().then(() => tool.run(toolCall.args, context));
+      const operation = Promise.resolve().then(() => tool.run(runArgs, context));
       this.trackToolOperation(operation);
       result = await deadline.run(() => operation);
     } catch (error) {
@@ -3640,11 +3793,12 @@ export class AgentRuntime {
         interrupted: timedOut || cancelled,
         cancelled,
         timedOut,
-        reason: timedOut ? "tool_deadline" : cancelled ? this.shuttingDown ? "runtime_shutdown" : "tool_cancelled" : "tool_failure"
+        reason: timedOut ? "tool_deadline" : cancelled ? this.shuttingDown ? "runtime_shutdown" : "tool_cancelled" : "tool_failure",
+        category: classifyToolError({ error, timedOut, cancelled })
       });
       const processId = processIdFromArgs(toolCall.args);
       if (processId) {
-        try { this.settleBackgroundProcess(session.id, processId, "error"); }
+        try { this.settleBackgroundProcess(session.id, processId, "error", toolCall.errorCategory); }
         catch (postError) { this.emitRecoverableToolError(toolCall, "background settlement after tool failure", postError); }
       }
       await this.fireHooks(session, "tool.post", toolCall.tool, {
@@ -3664,7 +3818,7 @@ export class AgentRuntime {
     releaseController();
     let rendered: RenderedToolResult;
     try {
-      result = this.store.persistToolResultAttachments(session.id, this.boundToolOutput(session.id, toolCall, result));
+      result = normalizeFailedToolResult(this.store.persistToolResultAttachments(session.id, this.boundToolOutput(session.id, toolCall, result)));
       if (result.evidence) {
         for (const evidence of result.evidence) {
           const saved = this.store.saveEvidence(evidence, result.output);
@@ -3680,7 +3834,13 @@ export class AgentRuntime {
           }
         }
       }
-      toolCall = { ...toolCall, status: completedToolCallStatus(result) };
+      toolCall = {
+        ...toolCall,
+        status: completedToolCallStatus(result),
+        terminalSummary: result.summary,
+        ...(result.errorCategory ? { errorCategory: result.errorCategory } : {}),
+        ...toolResultDiagnostic(result)
+      };
       if (result.processId) toolCall.processId = result.processId;
       if (result.jobId) toolCall.jobId = result.jobId;
       if (result.outputArtifactId) toolCall.outputArtifactId = result.outputArtifactId;
@@ -3704,6 +3864,7 @@ export class AgentRuntime {
         persistedResult = {
           ok: rendered.result.ok,
           summary: rendered.result.summary,
+          ...(rendered.result.errorCategory ? { errorCategory: rendered.result.errorCategory } : {}),
           ...(rendered.result.output ? { output: rendered.result.output } : {}),
           ...(rendered.result.status ? { status: rendered.result.status } : {}),
           ...(rendered.result.outputArtifactId ? { outputArtifactId: rendered.result.outputArtifactId } : {}),
@@ -3759,7 +3920,7 @@ export class AgentRuntime {
     }
     try {
       if (result.processId && (toolCall.status === "done" || toolCall.status === "error")) {
-        this.settleBackgroundProcess(session.id, result.processId, toolCall.status);
+        this.settleBackgroundProcess(session.id, result.processId, toolCall.status, result.errorCategory);
       }
       if (result.outputArtifactId) {
         this.event(session.id, "tool_progress", {
@@ -3786,8 +3947,8 @@ export class AgentRuntime {
     }
   }
 
-  private settleBackgroundProcess(sessionId: string, processId: string, status: "done" | "error"): void {
-    this.store.settleBackgroundProcess(sessionId, processId, status);
+  private settleBackgroundProcess(sessionId: string, processId: string, status: "done" | "error", errorCategory?: import("../types").ToolErrorCategory): void {
+    this.store.settleBackgroundProcess(sessionId, processId, status, errorCategory);
   }
 
   private boundToolOutput(sessionId: string, toolCall: ToolCallRecord, result: ToolResult): ToolResult {
@@ -4128,6 +4289,11 @@ function sameProviderToolCatalog(left: ProviderToolDef[], right: ProviderToolDef
 function completedToolCallStatus(result: ToolResult): ToolCallRecord["status"] {
   if (result.status === "running_background") return "running_background";
   return result.ok ? "done" : "error";
+}
+
+function toolResultDiagnostic(result: ToolResult): Pick<ToolCallRecord, "diagnostic"> | Record<string, never> {
+  const diagnostic = result.metadata?.diagnostic;
+  return typeof diagnostic === "string" && diagnostic.trim() ? { diagnostic } : {};
 }
 
 function recoveredJobSummary(job: BackgroundJob): string {

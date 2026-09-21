@@ -11,7 +11,7 @@ export const memoryMarkFailedTool: ToolDefinition = {
     properties: { key: { type: "string" }, reason: { type: "string" }, command: { type: "string" } }
   },
   mutates: true,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

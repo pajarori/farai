@@ -1,9 +1,13 @@
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
 import type { ToolContext } from "../../types";
 import { backend } from "../shared/backend";
 import { CONTAINER_WORKSPACE_MOUNT } from "../../agent-container/kali";
+import { atomicWriteFile } from "../../agent-core/atomic-file";
+import { safeExistingWorkspacePath, safeWorkspacePath } from "./shared";
 
 export function containerWorkspace(context: ToolContext): string {
-  return backend(context).workspacePath ?? CONTAINER_WORKSPACE_MOUNT;
+  return context.executionBackend?.workspacePath ?? CONTAINER_WORKSPACE_MOUNT;
 }
 
 export function resolveContainerPath(path: string, workspace = CONTAINER_WORKSPACE_MOUNT): string {
@@ -45,6 +49,12 @@ function base64Heredoc(content: string): string {
 }
 
 export async function containerPathKind(context: ToolContext, path: string): Promise<"dir" | "file" | "missing"> {
+  const hostPath = hostWorkspacePath(context, path, "read");
+  if (hostPath) {
+    if (!existsSync(hostPath)) return "missing";
+    const resolved = existingHostWorkspacePath(context, path, "read");
+    return statSync(resolved).isDirectory() ? "dir" : "file";
+  }
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "read");
   const p = resolveContainerPath(path, workspace);
@@ -57,12 +67,19 @@ export async function containerPathKind(context: ToolContext, path: string): Pro
 }
 
 export async function containerReadFile(context: ToolContext, path: string): Promise<string> {
+  const hostPath = hostWorkspacePath(context, path, "read");
+  if (hostPath) return readFileSync(existingHostWorkspacePath(context, path, "read"), "utf8");
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "read");
   return runInContainer(context, `cat -- ${shQuote(resolveContainerPath(path, workspace))}`, 10_000, FULL_FILE_MAX_CHARS);
 }
 
 export async function containerStatMtime(context: ToolContext, path: string): Promise<number | undefined> {
+  const hostPath = hostWorkspacePath(context, path, "read");
+  if (hostPath) {
+    try { return Math.floor(statSync(existingHostWorkspacePath(context, path, "read")).mtimeMs / 1_000); }
+    catch { return undefined; }
+  }
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "read");
   const p = resolveContainerPath(path, workspace);
@@ -76,6 +93,13 @@ export async function containerStatMtime(context: ToolContext, path: string): Pr
 }
 
 export async function containerListDir(context: ToolContext, path: string): Promise<string[]> {
+  const hostPath = hostWorkspacePath(context, path, "read");
+  if (hostPath) {
+    const root = existingHostWorkspacePath(context, path, "read");
+    return readdirSync(root, { withFileTypes: true })
+      .sort((left, right) => Number(!left.isDirectory()) - Number(!right.isDirectory()) || left.name.localeCompare(right.name))
+      .map((entry) => `${entry.isDirectory() ? "dir " : "file"} ${workspaceRelative(context.workspace, resolve(root, entry.name))}`);
+  }
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "read");
   const target = resolveContainerPath(path, workspace);
@@ -94,6 +118,15 @@ for n in entries:
 }
 
 export async function containerWriteFile(context: ToolContext, path: string, content: string): Promise<void> {
+  const hostPath = hostWorkspacePath(context, path, "write");
+  if (hostPath) {
+    mkdirSync(dirname(hostPath), { recursive: true });
+    assertHostParent(context, hostPath);
+    if (existsSync(hostPath)) existingHostWorkspacePath(context, path, "write");
+    const mode = existsSync(hostPath) ? statSync(hostPath).mode & 0o777 : 0o644;
+    atomicWriteFile(hostPath, content, mode);
+    return;
+  }
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "write");
   const p = resolveContainerPath(path, workspace);
@@ -106,6 +139,8 @@ export async function containerWriteFile(context: ToolContext, path: string, con
 }
 
 export async function containerListFilesRecursive(context: ToolContext, path: string, limit: number): Promise<string[]> {
+  const hostPath = hostWorkspacePath(context, path, "read");
+  if (hostPath) return hostListFilesRecursive(context, path, limit);
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "read");
   const root = resolveContainerPath(path, workspace);
@@ -136,6 +171,8 @@ export async function containerGrep(
   include: string | undefined,
   limit: number
 ): Promise<string[]> {
+  const hostPath = hostWorkspacePath(context, path, "read");
+  if (hostPath) return hostGrep(context, path, pattern, include, limit);
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "read");
   const root = resolveContainerPath(path, workspace);
@@ -174,6 +211,11 @@ print("\\n".join(matches))
 }
 
 export async function containerRemove(context: ToolContext, path: string): Promise<void> {
+  const hostPath = hostWorkspacePath(context, path, "write");
+  if (hostPath) {
+    if (existsSync(hostPath)) rmSync(existingHostWorkspacePath(context, path, "write"), { force: true });
+    return;
+  }
   const workspace = containerWorkspace(context);
   assertNotProtectedPath(path, workspace, "write");
   await runInContainer(context, `rm -f -- ${shQuote(resolveContainerPath(path, workspace))}`);
@@ -234,4 +276,89 @@ export async function containerApplySimplePatch(context: ToolContext, patch: str
     if (line.trim()) throw new Error(`unsupported patch line: ${line}`);
   }
   return applied;
+}
+
+function hostWorkspacePath(context: ToolContext, path: string, intent: "read" | "write"): string | undefined {
+  if (path.startsWith("/") && path !== CONTAINER_WORKSPACE_MOUNT && !path.startsWith(`${CONTAINER_WORKSPACE_MOUNT}/`)) return undefined;
+  return safeWorkspacePath(context.workspace, path, intent);
+}
+
+function existingHostWorkspacePath(context: ToolContext, path: string, intent: "read" | "write"): string {
+  const lexical = safeWorkspacePath(context.workspace, path, intent);
+  if (lexical === resolve(context.workspace)) return lexical;
+  return safeExistingWorkspacePath(context.workspace, path, intent);
+}
+
+function assertHostParent(context: ToolContext, path: string): void {
+  const root = resolve(context.workspace);
+  const parent = dirname(path);
+  if (parent === root) return;
+  safeExistingWorkspacePath(context.workspace, relative(root, parent), "write");
+}
+
+function workspaceRelative(workspace: string, path: string): string {
+  return relative(resolve(workspace), path).split(/[\\/]+/).join("/") || ".";
+}
+
+function hostListFilesRecursive(context: ToolContext, path: string, limit: number): string[] {
+  const root = existingHostWorkspacePath(context, path, "read");
+  if (!statSync(root).isDirectory()) throw new Error(`not a directory: ${path}`);
+  const boundedLimit = Math.max(1, Math.floor(limit));
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    if (files.length >= boundedLimit) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      if (entry.name === ".farai" || entry.name === "node_modules") continue;
+      const fullPath = resolve(directory, entry.name);
+      if (entry.isDirectory()) visit(fullPath);
+      else if (entry.isFile()) files.push(workspaceRelative(root, fullPath));
+      if (files.length >= boundedLimit) return;
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function hostGrep(
+  context: ToolContext,
+  path: string,
+  pattern: string,
+  include: string | undefined,
+  limit: number
+): string[] {
+  const root = existingHostWorkspacePath(context, path, "read");
+  const expression = new RegExp(pattern);
+  const matches: string[] = [];
+  const visit = (target: string): void => {
+    if (matches.length >= limit) return;
+    const info = lstatSync(target);
+    if (info.isSymbolicLink()) return;
+    if (info.isDirectory()) {
+      for (const entry of readdirSync(target, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+        if (entry.name === ".farai" || entry.name === "node_modules") continue;
+        visit(resolve(target, entry.name));
+        if (matches.length >= limit) return;
+      }
+      return;
+    }
+    if (!info.isFile()) return;
+    const rel = workspaceRelative(root, target);
+    if (include && !globMatches(rel, include)) return;
+    let text: string;
+    try { text = readFileSync(target, "utf8"); }
+    catch { return; }
+    for (const [index, line] of text.split(/\r?\n/).entries()) {
+      expression.lastIndex = 0;
+      if (!expression.test(line)) continue;
+      matches.push(`${rel}:${index + 1}: ${line.slice(0, 240)}`);
+      if (matches.length >= limit) return;
+    }
+  };
+  visit(root);
+  return matches;
+}
+
+function globMatches(path: string, pattern: string): boolean {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("**", "\0").replaceAll("*", "[^/]*").replaceAll("\0", ".*").replaceAll("?", "[^/]");
+  return new RegExp(`^${escaped}$`).test(path) || new RegExp(`(?:^|/)${escaped}$`).test(path);
 }

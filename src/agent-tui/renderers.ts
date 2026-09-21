@@ -195,6 +195,8 @@ export type ToolTimelineRow = {
   liveOutput?: string;
   result?: string;
   fullResult?: string;
+  diagnostic?: string;
+  errorCategory?: import("../types").ToolErrorCategory;
   processId?: string;
   jobId?: string;
   toolCallId: string | undefined;
@@ -203,6 +205,7 @@ export type ToolTimelineRow = {
   toolResult?: ToolResult;
   startedAt?: string;
   durationMs?: number;
+  backgroundDurationMs?: number;
   presentation: ToolActivityPresentation;
 };
 
@@ -254,7 +257,7 @@ export type TodoListRowItem = {
 };
 
 const BACKGROUND_COMPLETION = Symbol("backgroundCompletion");
-type BackgroundCompletion = { jobId?: string; processId?: string; status: string };
+type BackgroundCompletion = { jobId?: string; processId?: string; status: string; backgroundDurationMs?: number };
 type BackgroundCompletionRow = Extract<TimelineRow, { kind: "artifact" }> & { [BACKGROUND_COMPLETION]?: BackgroundCompletion };
 
 const DEFAULT_WIDTH = 120;
@@ -357,7 +360,8 @@ export function reconcileTimelineRows(rows: TimelineRow[]): TimelineRow[] {
       ...target,
       status,
       result: row.body ?? row.detail,
-      fullResult: row.body ?? row.detail
+      fullResult: row.body ?? row.detail,
+      ...(completion.backgroundDurationMs !== undefined ? { backgroundDurationMs: completion.backgroundDurationMs } : {})
     };
     updated.presentation = presentToolActivity(updated);
     replacements.set(targetIndex, updated);
@@ -462,19 +466,29 @@ function partToRow(
       const processId = latest?.processId ?? record?.processId;
       const jobId = latest?.jobId ?? record?.jobId;
       const providerToolCallId = latest?.providerToolCallId ?? record?.providerToolCallId;
+      const terminalSummary = latest?.terminalSummary ?? record?.terminalSummary;
+      const diagnostic = latest?.diagnostic ?? record?.diagnostic;
+      const errorCategory = latest?.errorCategory ?? record?.errorCategory;
+      const terminalToolResult = errorCategory && status === "error"
+        ? { ok: false, summary: terminalSummary ?? "tool failed", errorCategory }
+        : undefined;
       const row: ToolTimelineRow = {
         kind: "tool",
         tool,
         args,
         argsSummary: summarizeToolArgs(tool, args, 80),
         status,
+        ...(terminalSummary ? { result: terminalSummary } : {}),
+        ...(diagnostic ? { diagnostic } : {}),
+        ...(errorCategory ? { errorCategory } : {}),
+        ...(terminalToolResult ? { toolResult: terminalToolResult } : {}),
         ...(status === "running" && liveOutput ? { liveOutput } : {}),
         ...(processId ? { processId } : {}),
         ...(jobId ? { jobId } : {}),
         toolCallId,
         id: providerToolCallId ? toolTimelineRowId(message.turnId, providerToolCallId) : part.id,
         ...(part.createdAt ? { startedAt: part.createdAt } : {}),
-        presentation: presentToolActivity({ tool, args, status, ...(liveOutput ? { liveOutput } : {}) })
+        presentation: presentToolActivity({ tool, args, status, ...(liveOutput ? { liveOutput } : {}), ...(terminalToolResult ? { toolResult: terminalToolResult } : {}) })
       };
       if (toolCallId) toolRows.set(toolCallId, row);
       return row;
@@ -494,6 +508,7 @@ function partToRow(
       if (linked) {
         linked.result = truncatePayload(display, width * 4);
         if (toolResult) linked.toolResult = toolResult;
+        if (toolResult?.errorCategory) linked.errorCategory = toolResult.errorCategory;
         if (fullResult !== undefined) linked.fullResult = fullResult;
         const mcp = mcpToolRowData(toolResult);
         if (mcp) linked.mcp = mcp;
@@ -502,6 +517,10 @@ function partToRow(
         if (toolResult?.status) linked.status = toolResult.status;
         else if (toolResult?.ok === false) linked.status = "error";
         else if (linked.status === "pending" || linked.status === "running") linked.status = "done";
+        const backgroundDurationMs = toolResult?.metadata?.backgroundDurationMs;
+        if (typeof backgroundDurationMs === "number" && Number.isFinite(backgroundDurationMs) && backgroundDurationMs >= 0) {
+          linked.backgroundDurationMs = backgroundDurationMs;
+        }
         const durationMs = elapsedMs(linked.startedAt, part.createdAt);
         if (durationMs !== undefined) linked.durationMs = durationMs;
         linked.presentation = presentToolActivity(linked);
@@ -587,6 +606,10 @@ function partToRow(
           linked.status = status === "succeeded" ? "done" : "error";
           linked.result = summary;
           linked.fullResult = summary;
+          const backgroundDurationMs = field(part.payload, "backgroundDurationMs");
+          if (typeof backgroundDurationMs === "number" && Number.isFinite(backgroundDurationMs) && backgroundDurationMs >= 0) {
+            linked.backgroundDurationMs = backgroundDurationMs;
+          }
           linked.presentation = presentToolActivity(linked);
           return null;
         }
@@ -614,8 +637,27 @@ function partToRow(
             ?? "tool failed";
           linked.status = "error";
           linked.result = error;
-          linked.fullResult = error;
-          linked.toolResult = { ok: false, summary: error, output: error };
+          const diagnostic = extractField(part.payload, "diagnostic") ?? linked.diagnostic;
+          if (diagnostic) linked.diagnostic = diagnostic;
+          linked.fullResult = diagnostic && diagnostic !== error ? `${error}\n\ndiagnostic\n${diagnostic}` : error;
+          const errorCategory = extractField(part.payload, "errorCategory") as import("../types").ToolErrorCategory | undefined;
+          linked.toolResult = {
+            ok: false,
+            summary: error,
+            output: error,
+            ...(errorCategory ? { errorCategory } : {}),
+            metadata: {
+              interrupted: field(part.payload, "interrupted") === true,
+              cancelled: field(part.payload, "cancelled") === true,
+              timedOut: field(part.payload, "timedOut") === true,
+              ...(extractField(part.payload, "reason") ? { reason: extractField(part.payload, "reason") } : {})
+            }
+          };
+          if (errorCategory) linked.errorCategory = errorCategory;
+          const backgroundDurationMs = field(part.payload, "backgroundDurationMs");
+          if (typeof backgroundDurationMs === "number" && Number.isFinite(backgroundDurationMs) && backgroundDurationMs >= 0) {
+            linked.backgroundDurationMs = backgroundDurationMs;
+          }
           const durationMs = elapsedMs(linked.startedAt, part.createdAt);
           if (durationMs !== undefined) linked.durationMs = durationMs;
           linked.presentation = presentToolActivity(linked);
@@ -779,6 +821,12 @@ function activityLabel(rows: ToolTimelineRow[], active: boolean): string {
   const first = rows[0]!;
   const count = rows.length;
   const presentation = first.presentation;
+  if (presentation.groupKey === "recon") {
+    const completed = rows.filter((row) => row.presentation.state === "succeeded").length;
+    const failed = rows.filter((row) => row.presentation.state === "failed" || row.presentation.state === "cancelled").length;
+    if (active) return `recon ${completed}/${count}`;
+    return `recon ${completed}/${count}${failed ? ` · ${failed} failed` : ""}`;
+  }
   const verb = active ? presentation.groupActive ?? "running" : presentation.groupPast ?? "ran";
   const [action = verb, qualifier] = verb.split(" · ", 2);
   if (presentation.groupNoun) {
@@ -824,12 +872,7 @@ function isTodoTool(tool: string): boolean {
 function displayToolResult(tool: string, fallback: string, result: ToolResult | undefined, humanResult?: string): string {
   if (isTodoTool(tool)) return result?.output ?? result?.summary ?? firstResultLine(stripUntrustedMarkers(fallback), 120);
   if (result?.metadata?.instructionSource === "skill") return result.summary;
-  if (result?.status === "running_background") {
-    return [
-      result.summary,
-      result.output && result.output !== "(no output yet)" ? result.output : "(running; poll with command_poll or stop with command_stop)"
-    ].filter(Boolean).join("\n");
-  }
+  if (result?.status === "running_background") return "";
   if (humanResult !== undefined) return humanizeToolOutput(humanResult);
   if (result) return humanizeToolOutput(result.output ?? result.summary ?? stripUntrustedMarkers(fallback));
   return humanizeToolOutput(stripUntrustedMarkers(fallback));
@@ -869,6 +912,9 @@ function todoItemsFromToolRow(row: Extract<TimelineRow, { kind: "tool" }>): Todo
   const input = row.args && typeof row.args === "object" && !Array.isArray(row.args) ? row.args as Record<string, unknown> : {};
   const operationArgs = input.args && typeof input.args === "object" && !Array.isArray(input.args) ? input.args as Record<string, unknown> : input;
   const operation = typeof input.operation === "string" ? input.operation : undefined;
+  if (Array.isArray(operationArgs.plan)) {
+    return operationArgs.plan.map(todoItemFromUnknown).filter((item): item is TodoListRowItem => Boolean(item));
+  }
   if (typeof operationArgs.text === "string") {
     return [{
       text: operationArgs.text,
@@ -1033,6 +1079,10 @@ function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "a
     const summary = extractField(payload, "summary") ?? "background job completed.";
     const jobId = extractField(payload, "jobId");
     const processId = extractField(payload, "processId");
+    const backgroundDuration = field(payload, "backgroundDurationMs");
+    const backgroundDurationMs = typeof backgroundDuration === "number" && Number.isFinite(backgroundDuration) && backgroundDuration >= 0
+      ? backgroundDuration
+      : undefined;
     const row: BackgroundCompletionRow = {
       kind: "artifact",
       title: status === "succeeded" ? "background job completed" : `background job ${status}`,
@@ -1042,7 +1092,12 @@ function artifactRow(part: Part, width: number): Extract<TimelineRow, { kind: "a
       id: part.id
     };
     Object.defineProperty(row, BACKGROUND_COMPLETION, {
-      value: { ...(jobId ? { jobId } : {}), ...(processId ? { processId } : {}), status },
+      value: {
+        ...(jobId ? { jobId } : {}),
+        ...(processId ? { processId } : {}),
+        status,
+        ...(backgroundDurationMs !== undefined ? { backgroundDurationMs } : {})
+      },
       enumerable: false
     });
     return row;

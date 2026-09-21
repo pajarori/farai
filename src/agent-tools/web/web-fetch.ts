@@ -21,7 +21,7 @@ export const internetFetchTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 45_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "external",
   renderHuman: defaultHumanRenderer,

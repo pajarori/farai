@@ -15,7 +15,7 @@ export const cvssCalculateTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "verification",
   renderHuman: defaultHumanRenderer,

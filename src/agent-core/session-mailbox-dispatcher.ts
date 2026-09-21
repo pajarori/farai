@@ -34,7 +34,6 @@ export class SessionMailboxDispatcher {
     const nextUserInput = this.inputQueue.nextQueuedTurn(sessionId);
     if (nextUserInput && !this.inputQueue.isScheduledPrompt(nextUserInput.id)) return this.wakeQueuedInputs(sessionId);
     if (queued.some((item) => item.triggerPolicy === "wake")) return this.wakeCompletion(sessionId, "wake");
-    if (queued.some((item) => item.triggerPolicy === "context")) return this.wakeCompletion(sessionId, "context");
     return Promise.resolve();
   }
 

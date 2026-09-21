@@ -17,7 +17,7 @@ export const outputReadTool: ToolDefinition<OutputReadArgs> = {
     }
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "workspace",
   renderHuman: (result) => result.output ?? result.summary,

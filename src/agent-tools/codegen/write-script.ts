@@ -13,7 +13,7 @@ export const writeScriptTool: ToolDefinition = {
     properties: { filename: { type: "string" }, content: { type: "string" } }
   },
   mutates: true,
-  timeoutMs: 10_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: false,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

@@ -15,7 +15,7 @@ export const knowledgeNeighborsTool: ToolDefinition = {
     }
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: defaultHumanRenderer,
   renderModel: defaultModelRenderer,

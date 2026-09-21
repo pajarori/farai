@@ -18,7 +18,7 @@ export const imageViewTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: (result) => result.output ?? result.summary,
   renderModel: (result) => [result.summary, result.output].filter(Boolean).join("\n"),

@@ -16,6 +16,8 @@ export function ensureToolResultsPaired(entries: ConversationEntry[]): Conversat
       out.push(entry);
       open = (entry.toolCalls ?? []).map((call) => ({ id: call.id, tool: call.tool }));
     } else if (entry.role === "tool") {
+      const matched = open.some((pending) => pending.id === entry.toolCallId);
+      if (!matched) continue;
       open = open.filter((pending) => pending.id !== entry.toolCallId);
       out.push(entry);
     } else {

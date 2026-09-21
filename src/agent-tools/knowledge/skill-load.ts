@@ -15,7 +15,7 @@ export const skillLoadTool: ToolDefinition = {
     }
   },
   mutates: false,
-  timeoutMs: 5_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   renderHuman: (result) => result.summary,
   renderModel: defaultModelRenderer,

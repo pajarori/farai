@@ -23,7 +23,7 @@ export const internetSearchTool: ToolDefinition = {
     additionalProperties: false
   },
   mutates: false,
-  timeoutMs: 30_000,
+  timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
   visibility: "external",
   renderHuman: defaultHumanRenderer,

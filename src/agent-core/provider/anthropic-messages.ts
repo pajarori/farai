@@ -63,6 +63,7 @@ export class AnthropicMessagesProvider implements ChatProvider {
       system: toAnthropicSystem(request.system, request.systemBlocks),
       stream: true,
       messages: toAnthropicMessages(messages),
+      ...(request.serviceTier ? { service_tier: request.serviceTier } : {}),
       ...(request.tools.length > 0 ? {
         tools: toAnthropicTools(request.tools),
         ...(request.toolChoice === "none" ? { tool_choice: { type: "none" } } : {})

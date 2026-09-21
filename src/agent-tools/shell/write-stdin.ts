@@ -7,7 +7,7 @@ import { outputTokenLimit } from "../shared/process-output";
 export const writeStdinTool: ToolDefinition = {
   name: "command_input", description: "Send input to an active command_run process and return new output.",
   inputSchema: { type: "object", required: ["session_id"], properties: { session_id: { type: "string" }, chars: { type: "string" }, yield_time_ms: { type: "number" }, max_output_tokens: { type: "number" } } },
-  mutates: true, timeoutMs: 30000, parallel: true, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,
+  mutates: true, timeoutMs: Number.POSITIVE_INFINITY, parallel: true, renderHuman: defaultHumanRenderer, renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
     const id = asString(args.session_id, "session_id");
