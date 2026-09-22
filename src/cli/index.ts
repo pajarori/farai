@@ -304,6 +304,7 @@ async function run(args: string[]): Promise<void> {
     const session = sessionId
       ? runtime.loadSession(sessionId)
       : await runtime.createSession();
+    await runtime.refreshMcp(session, { background: false, force: true }).catch(() => undefined);
     const result = await runtime.prompt(session, text);
     if (json) {
       for (const event of result.events) console.log(JSON.stringify(event));

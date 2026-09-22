@@ -221,7 +221,10 @@ export class BrowserContextManager {
           source: "browser"
         });
         entry.captureInitFile = captureInit.absolute;
-        config = withCaptureInit(config, captureInit.relative);
+        config = withCaptureInit(
+          config,
+          config.runInContainer ? `/workspace/${captureInit.relative}` : captureInit.relative
+        );
       }
       const prepared = await waitForSignal((this.options.prepareServer ?? prepareMcpServerProcess)({
         workspace: input.workspace,

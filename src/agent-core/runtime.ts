@@ -1842,7 +1842,7 @@ export class AgentRuntime {
         providerSlotReady = true;
         lastProviderContextHash = this.latestProviderContextHash(session.id);
       }
-      await this.refreshMcp(session).catch((error) => {
+      await this.refreshMcp(session, { background: false }).catch((error) => {
         this.event(session.id, "planner_error", {
           turnId: turn.id,
           planner: planner.name,

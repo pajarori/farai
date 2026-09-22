@@ -106,6 +106,11 @@ export async function buildModelCatalog(workspace: string, profiles = loadModelP
         const catalogModel = catalogModels.find((model) => model.id === modelID);
         pushChoice(toChoice(provider.id, modelID, provider.baseUrl, true, true, catalogModel, provider.apiKey));
       }
+      for (const model of catalogModels) {
+        if (!discovered.includes(model.id)) {
+          pushChoice(toChoice(provider.id, model.id, provider.baseUrl, true, checked, model, provider.apiKey));
+        }
+      }
       continue;
     }
 
