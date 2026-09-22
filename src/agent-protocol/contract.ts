@@ -3,7 +3,25 @@ export const PROTOCOL_VERSION = 1;
 export type OperationSpec = {
   summary: string;
   input: Record<string, unknown>;
+  long?: boolean;
 };
+
+export type ErrorCode = "unknown_operation" | "invalid_input" | "not_found" | "conflict" | "internal";
+
+export class ProtocolError extends Error {
+  constructor(readonly code: ErrorCode, message: string) {
+    super(message);
+    this.name = "ProtocolError";
+  }
+}
+
+export function errorCodeFor(error: unknown): ErrorCode {
+  if (error instanceof ProtocolError) return error.code;
+  const message = error instanceof Error ? error.message : String(error);
+  if (/not found/i.test(message)) return "not_found";
+  if (/already has|already running|is already|no pending/i.test(message)) return "conflict";
+  return "internal";
+}
 
 const sessionIdInput = {
   type: "object",
