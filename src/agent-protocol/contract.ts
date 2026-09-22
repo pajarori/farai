@@ -141,7 +141,11 @@ export const OPERATIONS = {
     input: {
       type: "object",
       required: ["sessionId", "text"],
-      properties: { sessionId: { type: "string" }, text: { type: "string" } },
+      properties: {
+        sessionId: { type: "string" },
+        text: { type: "string" },
+        async: { type: "boolean" }
+      },
       additionalProperties: false
     }
   },

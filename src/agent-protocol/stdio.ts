@@ -57,25 +57,33 @@ export class StdioProtocolServer implements SubscriptionSink {
     try {
       request = JSON.parse(trimmed) as Request;
     } catch {
-      this.emit({ type: "result", ok: false, error: "request is not valid json" });
+      this.emit({ type: "result", ok: false, code: "INVALID_JSON", error: "request is not valid json" });
       return;
     }
     const id = typeof request.id === "string" || typeof request.id === "number" ? request.id : undefined;
     const operation = typeof request.op === "string" ? request.op : undefined;
     if (!operation) {
-      this.emit({ type: "result", ...(id === undefined ? {} : { id }), ok: false, error: "request requires op" });
+      this.emit({ type: "result", ...(id === undefined ? {} : { id }), ok: false, code: "MISSING_OP", error: "request requires op" });
       return;
     }
     try {
       const data = await dispatch(operation, request.args, this.context);
       this.emit({ type: "result", ...(id === undefined ? {} : { id }), ok: true, op: operation, data });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: string })?.code ?? (
+        message.includes("not found") ? "NOT_FOUND" :
+        message.includes("already exists") ? "CONFLICT" :
+        message.includes("invalid") || message.includes("requires") ? "INVALID_INPUT" :
+        "INTERNAL_ERROR"
+      );
       this.emit({
         type: "result",
         ...(id === undefined ? {} : { id }),
         ok: false,
         op: operation,
-        error: error instanceof Error ? error.message : String(error)
+        code,
+        error: message
       });
     }
   }
@@ -89,12 +97,12 @@ export class StdioProtocolServer implements SubscriptionSink {
       while (newline !== -1) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        await this.handle(line);
+        void this.handle(line);
         newline = buffer.indexOf("\n");
       }
       if (this.closed) return;
     }
-    if (buffer.trim()) await this.handle(buffer);
+    if (buffer.trim()) void this.handle(buffer);
   }
 
   close(): void {

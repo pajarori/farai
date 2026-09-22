@@ -5,6 +5,8 @@ import { CURRENT_CONFIG_VERSION, loadConfig } from "../agent-core/config";
 import { loadModelProfiles } from "../agent-core/model-profiles";
 import { resolveDefaultModel } from "../agent-core/model-registry";
 import { resolveDefaultCatalogModel } from "../agent-core/model-catalog";
+import { DEFAULT_KALI_IMAGE } from "../agent-container/kali";
+import { contentStatus } from "../agent-content";
 import { validateAgainstSchema } from "../agent-core/tool-input-validation";
 import { EVENT_PAYLOADS, OPERATIONS, PROTOCOL_VERSION, isOperationName, type OperationName, type ProtocolDescription } from "./contract";
 
@@ -37,6 +39,7 @@ const HANDLERS: Record<OperationName, Handler> = {
     const configured = resolveDefaultModel();
     const resolved = await resolveDefaultCatalogModel(context.workspace).catch(() => undefined);
     const config = loadConfig(context.workspace);
+    const content = contentStatus().active?.version ?? null;
     return {
       faraiVersion: FARAI_VERSION,
       protocolVersion: PROTOCOL_VERSION,
@@ -45,7 +48,9 @@ const HANDLERS: Record<OperationName, Handler> = {
       model: resolved?.model ?? configured.model ?? "auto",
       baseUrl: resolved?.baseUrl ?? configured.baseUrl,
       modelProviders: loadModelProfiles(context.workspace).map((profile) => profile.name),
-      mcpServers: Object.keys(config.mcpServers ?? {})
+      mcpServers: Object.keys(config.mcpServers ?? {}),
+      kaliImage: DEFAULT_KALI_IMAGE,
+      contentVersion: content
     };
   },
   "session.list": (args, context) => {
@@ -87,7 +92,13 @@ const HANDLERS: Record<OperationName, Handler> = {
     context: await context.runtime.inspectContext(sessionOf(context, args), typeof args.hypotheticalInput === "string" ? args.hypotheticalInput : undefined)
   }),
   "turn.prompt": async (args, context) => {
-    const result = await context.runtime.prompt(sessionOf(context, args), String(args.text));
+    const session = sessionOf(context, args);
+    const text = String(args.text);
+    if (args.async === true) {
+      void context.runtime.prompt(session, text).catch(() => undefined);
+      return { sessionId: session.id, started: true };
+    }
+    const result = await context.runtime.prompt(session, text);
     return { sessionId: result.session.id, response: result.response };
   },
   "turn.cancel": (args, context) => {
