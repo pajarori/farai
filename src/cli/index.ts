@@ -11,7 +11,9 @@ import { FARAI_VERSION } from "../version";
 import { resolveSessionLocation } from "../session-catalog";
 import {
   parseBenchmarkArguments,
+  parseCallArguments,
   parseEvalArguments,
+  parseServeArguments,
   parseInitArguments,
   parseModelArguments,
   parseNoArguments,
@@ -66,6 +68,14 @@ async function main(): Promise<void> {
     case "resume":
       if (wantsHelp(args)) { help("resume"); break; }
       await launchTui(process.cwd(), parseResumeArguments(args));
+      break;
+    case "serve":
+      if (wantsHelp(args)) { help("serve"); break; }
+      await serve(args);
+      break;
+    case "call":
+      if (wantsHelp(args)) { help("call"); break; }
+      await call(args);
       break;
     case "run":
       if (wantsHelp(args)) { help("run"); break; }
@@ -297,14 +307,29 @@ async function updateContent(args: string[]): Promise<void> {
 }
 
 async function run(args: string[]): Promise<void> {
-  const { sessionId, text, json } = parseRunArguments(args);
+  const { sessionId, text, json, stream } = parseRunArguments(args);
   ensureDefaultUserConfig();
   const runtime = new AgentRuntime(process.cwd());
+  const detach = installShutdownSignals(runtime);
   try {
     const session = sessionId
       ? runtime.loadSession(sessionId)
       : await runtime.createSession();
     await runtime.refreshMcp(session, { background: false, force: true }).catch(() => undefined);
+    if (stream) {
+      const { subscribeSessionEvents } = await import("../agent-core/events/transport");
+      const cursor = runtime.store.latestEventSequence(session.id);
+      const subscription = subscribeSessionEvents(runtime.store, session.id, cursor, (event) => {
+        process.stdout.write(`${JSON.stringify(event)}\n`);
+      });
+      try {
+        const result = await runtime.prompt(session, text);
+        process.stdout.write(`${JSON.stringify({ type: "final", sessionId: session.id, response: result.response })}\n`);
+      } finally {
+        subscription.close();
+      }
+      return;
+    }
     const result = await runtime.prompt(session, text);
     if (json) {
       for (const event of result.events) console.log(JSON.stringify(event));
@@ -313,8 +338,77 @@ async function run(args: string[]): Promise<void> {
       console.log(result.response);
     }
   } finally {
+    detach();
     await runtime.shutdown();
   }
+}
+
+async function serve(args: string[]): Promise<void> {
+  const parsed = parseServeArguments(args);
+  if (!parsed.stdio) throw new Error("serve requires a transport; pass --stdio");
+  ensureDefaultUserConfig();
+  const workspace = parsed.workspace ?? process.cwd();
+  const runtime = new AgentRuntime(workspace);
+  const { StdioProtocolServer } = await import("../agent-protocol/stdio");
+  const server = new StdioProtocolServer({ runtime, workspace });
+  const detach = installShutdownSignals(runtime, () => server.close());
+  try {
+    server.hello();
+    await server.readStdin();
+  } finally {
+    detach();
+    server.close();
+    await runtime.shutdown();
+  }
+}
+
+async function call(args: string[]): Promise<void> {
+  const parsed = parseCallArguments(args);
+  ensureDefaultUserConfig();
+  const workspace = parsed.workspace ?? process.cwd();
+  const { dispatch } = await import("../agent-protocol/dispatch");
+  if (parsed.operation === "describe") {
+    const { describeProtocol } = await import("../agent-protocol/dispatch");
+    console.log(JSON.stringify(describeProtocol(), null, 2));
+    return;
+  }
+  const runtime = new AgentRuntime(workspace);
+  const detach = installShutdownSignals(runtime);
+  try {
+    const data = await dispatch(parsed.operation, parsed.args, { runtime, workspace });
+    console.log(JSON.stringify(data, null, 2));
+  } finally {
+    detach();
+    await runtime.shutdown();
+  }
+}
+
+function installShutdownSignals(runtime: AgentRuntime, onSignal?: () => void): () => void {
+  let shuttingDown = false;
+  const handle = (signal: NodeJS.Signals, code: number) => {
+    if (shuttingDown) {
+      process.exit(code);
+      return;
+    }
+    shuttingDown = true;
+    onSignal?.();
+    const force = setTimeout(() => process.exit(code), 10_000);
+    force.unref?.();
+    void runtime.shutdown()
+      .catch(() => undefined)
+      .finally(() => {
+        clearTimeout(force);
+        process.exit(code);
+      });
+  };
+  const onSigint = () => handle("SIGINT", 130);
+  const onSigterm = () => handle("SIGTERM", 143);
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+  return () => {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  };
 }
 
 async function benchmark(args: string[]): Promise<void> {

@@ -472,7 +472,7 @@ export function defaultMcpServers(): Record<string, Record<string, unknown>> {
   return normalizeConfig(Bun.TOML.parse(DEFAULT_CONFIG_TEMPLATE)).mcpServers ?? {};
 }
 
-const CURRENT_CONFIG_VERSION = 7;
+export const CURRENT_CONFIG_VERSION = 7;
 
 function isLegacyPwnoMcpDefault(entry: Record<string, unknown> | undefined): boolean {
   if (!entry || entry.command !== "docker" || !Array.isArray(entry.args)) return false;

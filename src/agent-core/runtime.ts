@@ -1015,7 +1015,7 @@ export class AgentRuntime {
     };
   }
 
-  private listAgentLifecycleEntries(parentSessionId: string): AgentLifecycleEntry[] {
+  listAgentLifecycleEntries(parentSessionId: string): AgentLifecycleEntry[] {
     return this.store.listSessions(10_000, { includeArchived: true })
       .filter((candidate) => candidate.parentId === parentSessionId)
       .map((candidate) => this.agentLifecycleEntry(parentSessionId, candidate))

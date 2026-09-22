@@ -52,6 +52,18 @@ export type RunArguments = {
   sessionId?: string;
   text: string;
   json: boolean;
+  stream: boolean;
+};
+
+export type ServeArguments = {
+  stdio: boolean;
+  workspace?: string;
+};
+
+export type CallArguments = {
+  operation: string;
+  args: unknown;
+  workspace?: string;
 };
 
 export type UpdateArguments =
@@ -187,7 +199,8 @@ export function parseRunArguments(args: string[]): RunArguments {
   const { values, positionals } = parseStrict(args, {
     session: { type: "string" },
     text: { type: "string" },
-    json: { type: "boolean" }
+    json: { type: "boolean" },
+    stream: { type: "boolean" }
   });
   const flaggedText = optionalString(values, "text");
   if (flaggedText !== undefined && positionals.length > 0) throw new Error("run accepts prompt text as either positional arguments or --text, not both");
@@ -196,7 +209,43 @@ export function parseRunArguments(args: string[]): RunArguments {
   return {
     ...optionalProperty("sessionId", optionalString(values, "session")),
     text,
-    json: optionalBoolean(values, "json")
+    json: optionalBoolean(values, "json"),
+    stream: optionalBoolean(values, "stream")
+  };
+}
+
+export function parseServeArguments(args: string[]): ServeArguments {
+  const { values, positionals } = parseStrict(args, {
+    stdio: { type: "boolean" },
+    workspace: { type: "string" }
+  });
+  requirePositionals("serve", positionals, 0, 0);
+  return {
+    stdio: optionalBoolean(values, "stdio"),
+    ...optionalProperty("workspace", optionalString(values, "workspace"))
+  };
+}
+
+export function parseCallArguments(args: string[]): CallArguments {
+  const { values, positionals } = parseStrict(args, {
+    workspace: { type: "string" },
+    args: { type: "string" }
+  });
+  requirePositionals("call", positionals, 1, 2, "call requires an operation name");
+  const operation = positionals[0]!;
+  const inline = optionalString(values, "args") ?? positionals[1];
+  let parsed: unknown;
+  if (inline !== undefined) {
+    try {
+      parsed = JSON.parse(inline);
+    } catch {
+      throw new Error("call arguments must be valid json");
+    }
+  }
+  return {
+    operation,
+    args: parsed,
+    ...optionalProperty("workspace", optionalString(values, "workspace"))
   };
 }
 

@@ -19,16 +19,16 @@ export function validateToolArgs(schema: Record<string, unknown> | undefined, ra
   return validateAgainstSchema(schema, args);
 }
 
-function validateAgainstSchema(schema: Record<string, unknown>, args: unknown): string | undefined {
+export function validateAgainstSchema(schema: Record<string, unknown>, args: unknown, label = "tool input"): string | undefined {
   let validate: ValidateFunction;
   try {
     validate = compiledValidator(schema);
   } catch (error) {
-    return `invalid tool input schema: ${error instanceof Error ? error.message : String(error)}`;
+    return `invalid ${label} schema: ${error instanceof Error ? error.message : String(error)}`;
   }
   if (validate(args)) return undefined;
   const error = validate.errors?.[0];
-  if (!error) return "arguments do not match the tool input schema";
+  if (!error) return `arguments do not match the ${label} schema`;
   return `${formatValidationError(error, schema)}${compositionShapes(error, schema)}`;
 }
 
