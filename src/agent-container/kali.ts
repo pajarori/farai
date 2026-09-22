@@ -458,6 +458,8 @@ export class KaliContainerBackend implements ExecutionBackend {
         }
         const worktrees = join(this.rootWorkspace, ".farai", "worktrees");
         mkdirSync(worktrees, { recursive: true });
+        const mcpRuntime = join(this.rootWorkspace, ".farai", "mcp-runtime");
+        mkdirSync(mcpRuntime, { recursive: true });
         const started = Date.now();
         const result = await this.processRunner("docker", [
           "run",
@@ -470,6 +472,8 @@ export class KaliContainerBackend implements ExecutionBackend {
           `${this.rootWorkspace}:${CONTAINER_WORKSPACE_MOUNT}`,
           "--volume",
           `${CONTAINER_WORKSPACE_MOUNT}/.farai`,
+          "--volume",
+          `${mcpRuntime}:${CONTAINER_WORKSPACE_MOUNT}/.farai/mcp-runtime`,
           "--volume",
           `${worktrees}:${CONTAINER_WORKTREES_MOUNT}`,
           ...(this.identity ? managedContainerLabels(this.identity) : []),
