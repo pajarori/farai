@@ -774,6 +774,7 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
     const operation = typeof input.cellOperation === "string" ? input.cellOperation : "edit";
     const path = typeof input.path === "string" ? ` in ${compactToolPath(input.path)}` : "";
     const index = typeof input.index === "number" ? ` ${input.index}` : "";
+    if (failed) return `${toolFailureLabel(tool)}${index}${path}`;
     const verbs: Record<string, readonly [string, string]> = {
       insert_cell: ["inserted notebook cell", "inserting notebook cell"],
       replace_cell: ["replaced notebook cell", "replacing notebook cell"],

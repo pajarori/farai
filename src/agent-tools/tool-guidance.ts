@@ -119,16 +119,11 @@ const PROPERTY_HINTS: Record<string, string> = {
 };
 
 const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
-  file_write: {
-    path: "workspace-relative destination such as reports/result.md; use /workspace/result.md only when the runtime explicitly exposes that container root, never host paths such as /Users/...",
-    content: "complete file content encoded as one valid JSON string; for large or structured edits prefer file_patch or file_replace to avoid malformed arguments"
-  },
-  file_replace: {
-    path: "workspace-relative file path; read the file first so oldString is copied exactly",
+  file_manage: {
+    path: "workspace-relative path such as reports/result.md; use /workspace/result.md only when the runtime explicitly exposes that container root, never host paths such as /Users/...; for replace, read the file first so oldString is copied exactly",
+    content: "complete file content encoded as one valid JSON string; for large or structured edits prefer patch or replace over write to avoid malformed arguments",
     oldString: "exact unique block copied from the file, including whitespace and line endings",
-    newString: "replacement block; use an empty string only when intentionally deleting the match"
-  },
-  file_patch: {
+    newString: "replacement block; use an empty string only when intentionally deleting the match",
     patch: "reviewable Farai patch with explicit file paths and contextual hunks; use this for multi-file or multi-hunk changes, not a JSON document"
   },
   script_write: {
