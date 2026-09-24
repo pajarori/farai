@@ -1,9 +1,26 @@
 import type { Session, ToolDefinition } from "../types";
 import { assertCanonicalToolName, canonicalToolName } from "../tool-names";
 import { shellTools } from "./shell";
-import { reconTools } from "./recon";
-import { filesystemTools } from "./filesystem";
-import { gitTools } from "./git";
+import { networkScanTool } from "./recon/port-scan";
+import { subdomainEnumTool } from "./recon/subdomain-enum";
+import { dnsProbeTool } from "./recon/dns-probe";
+import { httpProbeTool } from "./recon/http-probe";
+import { tlsProbeTool } from "./recon/tls-probe";
+import { urlDiscoverTool } from "./recon/url-discover";
+import { webCrawlTool } from "./recon/web-crawl";
+import { vulnerabilityScanTool } from "./recon/vulnerability-scan";
+import { vulnerabilityLookupTool } from "./recon/vulnerability-lookup";
+import { httpRequestTool } from "./recon/http-request";
+import { dirEnumTool } from "./recon/dir-enum";
+import { fsReadTool } from "./filesystem/read";
+import { fsListTool } from "./filesystem/list";
+import { fsGrepTool } from "./filesystem/grep";
+import { fsWriteTool } from "./filesystem/write";
+import { fsEditTool } from "./filesystem/edit";
+import { patchApplyTool } from "./filesystem/patch-apply";
+import { notebookEditTool } from "./filesystem/notebook-edit";
+import { gitStatusTool } from "./git/status";
+import { gitDiffTool } from "./git/diff";
 import { knowledgeTools } from "./knowledge";
 import { reportTools } from "./report";
 import { codegenTools } from "./codegen";
@@ -76,12 +93,38 @@ const findingManageTool = facadeTool("finding_manage", "Calculate CVSS and creat
   update_finding: reportTools.find((tool) => tool.name === "report_update_finding")!
 }, { visibility: "verification" });
 const kaliSearchTool = { ...kaliTools.find((tool) => tool.name === "kali_search")!, name: "kali_search" };
+const reconManageTool = facadeTool("recon_manage", "Passive and light-active attack-surface discovery: subdomains, DNS, live services, TLS, URL discovery, and crawling.", {
+  asset_subdomains: subdomainEnumTool,
+  dns_resolve: dnsProbeTool,
+  service_probe: httpProbeTool,
+  tls_inspect: tlsProbeTool,
+  url_discover: urlDiscoverTool,
+  web_crawl: webCrawlTool,
+  web_directory: dirEnumTool
+}, { visibility: "recon" });
+const reconScanManageTool = facadeTool("recon_scan_manage", "Active port and vulnerability scanning, vulnerability intelligence lookup, and exact crafted HTTP requests.", {
+  network_scan: networkScanTool,
+  vulnerability_scan: vulnerabilityScanTool,
+  vulnerability_lookup: vulnerabilityLookupTool,
+  http_request: httpRequestTool
+}, { visibility: "recon" });
+const fileManageTool = facadeTool("file_manage", "Read, write, edit, list, search, and patch files, and edit notebook cells, in the managed workspace.", {
+  read: fsReadTool,
+  write: fsWriteTool,
+  replace: fsEditTool,
+  list: fsListTool,
+  search: fsGrepTool,
+  patch: patchApplyTool,
+  notebook_cell: notebookEditTool
+}, { visibility: "workspace" });
+const gitManageTool = facadeTool("git_manage", "Inspect the managed workspace's Git status and diffs.", { status: gitStatusTool, diff: gitDiffTool }, { visibility: "workspace", mutates: false });
 
 export const baseTools: ToolDefinition[] = [
   ...shellTools,
-  ...reconTools,
-  ...filesystemTools,
-  ...gitTools,
+  reconManageTool,
+  reconScanManageTool,
+  fileManageTool,
+  gitManageTool,
   knowledgeManageTool,
   taskManageTool,
   findingManageTool,

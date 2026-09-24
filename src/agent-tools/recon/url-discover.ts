@@ -3,7 +3,7 @@ import { assertObject } from "../../utils";
 import { timeoutBackgroundResult } from "../shared/background-result";
 import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { inputFileCommand, integer, optionalStringList, parseJsonLines, projectDiscoveryResult, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
+import { inputFileCommand, integer, optionalStringList, parseJsonLines, positiveInteger, projectDiscoveryResult, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
 import { urlInventoryObservations } from "./shared/url-inventory";
 
 const PUBLIC_SOURCES = ["alienvault", "commoncrawl", "waybackarchive"] as const;
@@ -29,11 +29,11 @@ function selectedUrlSources(args: Record<string, unknown>): string[] {
 }
 
 export function buildUrlDiscoverCommand(args: Record<string, unknown>): string {
-  const domains = stringList(args.domains, "domains", 500);
+  const domains = stringList(args.targets, "targets", 500);
   const selectedSources = selectedUrlSources(args);
   const command = [
     "-jsonl", "-silent", "-nc", "-duc", "-cs", "-s", selectedSources.join(","),
-    "-timeout", String(integer(args.timeoutSeconds, 30, 1, 120)), "-max-time", String(integer(args.maxMinutes, 10, 1, 60)),
+    "-timeout", String(positiveInteger(args.timeoutSeconds, 30)), "-max-time", String(integer(args.maxMinutes, 10, 1, 60)),
     "-rl", String(integer(args.rateLimit, 50, 1, 1_000))
   ];
   const scope = typeof args.scope === "string" ? args.scope : "registrable_domain";
@@ -71,12 +71,12 @@ export const urlDiscoverTool: ToolDefinition = {
   description: "Discover historical and passive URLs associated with one or many domains through ProjectDiscovery urlfinder using public AlienVault, Common Crawl, and Wayback Archive sources. Use limit to bound returned records. This does not request every discovered URL; validate selected URLs with service_probe, web_crawl, browser tools, or http_request.",
   inputSchema: {
     type: "object",
-    required: ["domains"],
+    required: ["targets"],
     properties: {
-      domains: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 500, uniqueItems: true }] },
+      targets: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 500, uniqueItems: true }], description: "one or many registrable domains to discover urls for" },
       sources: { type: "array", items: { type: "string", enum: [...PUBLIC_SOURCES] }, maxItems: PUBLIC_SOURCES.length, uniqueItems: true },
       scope: { type: "string", enum: ["fqdn", "registrable_domain", "none"] },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 120 },
+      timeoutSeconds: { type: "integer" },
       maxMinutes: { type: "integer", minimum: 1, maximum: 60 },
       rateLimit: { type: "integer", minimum: 1, maximum: 1_000 },
       limit: { type: "integer", minimum: 1, maximum: 10_000 }

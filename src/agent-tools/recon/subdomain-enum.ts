@@ -31,8 +31,8 @@ export function normalizeDomainInput(value: string): string {
   return normalized;
 }
 
-export function buildSubdomainSourceCommand(source: SubdomainSource, domain: string, timeoutMs: number): string {
-  const seconds = Math.max(5, Math.ceil(timeoutMs / 1_000));
+export function buildSubdomainSourceCommand(source: SubdomainSource, domain: string, timeoutSeconds: number): string {
+  const seconds = Math.max(1, Math.ceil(timeoutSeconds));
   if (source === "subfinder") {
     return `timeout ${seconds}s subfinder -d ${shellQuote(domain)} -silent -json -collect-sources`;
   }
@@ -102,11 +102,11 @@ export const subdomainEnumTool: ToolDefinition = {
   description: "Enumerate subdomains for a registrable domain with a fast passive source, then validate the suffix and deduplicate names. Additional certificate-transparency or Amass sources can be selected explicitly when broader coverage is worth the extra latency.",
   inputSchema: {
     type: "object",
-    required: ["domain"],
+    required: ["target"],
     properties: {
-      domain: { type: "string" },
+      target: { type: "string", description: "registrable domain to enumerate subdomains for" },
       sources: { type: "array", items: { type: "string", enum: [...SUBDOMAIN_SOURCES] }, uniqueItems: true },
-      timeoutMs: { type: "integer", minimum: 5_000, maximum: 90_000 },
+      timeoutSeconds: { type: "integer" },
       limit: { type: "integer", minimum: 1, maximum: 1_000 }
     },
     additionalProperties: false
@@ -118,15 +118,15 @@ export const subdomainEnumTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const domain = normalizeDomainInput(asString(args.domain, "domain"));
+    const domain = normalizeDomainInput(asString(args.target, "target"));
     const requested = Array.isArray(args.sources) ? args.sources.filter((source): source is SubdomainSource => SUBDOMAIN_SOURCES.includes(source as SubdomainSource)) : [];
     const sources = [...new Set(requested.length ? requested : ["subfinder"] as SubdomainSource[])];
-    const timeoutMs = typeof args.timeoutMs === "number" && Number.isInteger(args.timeoutMs) ? Math.max(5_000, Math.min(90_000, args.timeoutMs)) : 45_000;
+    const timeoutSeconds = typeof args.timeoutSeconds === "number" && Number.isInteger(args.timeoutSeconds) && args.timeoutSeconds > 0 ? args.timeoutSeconds : 45;
     const limit = typeof args.limit === "number" && Number.isInteger(args.limit) ? Math.max(1, Math.min(1_000, args.limit)) : 200;
     const { onOutputChunk: _onOutputChunk, ...quietContext } = context;
     const kali = backend(quietContext);
     const results = await Promise.all(sources.map(async (source) => {
-      const result = await kali.exec(buildSubdomainSourceCommand(source, domain, timeoutMs), timeoutMs + 5_000, context.signal, 2_000_000);
+      const result = await kali.exec(buildSubdomainSourceCommand(source, domain, timeoutSeconds), timeoutSeconds * 1_000 + 5_000, context.signal, 2_000_000);
       return parseSubdomainSourceResult(source, domain, result);
     }));
     const names = [...new Set(results.flatMap((item) => item.names))].sort((left, right) => left.localeCompare(right)).slice(0, limit);

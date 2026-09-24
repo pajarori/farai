@@ -7,10 +7,10 @@ export const campaignCreateTool: ToolDefinition = {
   description: "Create a persistent campaign for a multi-step authorized security objective, attach the current session, and start its durable execution run. Choose this when the objective needs multiple waves, shared evidence, hypotheses, verification, or a report; do not use it for a one-off action or ordinary conversation. The model decides when this boundary is appropriate.",
   inputSchema: {
     type: "object",
-    required: ["name", "kind"],
+    required: ["name", "campaignKind"],
     properties: {
       name: { type: "string" },
-      kind: { type: "string", enum: ["pentest", "bug_bounty", "ctf", "lab"] },
+      campaignKind: { type: "string", enum: ["pentest", "bug_bounty", "ctf", "lab"] },
       objective: { type: "string", description: "the complete durable objective to pursue across waves" }
     }
   },
@@ -23,7 +23,7 @@ export const campaignCreateTool: ToolDefinition = {
     assertObject(args, "args");
     const existingRun = context.store.listCampaignRuns?.(context.rootWorkspace ?? context.workspace).find((item) => (item.rootSessionId === context.session.id || item.id === context.session.campaignRunId) && !["completed", "cancelled", "failed"].includes(item.status));
     if (existingRun) throw new Error(`session already has a campaign run: ${existingRun.id}`);
-    const kind = asString(args.kind, "kind") as Campaign["kind"];
+    const kind = asString(args.campaignKind, "campaignKind") as Campaign["kind"];
     const allowedKinds = ["pentest", "bug_bounty", "ctf", "lab"] as const;
     if (!allowedKinds.includes(kind as typeof allowedKinds[number])) throw new Error(`unsupported campaign kind: ${kind}; use one of: ${allowedKinds.join(", ")}`);
     const campaign = context.store.createCampaign?.({

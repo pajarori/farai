@@ -11,7 +11,8 @@ export const fsWriteTool: ToolDefinition = {
   inputSchema: {
     type: "object",
     required: ["path", "content"],
-    properties: { path: { type: "string" }, content: { type: "string" } }
+    properties: { path: { type: "string" }, content: { type: "string" } },
+    additionalProperties: false
   },
   mutates: true,
   timeoutMs: Number.POSITIVE_INFINITY,

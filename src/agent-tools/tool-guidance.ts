@@ -17,8 +17,6 @@ const PROPERTY_HINTS: Record<string, string> = {
   confidence: "confidence from 0 to 1 based on observed support, not a severity score",
   confirm: "explicit true acknowledgement for an irreversible cleanup operation",
   content: "complete text content to write; keep JSON valid and use a workspace-relative path",
-  domain: "registrable domain to enumerate, without a scheme or path",
-  domains: "one or more domains; use a string for one target or a bounded array for several",
   depth: "maximum crawl or snapshot depth; keep it bounded to the required scope",
   detail: "requested output detail level from the declared enum",
   direction: "graph traversal direction from the declared relationship enum",
@@ -105,8 +103,8 @@ const PROPERTY_HINTS: Record<string, string> = {
   targets: "one or more authorized hosts, IPs, URLs, or services; use a string for one target or a bounded unique array",
   text: "literal text, note, message, or replacement content as defined by the tool",
   textGone: "text that must disappear before a browser wait succeeds",
-  timeoutMs: "bounded operation timeout in milliseconds",
-  timeoutSeconds: "bounded operation timeout in seconds; keep it within the schema maximum",
+  timeoutMs: "operation timeout in milliseconds; unbounded, set as high as the task needs",
+  timeoutSeconds: "operation timeout in seconds; unbounded, set as high as the task needs",
   title: "concise human-readable title for the record, finding, task, or child session",
   topPorts: "named top-port preset used only when explicit ports are omitted",
   type: "declared record, field, or presentation type; use only the values accepted by this schema",
@@ -172,7 +170,7 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
     sessionId: "existing idle child session UUID only when continuing that child; omit to create a new child context"
   },
   browser_context: {
-    action: "create makes an isolated identity, list enumerates contexts, and close disposes one; use a stable name or UUID for follow-up calls",
+    contextAction: "create makes an isolated identity, list enumerates contexts, and close disposes one; use a stable name or UUID for follow-up calls",
     browser: "context name or UUID; every browser operation in the same identity flow must pass this value"
   },
   browser_network_requests: {
@@ -183,12 +181,6 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
     index: "one-based entry index returned by browser_network_requests; it becomes invalid after the log is reset",
     part: "return only request-headers, request-body, response-headers, or response-body when a bounded view is enough"
   },
-  http_request: {
-    mode: "protocol_test permits exact pathAsIs or HTTP version behavior; scripted_test is for an intentional custom request sequence",
-    network: "proxy captures through the managed mitmproxy; direct deliberately bypasses capture",
-    pathAsIs: "required for exact-path tests where URL normalization would change the request",
-    httpVersion: "select auto, 1.0, 1.1, 2, or 3 only when protocol behavior is part of the question"
-  },
   web_search: {
     query: "public discovery query; use this before web_fetch when looking for sources or current information",
     limit: "maximum ranked results to return; select a result URL before fetching its contents"
@@ -197,16 +189,18 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
     url: "one selected public URL to read; this does not search, execute JavaScript, or preserve browser cookies",
     maxChars: "bounded readable extraction size; request a larger value only when the source requires it"
   },
-  service_probe: {
-    targets: "hosts, IPs, or URLs to probe with the fast native concurrent service engine (status, content type, size, final url, timing)",
-    mode: "fast is the default bounded inventory; choose detail only when technology, ASN, CDN/WAF, redirect, or TLS enrichment is needed",
-    redirects: "none, same_host, or all; none is the fast default and same_host is for redirect-aware inventory",
-    includeTls: "include certificate metadata when true; disable only when TLS data is unnecessary"
+  recon_manage: {
+    redirects: "none, same_host, or all; none is the fast default and same_host is for redirect-aware inventory"
   },
-  vulnerability_scan: {
-    targets: "authorized hosts or URLs for the local pinned Nuclei template set",
+  recon_scan_manage: {
+    scanDepth: "fast (default) uses bounded native TCP connects; discover uses naabu for larger SYN scans; nmap and deep add explicit service enrichment",
+    connectTimeoutMs: "per-connection timeout in milliseconds for network_scan; distinct from another operation's overall timeoutSeconds budget",
+    scanBreadth: "targeted (default) excludes fuzz and headless template tags; comprehensive includes them",
     oast: "enable only when an out-of-band callback is intentionally configured and in scope",
-    includeRawEvidence: "include bounded matcher evidence for a finding candidate; do not treat a scanner hit as verified proof"
+    includeRawEvidence: "include bounded matcher evidence for a finding candidate; do not treat a scanner hit as verified proof",
+    pathAsIs: "required for exact-path http_request tests where URL normalization would change the request",
+    httpVersion: "select auto, 1.0, 1.1, 2, or 3 only when protocol behavior is part of the http_request question",
+    network: "http_request only: proxy captures through the managed mitmproxy; direct deliberately bypasses capture"
   },
   report_add_finding: {
     cvssVector: "complete CVSS:3.1 base vector; calculate it with cvss_calculate first when any metric is uncertain",
@@ -228,7 +222,7 @@ const TOOL_PROPERTY_HINTS: Record<string, Record<string, string>> = {
     evidenceLevel: "strength of support from signal through independently_verified; never use it as a severity field"
   },
   campaign_verify: {
-    status: "finding lifecycle transition; verified requires a passed campaign_test and strong linked evidence",
+    findingStatus: "finding lifecycle transition; verified requires a passed campaign_test and strong linked evidence",
     testAttemptId: "passed campaign_test UUID required for verified",
     duplicateOf: "canonical finding UUID required when status is duplicate"
   },
@@ -359,30 +353,14 @@ const EXACT_GUIDANCE: Record<string, string> = {
   proxy_manage: "set operation to scope, policy, flows, flow_get, sitemap, replay, intercept, or clear and pass operation-specific fields.",
   task_manage: "set operation to add, update, list, or plan and pass operation-specific fields.",
   worktree_manage: "set operation to enter or exit and pass operation-specific fields.",
+  recon_manage: "set operation to asset_subdomains, dns_resolve, service_probe, tls_inspect, url_discover, web_crawl, or web_directory and pass operation-specific fields; dns_resolve, service_probe, and tls_inspect validate candidates and are not passive discovery sources, so run asset_subdomains first when starting from a bare domain.",
+  recon_scan_manage: "set operation to network_scan, vulnerability_scan, vulnerability_lookup, or http_request and pass operation-specific fields; network_scan performs TCP discovery only unless scanDepth=nmap or deep is set, vulnerability_scan matches are candidate evidence and not verified findings, and http_request sends one exact request.",
+  file_manage: "set operation to read, write, replace, list, search, patch, or notebook_cell and pass operation-specific fields; prefer replace or patch over write for an existing file, and read a file before replace so oldString is copied exactly.",
+  git_manage: "set operation to status or diff and pass operation-specific fields.",
   command_run: "run a real command in the managed Kali workspace when no purpose-built tool models the task. use command_input with the returned process id for listeners, servers, and interactive commands. choose network=proxy only when shell HTTP traffic must be captured; direct is deliberate bypass.",
   command_input: "poll only a process id returned by command_run. pass chars only to an interactive process waiting for stdin; do not start another command or use a child-agent session id.",
   command_poll: "poll only an id returned by a background tool. pass input only to an interactive process waiting for stdin; do not start another command or use a child session id.",
   command_stop: "stop one background job or process by its returned id. use agent_manage operation=interrupt or operation=close for child agents.",
-  network_scan: "use for fast TCP port discovery with naabu. choose mode=nmap or mode=deep only when explicit service identification is needed; use service_probe for HTTP inventory and command_run for UDP, custom NSE, evasion, or specialized scan behavior.",
-  asset_subdomains: "perform passive subdomain discovery from independent certificate, DNS, and archive sources. validate returned names with dns_resolve or service_probe before testing them.",
-  dns_resolve: "resolve discovered names and inspect selected DNS records with wildcard filtering. this validates candidates; it is not a passive discovery source.",
-  service_probe: "use the fast concurrent HTTP engine for live service inventory. choose mode=detail only when technology, ASN, CDN/WAF, redirect, or TLS enrichment is needed; use browser tools for stateful interaction.",
-  tls_inspect: "use ProjectDiscovery tlsx for TLS inventory. enable version or cipher enumeration only for a focused assessment because it creates additional handshakes.",
-  url_discover: "pass domains and optionally limit, sources, scope, timeoutSeconds, maxMinutes, or rateLimit to build a passive historical URL corpus. validate selected URLs later; this tool does not request every discovered URL.",
-  web_crawl: "crawl authorized live targets with the fast native host crawler for breadth-first same-scope route mapping (static only). use browser tools for JavaScript-rendered or authenticated workflows.",
-  vulnerability_scan: "run the pinned local Nuclei templates against authorized targets. treat matches as candidate evidence, not verified findings; enable oast only for an intentional callback test.",
-  vulnerability_lookup: "query advisory intelligence by ids or filters, or set source=exploitdb for the local Exploit-DB index. it informs prioritization and does not prove that a target is vulnerable or exploitable.",
-  http_request: "send one exact request when method, headers, body, redirects, path spelling, or HTTP version matters. use web_fetch for reading public pages and browser tools for cookies or forms.",
-  web_directory: "run bounded ffuf content discovery against a URL containing FUZZ. use command_run for custom matchers, recursion, or multiple injection points.",
-  file_read: "read one workspace file, bounded PDF pages, or one directory level. use file_list for recursive discovery and file_search for content search.",
-  file_list: "discover workspace paths recursively while excluding Farai state and dependency trees. use file_read for the selected file.",
-  file_search: "search workspace text with a regular expression and bounded results. use include to narrow filenames.",
-  file_write: "use only when the complete file is known. pass a workspace-relative path and one valid JSON string; for large or coordinated edits prefer file_replace or file_patch.",
-  file_replace: "replace one exact text block after reading the file. the match must be unique unless replaceAll=true; use file_patch for coordinated changes.",
-  file_patch: "apply reviewable additions, updates, or deletions across one or more workspace files. this expects a patch format, not a JSON object or host path.",
-  notebook_cell: "edit one notebook cell by zero-based index without executing the notebook. use the operation-specific cellType and source fields.",
-  git_status: "read the active workspace Git state before or after edits; it does not show full patch contents.",
-  git_diff: "inspect exact unstaged or staged patch content, optionally for one path; use git_status for the file overview.",
   notes_add: "persist durable context or decisions that are not formal evidence, hypotheses, or failed attempts.",
   evidence_save: "persist bounded factual evidence before making a security claim, then link its returned UUID to campaign records or findings.",
   memory_add_hypothesis: "store a keyed session hypothesis with confidence so later turns can test it instead of repeating the same reasoning.",

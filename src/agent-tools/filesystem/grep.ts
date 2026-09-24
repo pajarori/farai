@@ -9,7 +9,8 @@ export const fsGrepTool: ToolDefinition = {
   inputSchema: {
     type: "object",
     required: ["pattern"],
-    properties: { pattern: { type: "string" }, path: { type: "string" }, include: { type: "string" }, limit: { type: "number" } }
+    properties: { pattern: { type: "string" }, path: { type: "string" }, include: { type: "string" }, limit: { type: "number" } },
+    additionalProperties: false
   },
   mutates: false,
   timeoutMs: Number.POSITIVE_INFINITY,

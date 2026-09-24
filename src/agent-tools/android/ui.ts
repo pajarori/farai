@@ -353,7 +353,7 @@ export const androidUiWaitForTool: ToolDefinition = {
       resourceId: { type: "string", description: "resource-id to wait for" },
       text: { type: "string", description: "visible text to wait for (substring match)" },
       contentDesc: { type: "string", description: "content-desc to wait for (substring match)" },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 120, description: "maximum seconds to wait (default 15)" },
+      timeoutSeconds: { type: "integer", description: "maximum seconds to wait (default 15)" },
       serial: SERIAL_PROP
     },
     additionalProperties: false
@@ -371,7 +371,7 @@ export const androidUiWaitForTool: ToolDefinition = {
       ...(typeof args.contentDesc === "string" ? { contentDesc: args.contentDesc } : {})
     };
     if (!selector.resourceId && !selector.text && !selector.contentDesc) throw new Error("provide at least one of resourceId, text, or contentDesc");
-    const timeoutSeconds = typeof args.timeoutSeconds === "number" && Number.isInteger(args.timeoutSeconds) ? Math.max(1, Math.min(120, args.timeoutSeconds)) : 15;
+    const timeoutSeconds = typeof args.timeoutSeconds === "number" && Number.isInteger(args.timeoutSeconds) && args.timeoutSeconds > 0 ? args.timeoutSeconds : 15;
     const serial = await resolveDevice(context, args.serial);
     const deadline = Date.now() + timeoutSeconds * 1_000;
     let attempts = 0;

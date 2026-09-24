@@ -86,7 +86,7 @@ import { ToolCatalog } from "../agent-tools/catalog";
 import { repositories, type FaraiRepositories } from "../agent-store/repositories";
 import { ThreadManager } from "./thread-manager";
 import { TurnEngine } from "./turn-engine";
-import { hydrateReconAction, reconExecutionWaves } from "./recon-orchestration";
+import { hydrateReconAction, reconExecutionWaves, reconOperation } from "./recon-orchestration";
 
 export { activeBackgroundJobs } from "./loop/background";
 export type { ActiveBackgroundJob } from "./loop/background";
@@ -100,7 +100,7 @@ const TOOL_HUMAN_RESULT_MAX_BYTES = 24 * 1024;
 const LOOP_SUPERVISION_NO_PROGRESS_STEPS = 12;
 const LOOP_SUPERVISION_STEER_INTERVAL = 5;
 const LOOP_PATTERN_MAX_PERIOD = 8;
-const PROGRESS_ACTION_TOOLS = new Set(["http_request", "asset_subdomains", "dns_resolve", "service_probe", "tls_inspect", "url_discover", "web_crawl", "vulnerability_scan", "vulnerability_lookup", "web_directory", "network_scan", "file_replace", "file_write", "file_patch", "script_write", "campaign_manage", "callback_manage", "finding_manage"]);
+const PROGRESS_ACTION_TOOLS = new Set(["recon_manage", "recon_scan_manage", "file_manage", "script_write", "campaign_manage", "callback_manage", "finding_manage"]);
 const WRAPUP_MODEL_TIMEOUT_MS = 15_000;
 const WRAPUP_CONTINUATION_ATTEMPTS = 3;
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 2_000;
@@ -2714,7 +2714,7 @@ export class AgentRuntime {
       for (const outcome of waveOutcomes) {
         if (!outcome.record) continue;
         const metadata = this.toolResultMetadata(session.id, outcome.record.id);
-        if (metadata) observations.push({ tool: canonicalToolName(outcome.record.tool), metadata });
+        if (metadata) observations.push({ tool: reconOperation({ tool: canonicalToolName(outcome.record.tool), args: outcome.record.args }), metadata });
       }
       if (waveOutcomes.some((outcome) => outcome.cancelled)) break;
     }
@@ -3980,7 +3980,7 @@ export class AgentRuntime {
     if (command === "/scan") {
       const target = rest[0];
       if (!target) return "Usage: /scan <target>";
-      await this.runTool(session, "network_scan", { target }, { turn, assistantMessage });
+      await this.runTool(session, "recon_scan_manage", { operation: "network_scan", target }, { turn, assistantMessage });
       return `Scan requested for ${target}.`;
     }
     if (command === "/shell") {

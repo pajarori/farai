@@ -44,8 +44,8 @@ export const requestUserInputTool: ToolDefinition = {
     if (!context.requestUserInput) throw new Error("interactive user input is unavailable in this runtime");
     if (!Array.isArray(args.questions) || args.questions.length < 1 || args.questions.length > 3) throw new Error("questions must contain one to three items");
     const timeoutSeconds = args.timeoutSeconds === undefined ? 120 : args.timeoutSeconds;
-    if (!Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) < 10 || (timeoutSeconds as number) > 3_600) {
-      throw new Error("timeoutSeconds must be an integer from 10 to 3600");
+    if (!Number.isInteger(timeoutSeconds) || (timeoutSeconds as number) <= 0) {
+      throw new Error("timeoutSeconds must be a positive integer");
     }
     const seen = new Set<string>();
     const questions = args.questions.map((raw, index): UserInputQuestion => {

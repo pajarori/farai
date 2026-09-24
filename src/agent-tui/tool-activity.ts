@@ -187,7 +187,7 @@ function toolOutcome(
     return [contentType, bytes !== undefined ? formatBytes(bytes) : undefined].filter(Boolean).join(" · ") || result?.summary;
   }
   if (tool === "browser_context") {
-    const action = stringValue(metadata.browserContextAction) ?? stringValue(args.action);
+    const action = stringValue(metadata.browserContextAction) ?? stringValue(args.contextAction);
     if (action === "list") return `${arrayValue(metadata.browserContexts).length} browser context${arrayValue(metadata.browserContexts).length === 1 ? "" : "s"}`;
     return stringValue(metadata.browserContextName) ?? result?.summary;
   }

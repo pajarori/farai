@@ -8,9 +8,9 @@ export const campaignCheckpointTool: ToolDefinition = {
   description: "Record the current campaign wave decision without ending the campaign by model convention. Use continue when another wave should start, waiting when an external event or user input is required, blocked when a concrete blocker cannot be resolved, and complete only when the objective is actually satisfied and durable evidence or findings are ready.",
   inputSchema: {
     type: "object",
-    required: ["status", "summary"],
+    required: ["checkpointStatus", "summary"],
     properties: {
-      status: { type: "string", enum: ["continue", "waiting", "blocked", "complete"] },
+      checkpointStatus: { type: "string", enum: ["continue", "waiting", "blocked", "complete"] },
       summary: { type: "string" },
       blocker: { type: "string" },
       evidenceIds: { type: "array", items: { type: "string" } }
@@ -24,7 +24,7 @@ export const campaignCheckpointTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     if (!context.campaignControl) throw new Error("campaign lifecycle is unavailable");
-    const status = asString(args.status, "status") as "continue" | "waiting" | "blocked" | "complete";
+    const status = asString(args.checkpointStatus, "checkpointStatus") as "continue" | "waiting" | "blocked" | "complete";
     const allowedStatuses = ["continue", "waiting", "blocked", "complete"] as const;
     if (!allowedStatuses.includes(status)) throw new Error(`unsupported campaign checkpoint status: ${status}; use one of: ${allowedStatuses.join(", ")}`);
     const summary = asString(args.summary, "summary").trim();

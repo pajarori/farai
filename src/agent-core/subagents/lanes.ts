@@ -24,7 +24,7 @@ export const BUILTIN_LANES: LaneDefinition[] = [
       "Deduplicate assets, preserve exact evidence, and record the source and confidence of each item. Return a structured inventory: subdomains/hosts, resolved DNS, live services with status code and detected technology, discovered URLs and paths, and TLS facts — separating confirmed from uncertain. End with coverage gaps and the highest-value next recon steps for the parent."
     ].join("\n\n"),
     tools: [
-      "asset_subdomains", "dns_resolve", "service_probe", "tls_inspect", "url_discover", "web_crawl", "web_directory",
+      "recon_manage",
       "kali_search", "command_run", "command_input", "command_poll", "command_stop",
       "campaign_manage", "knowledge_manage", "output_read", "agent_manage"
     ]

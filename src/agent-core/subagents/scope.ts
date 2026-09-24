@@ -1,7 +1,7 @@
 import type { Session, ToolDefinition } from "../../types";
 import { canonicalToolName } from "../../tool-names";
 
-const SHARED_WORKSPACE_EDIT_TOOLS = new Set(["file_write", "file_replace", "file_patch", "script_write"]);
+const SHARED_WORKSPACE_EDIT_TOOLS = new Set(["file_manage", "script_write"]);
 const TOOL_SCOPE_ALIASES = new Map([
   ["shell", "command_run"]
 ]);

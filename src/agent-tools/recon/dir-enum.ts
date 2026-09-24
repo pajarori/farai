@@ -16,9 +16,9 @@ export function summarizeFfufOutput(raw: string): string {
   }
 }
 
-export function buildDirEnumCommand(url: string, wordlist: string, options: { timeoutSeconds?: number; threads?: number; rateLimit?: number; maxTimeSeconds?: number } = {}): string {
-  if (!url.includes("FUZZ")) throw new Error("url must contain the FUZZ marker");
-  const timeoutSeconds = Math.max(1, Math.min(30, Math.floor(options.timeoutSeconds ?? 3)));
+export function buildDirEnumCommand(target: string, wordlist: string, options: { timeoutSeconds?: number; threads?: number; rateLimit?: number; maxTimeSeconds?: number } = {}): string {
+  if (!target.includes("FUZZ")) throw new Error("target must contain the FUZZ marker");
+  const timeoutSeconds = Math.max(1, Math.floor(options.timeoutSeconds ?? 3));
   const threads = Math.max(1, Math.min(100, Math.floor(options.threads ?? 40)));
   const rateLimit = Math.max(0, Math.min(10_000, Math.floor(options.rateLimit ?? 0)));
   const maxTimeSeconds = Math.max(1, Math.min(120, Math.floor(options.maxTimeSeconds ?? 30)));
@@ -28,7 +28,7 @@ export function buildDirEnumCommand(url: string, wordlist: string, options: { ti
     `wordlist=${JSON.stringify(wordlist)}`,
     'for candidate in "$wordlist" /usr/share/wordlists/dirb/common.txt /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt /usr/share/dirb/wordlists/common.txt; do if [ -f "$candidate" ]; then wordlist="$candidate"; break; fi; done',
     'if [ ! -f "$wordlist" ]; then echo "no wordlist found; install seclists or pass an existing wordlist path" >&2; exit 2; fi',
-    `ffuf -u ${JSON.stringify(url)} -w "$wordlist" -t ${threads} -timeout ${timeoutSeconds} -maxtime ${maxTimeSeconds} -ac -ach${rateLimit ? ` -rate ${rateLimit}` : ""} -o "$output" -of json -noninteractive >/dev/null`,
+    `ffuf -u ${JSON.stringify(target)} -w "$wordlist" -t ${threads} -timeout ${timeoutSeconds} -maxtime ${maxTimeSeconds} -ac -ach${rateLimit ? ` -rate ${rateLimit}` : ""} -o "$output" -of json -noninteractive >/dev/null`,
     'status=$?',
     'if [ -s "$output" ]; then cat "$output"; fi',
     'exit "$status"'
@@ -40,11 +40,11 @@ export const dirEnumTool: ToolDefinition = {
   description: "Run bounded web content discovery with ffuf against a URL containing the FUZZ marker. The tool applies request timeout, thread, rate, and wall-clock budgets; use command_run only for custom matchers, filters, recursion, headers, or multiple injection points.",
   inputSchema: {
     type: "object",
-    required: ["url"],
+    required: ["target"],
     properties: {
-      url: { type: "string" },
+      target: { type: "string", description: "base url containing the FUZZ marker, for example https://example.com/FUZZ" },
       wordlist: { type: "string" },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 },
+      timeoutSeconds: { type: "integer" },
       threads: { type: "integer", minimum: 1, maximum: 100 },
       rateLimit: { type: "integer", minimum: 0, maximum: 10_000 },
       maxTimeSeconds: { type: "integer", minimum: 1, maximum: 120 }
@@ -58,14 +58,14 @@ export const dirEnumTool: ToolDefinition = {
   renderModel: defaultModelRenderer,
   run: async (args, context) => {
     assertObject(args, "args");
-    const url = asString(args.url, "url");
+    const target = asString(args.target, "target");
     const wordlist = typeof args.wordlist === "string" ? args.wordlist : "/usr/share/wordlists/dirb/common.txt";
     const maxTimeSeconds = typeof args.maxTimeSeconds === "number" && Number.isInteger(args.maxTimeSeconds) ? Math.max(1, Math.min(120, args.maxTimeSeconds)) : 30;
     const options: { timeoutSeconds?: number; threads?: number; rateLimit?: number; maxTimeSeconds: number } = { maxTimeSeconds };
     if (typeof args.timeoutSeconds === "number") options.timeoutSeconds = args.timeoutSeconds;
     if (typeof args.threads === "number") options.threads = args.threads;
     if (typeof args.rateLimit === "number") options.rateLimit = args.rateLimit;
-    const command = buildDirEnumCommand(url, wordlist, options);
+    const command = buildDirEnumCommand(target, wordlist, options);
     const kali = backend(context);
     const result = await kali.exec(command, maxTimeSeconds * 1_000 + 5_000, context.signal, 8_000_000);
     const converted = timeoutBackgroundResult("web_directory", kali, result);

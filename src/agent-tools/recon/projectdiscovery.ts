@@ -52,6 +52,10 @@ export function integer(value: unknown, fallback: number, minimum: number, maxim
   return Math.max(minimum, Math.min(maximum, value));
 }
 
+export function positiveInteger(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
 export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

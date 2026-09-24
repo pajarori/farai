@@ -16,6 +16,16 @@ const RECON_STAGES: Record<string, number> = {
   network_scan: 2
 };
 
+const RECON_FACADE_TOOLS = new Set(["recon_manage", "recon_scan_manage"]);
+
+export function reconOperation(action: ReconAction): string {
+  if (!RECON_FACADE_TOOLS.has(action.tool)) return action.tool;
+  const args = action.args;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return action.tool;
+  const operation = (args as Record<string, unknown>).operation;
+  return typeof operation === "string" ? operation : action.tool;
+}
+
 export function reconExecutionStage(tool: string): number {
   return RECON_STAGES[tool] ?? 0;
 }
@@ -23,7 +33,7 @@ export function reconExecutionStage(tool: string): number {
 export function reconExecutionWaves<T extends ReconAction>(actions: T[]): T[][] {
   const stages = new Map<number, T[]>();
   for (const action of actions) {
-    const stage = reconExecutionStage(action.tool);
+    const stage = reconExecutionStage(reconOperation(action));
     const wave = stages.get(stage) ?? [];
     wave.push(action);
     stages.set(stage, wave);
@@ -34,12 +44,13 @@ export function reconExecutionWaves<T extends ReconAction>(actions: T[]): T[][] 
 export function hydrateReconAction<T extends ReconAction>(action: T, observations: ReconObservation[]): T {
   if (!action.args || typeof action.args !== "object" || Array.isArray(action.args)) return action;
   const args = action.args as Record<string, unknown>;
-  if (action.tool === "dns_resolve") {
+  const operation = reconOperation(action);
+  if (operation === "dns_resolve") {
     const discovered = observationStrings(observations, "asset_subdomains", "discoveredSubdomains");
-    const current = stringValues(args.names);
-    if (discovered.length > 0 && current.length <= 1) return { ...action, args: { ...args, names: uniqueStrings([...current, ...discovered]) } };
+    const current = stringValues(args.targets);
+    if (discovered.length > 0 && current.length <= 1) return { ...action, args: { ...args, targets: uniqueStrings([...current, ...discovered]) } };
   }
-  if (action.tool === "service_probe" || action.tool === "tls_inspect") {
+  if (operation === "service_probe" || operation === "tls_inspect") {
     const resolved = resolvedDnsNames(observations);
     const current = stringValues(args.targets);
     if (resolved.length > 0 && current.length <= 1) return { ...action, args: { ...args, targets: uniqueStrings([...current, ...resolved]) } };

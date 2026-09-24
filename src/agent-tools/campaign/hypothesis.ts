@@ -16,7 +16,7 @@ export const campaignHypothesisTool: ToolDefinition = {
       category: { type: "string", description: "short testing lane, for example auth, access_control, injection, ssrf, or crypto" },
       rationale: { type: "string", description: "facts and evidence that make this hypothesis plausible" },
       nextTest: { type: "string", description: "smallest concrete test that can confirm or disprove the hypothesis" },
-      status: { type: "string", enum: ["open", "testing", "verified", "disproven", "blocked", "archived"] },
+      hypothesisStatus: { type: "string", enum: ["open", "testing", "verified", "disproven", "blocked", "archived"] },
       confidence: { type: "number", minimum: 0, maximum: 1 },
       evidenceIds: { type: "array", items: { type: "string" }, uniqueItems: true }
     },
@@ -36,7 +36,7 @@ export const campaignHypothesisTool: ToolDefinition = {
     const evidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String) : [];
     assertCampaignEvidence(context, campaignId, evidenceIds);
     const allowedStatuses = ["open", "testing", "verified", "disproven", "blocked", "archived"] as const;
-    const status = typeof args.status === "string" ? args.status : "open";
+    const status = typeof args.hypothesisStatus === "string" ? args.hypothesisStatus : "open";
     if (!allowedStatuses.includes(status as typeof allowedStatuses[number])) throw new Error(`unsupported hypothesis status: ${status}; use one of: ${allowedStatuses.join(", ")}`);
     const hypothesis = requireCampaignStore(context, "upsertHypothesis")({
       campaignId,

@@ -15,7 +15,7 @@ export const campaignRequirementTool: ToolDefinition = {
       campaignId: { type: "string" },
       key: { type: "string" },
       description: { type: "string" },
-      status: { type: "string", enum: STATUSES },
+      requirementStatus: { type: "string", enum: STATUSES },
       evidenceIds: { type: "array", items: { type: "string" } }
     }
   },
@@ -34,7 +34,7 @@ export const campaignRequirementTool: ToolDefinition = {
     const key = asString(args.key, "key").trim();
     const description = asString(args.description, "description").trim();
     if (!key || !description) throw new Error("requirement key and description must be non-empty");
-    const status = (typeof args.status === "string" ? args.status : "pending") as CampaignRequirementStatus;
+    const status = (typeof args.requirementStatus === "string" ? args.requirementStatus : "pending") as CampaignRequirementStatus;
     if (!STATUSES.includes(status)) throw new Error(`unsupported requirement status: ${status}; use one of: ${STATUSES.join(", ")}`);
     const evidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String).filter(Boolean) : [];
     assertCampaignEvidence(context, campaignId, evidenceIds);

@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../../types";
 import { assertObject } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { integer, mapWithConcurrency, projectDiscoveryResult, stringList, type JsonRecord } from "./projectdiscovery";
+import { integer, mapWithConcurrency, positiveInteger, projectDiscoveryResult, stringList, type JsonRecord } from "./projectdiscovery";
 import { urlInventoryObservations } from "./shared/url-inventory";
 
 export type WebCrawlRecord = JsonRecord & {
@@ -109,7 +109,7 @@ export async function nativeWebCrawl(args: Record<string, unknown>, signal?: Abo
   const seeds = targets.flatMap((target) => { try { return [new URL(target)]; } catch { return []; } });
   const depthLimit = integer(args.depth, 2, 1, 5);
   const maxPages = integer(args.maxPagesPerDomain, 200, 1, 2_000);
-  const timeoutMs = integer(args.timeoutSeconds, 8, 1, 60) * 1_000;
+  const timeoutMs = positiveInteger(args.timeoutSeconds, 8) * 1_000;
   const maxBytes = integer(args.maxResponseBytes, 2_097_152, 1_024, 8_388_608);
   const concurrency = integer(args.concurrency, 10, 1, 50);
   const scope = typeof args.scope === "string" ? args.scope : "registrable_domain";
@@ -151,7 +151,7 @@ export const webCrawlTool: ToolDefinition = {
       scope: { type: "string", enum: ["fqdn", "registrable_domain", "none"] },
       maxPagesPerDomain: { type: "integer", minimum: 1, maximum: 2_000 },
       maxResponseBytes: { type: "integer", minimum: 1_024, maximum: 8_388_608 },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 60 },
+      timeoutSeconds: { type: "integer" },
       concurrency: { type: "integer", minimum: 1, maximum: 50 }
     },
     additionalProperties: false

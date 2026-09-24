@@ -223,10 +223,10 @@ const browserContextTool: ToolDefinition = {
   name: "browser_context",
   description: "Create, list, or close isolated browser contexts with independent cookies, storage, tabs, and navigation state. Create multiple named contexts for separate users or sessions, then pass the context name or id through the browser field of every other browser tool.",
   inputSchema: objectSchema({
-    action: { type: "string", enum: ["create", "list", "close"] },
+    contextAction: { type: "string", enum: ["create", "list", "close"] },
     name: { type: "string", description: "Unique context name." },
     browser: { type: "string", description: "Context name or UUID." }
-  }, ["action"]),
+  }, ["contextAction"]),
   mutates: true,
   timeoutMs: Number.POSITIVE_INFINITY,
   parallel: true,
@@ -235,7 +235,7 @@ const browserContextTool: ToolDefinition = {
   renderModel: (result) => result.output ?? result.summary,
   run: async (args, context): Promise<ToolResult> => {
     const input = args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {};
-    const action = String(input.action ?? "");
+    const action = String(input.contextAction ?? "");
     try {
       if (action === "list") {
         const contexts = browserContextManager.list(context.session);

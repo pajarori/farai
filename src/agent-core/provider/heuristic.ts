@@ -25,13 +25,13 @@ export function computeHeuristicActions(input: HeuristicInput): HeuristicAction[
     ];
   }
   if (/(subdomains?|passive[ -]?dns|certificate transparency|crt\.sh)/.test(lower) && target) {
-    return [{ kind: "tool", tool: "asset_subdomains", args: { domain: target }, rationale: "enumerating passive subdomain sources" }];
+    return [{ kind: "tool", tool: "recon_manage", args: { operation: "asset_subdomains", target }, rationale: "enumerating passive subdomain sources" }];
   }
   if (/(nmap|scan|enumerate|recon)/.test(lower) && target) {
-    return [{ kind: "tool", tool: "network_scan", args: { target }, rationale: "User requested recon/scan." }];
+    return [{ kind: "tool", tool: "recon_scan_manage", args: { operation: "network_scan", target }, rationale: "User requested recon/scan." }];
   }
   if (/(dir|directory|ffuf|gobuster)/.test(lower) && target) {
-    return [{ kind: "tool", tool: "web_directory", args: { url: `http://${target}/FUZZ` }, rationale: "User requested directory enumeration." }];
+    return [{ kind: "tool", tool: "recon_manage", args: { operation: "web_directory", target: `http://${target}/FUZZ` }, rationale: "User requested directory enumeration." }];
   }
   if (/(note|remember|catat)/.test(lower)) {
     return [{ kind: "tool", tool: "knowledge_manage", args: { operation: "add", text: input.userText, tags: ["user"] }, rationale: "User asked to remember context." }];

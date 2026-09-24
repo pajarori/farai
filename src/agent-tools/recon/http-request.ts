@@ -15,17 +15,17 @@ export const httpRequestTool: ToolDefinition = {
   description: "Send one exact HTTP request from the managed Kali container and return raw response headers plus body. Requests use Farai's managed capture proxy by default, except HTTP/3 which stays direct; set network=direct to bypass capture in explicit mode. Use this for custom methods, headers, bodies, redirects, exact paths, or protocol tests; use web_fetch for public-page research and browser tools for interactive state.",
   inputSchema: {
     type: "object",
-    required: ["url"],
+    required: ["target"],
     properties: {
-      url: { type: "string" },
-      mode: { type: "string", enum: ["protocol_test", "scripted_test"] },
+      target: { type: "string", description: "the exact request url" },
       method: { type: "string", enum: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] },
       headers: { type: "object", additionalProperties: { type: "string" } },
       body: { type: "string" },
-      followRedirects: { type: "boolean" },
+      followAllRedirects: { type: "boolean" },
       pathAsIs: { type: "boolean" },
       httpVersion: { type: "string", enum: ["auto", "1.0", "1.1", "2", "3"] },
-      network: { type: "string", enum: ["proxy", "direct"] }
+      network: { type: "string", enum: ["proxy", "direct"] },
+      timeoutSeconds: { type: "integer" }
     },
     additionalProperties: false
   },
@@ -57,7 +57,7 @@ export const httpRequestTool: ToolDefinition = {
         ...(context.signal ? { signal: context.signal } : {})
       };
       await ensureMcpProxyReady(proxyInput);
-      await extendMcpProxyScope(proxyInput, proxyScopeDomains(context, [args.url]));
+      await extendMcpProxyScope(proxyInput, proxyScopeDomains(context, [args.target]));
       const proxy = managedProxyForSession(context.session);
       if (!proxy?.running) throw new Error("managed proxy did not become ready");
       if (proxyConfig.mode === "explicit") proxyUrl = `http://127.0.0.1:${proxy.port}`;
@@ -98,10 +98,11 @@ export const httpRequestTool: ToolDefinition = {
 };
 
 export function httpRequestCommand(args: Record<string, unknown>, options: { proxyUrl?: string; captureIdentity?: string } = {}): string {
-  const url = asString(args.url, "url");
-  const command = ["curl", "-sS", "-i", "--max-time", "30"];
+  const url = asString(args.target, "target");
+  const timeoutSeconds = typeof args.timeoutSeconds === "number" && Number.isInteger(args.timeoutSeconds) && args.timeoutSeconds > 0 ? args.timeoutSeconds : 30;
+  const command = ["curl", "-sS", "-i", "--max-time", String(timeoutSeconds)];
   if (options.proxyUrl) command.push("--proxy", options.proxyUrl, "--suppress-connect-headers");
-  if (args.followRedirects === true) command.push("-L");
+  if (args.followAllRedirects === true) command.push("-L");
   if (args.pathAsIs === true) command.push("--path-as-is");
   if (args.httpVersion === "1.0") command.push("--http1.0");
   if (args.httpVersion === "1.1") command.push("--http1.1");

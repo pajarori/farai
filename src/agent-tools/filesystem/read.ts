@@ -10,7 +10,8 @@ export const fsReadTool: ToolDefinition = {
   inputSchema: {
     type: "object",
     required: ["path"],
-    properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" }, pages: { type: "string", description: "PDF page or inclusive range, for example 1 or 2-8" } }
+    properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" }, pages: { type: "string", description: "PDF page or inclusive range, for example 1 or 2-8" } },
+    additionalProperties: false
   },
   mutates: false,
   timeoutMs: Number.POSITIVE_INFINITY,

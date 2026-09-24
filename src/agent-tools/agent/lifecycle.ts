@@ -116,7 +116,7 @@ export const agentWaitTool: ToolDefinition = {
     type: "object",
     properties: {
       sessionIds: { type: "array", uniqueItems: true, items: { type: "string" }, description: "child session ids returned by agent_spawn or agent_list; omit to wait for any child owned by this parent" },
-      timeoutSeconds: { type: "number", minimum: 0, maximum: 60, description: "bounded wait duration from 0 to 60 seconds; omit for 30 seconds" }
+      timeoutSeconds: { type: "number", minimum: 0, description: "wait duration in seconds; omit for 30 seconds" }
     },
     additionalProperties: false
   },
@@ -129,7 +129,7 @@ export const agentWaitTool: ToolDefinition = {
   run: async (args, context) => {
     assertObject(args, "args");
     const sessionIds = Array.isArray(args.sessionIds) ? [...new Set(args.sessionIds.map((item) => asString(item, "sessionIds[]")))] : undefined;
-    const seconds = typeof args.timeoutSeconds === "number" ? Math.max(0, Math.min(60, args.timeoutSeconds)) : 30;
+    const seconds = typeof args.timeoutSeconds === "number" && args.timeoutSeconds >= 0 ? args.timeoutSeconds : 30;
     const entries = await requireControl(context).wait(sessionIds, seconds * 1000, context.signal);
     return lifecycleResult("waited for subagents", entries);
   }

@@ -17,7 +17,7 @@ const TEST_ATTEMPT_PROPERTIES = {
   mutation: { description: "one changed input, state, or condition being tested" },
   oracle: { type: "string", description: "observable pass/fail condition that distinguishes the hypothesis" },
   observed: { description: "what actually happened; add this when updating the attempt" },
-  status: { type: "string", enum: STATUSES, description: "planned before execution; running while active; passed or failed after a clear oracle; inconclusive when evidence is insufficient; cancelled when intentionally stopped" },
+  testStatus: { type: "string", enum: STATUSES, description: "planned before execution; running while active; passed or failed after a clear oracle; inconclusive when evidence is insufficient; cancelled when intentionally stopped" },
   evidenceLevel: { type: "string", enum: LEVELS, description: "signal is a lead; differential_observed shows a meaningful baseline difference; reproduced repeats the behavior; impact_demonstrated proves security impact in the same session; independently_verified confirms it from another session" },
   evidenceIds: { type: "array", items: { type: "string" }, uniqueItems: true, description: "ids returned by evidence-producing tools or evidence_save; every id must belong to this campaign" }
 };
@@ -48,7 +48,7 @@ export const campaignTestAttemptTool: ToolDefinition = {
     loadCampaign(context, campaignId);
     const target = asString(args.target, "target");
 
-    const status = (typeof args.status === "string" ? args.status : "planned") as TestAttemptStatus;
+    const status = (typeof args.testStatus === "string" ? args.testStatus : "planned") as TestAttemptStatus;
     if (!STATUSES.includes(status)) throw new Error(`unsupported test attempt status: ${status}; use one of: ${STATUSES.join(", ")}`);
     const evidenceLevel = (typeof args.evidenceLevel === "string" ? args.evidenceLevel : "signal") as EvidenceLevel;
     if (!LEVELS.includes(evidenceLevel)) throw new Error(`unsupported evidence level: ${evidenceLevel}; use one of: ${LEVELS.join(", ")}`);
@@ -61,7 +61,7 @@ export const campaignTestAttemptTool: ToolDefinition = {
       const existing = load(args.attemptId);
       if (existing.campaignId !== campaignId) throw new Error("test attempt belongs to another campaign");
       const attempt = update(existing.id, {
-        status: typeof args.status === "string" ? status : existing.status,
+        status: typeof args.testStatus === "string" ? status : existing.status,
         ...(Object.prototype.hasOwnProperty.call(args, "observed") ? { observed: args.observed } : {}),
         evidenceLevel: typeof args.evidenceLevel === "string" ? evidenceLevel : existing.evidenceLevel,
         ...(Object.prototype.hasOwnProperty.call(args, "evidenceIds") ? { evidenceIds } : {})

@@ -2,7 +2,7 @@ import { Resolver } from "node:dns/promises";
 import type { ToolDefinition } from "../../types";
 import { assertObject } from "../../utils";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { integer, mapWithConcurrency, optionalStringList, projectDiscoveryResult, stringList, type JsonRecord } from "./projectdiscovery";
+import { mapWithConcurrency, optionalStringList, positiveInteger, projectDiscoveryResult, stringList, type JsonRecord } from "./projectdiscovery";
 
 const DNS_RECORD_TYPES = ["a", "aaaa", "cname", "ns", "txt", "srv", "ptr", "mx", "soa", "caa"] as const;
 type DnsRecordType = typeof DNS_RECORD_TYPES[number];
@@ -63,11 +63,11 @@ async function resolveType(resolver: Resolver, name: string, type: DnsRecordType
 }
 
 export async function nativeDnsResolve(args: Record<string, unknown>, signal?: AbortSignal): Promise<DnsProbeRecord[]> {
-  const names = stringList(args.names, "names", 2_000);
+  const names = stringList(args.targets, "targets", 2_000);
   const requested = optionalStringList(args.recordTypes, "recordTypes", DNS_RECORD_TYPES.length);
   const recordTypes = (requested.length ? requested : ["a", "aaaa", "cname"]) as DnsRecordType[];
   if (recordTypes.some((value) => !DNS_RECORD_TYPES.includes(value))) throw new Error("recordTypes contains an unsupported DNS record type");
-  const timeoutMs = integer(args.timeoutSeconds, 5, 1, 30) * 1_000;
+  const timeoutMs = positiveInteger(args.timeoutSeconds, 5) * 1_000;
   const resolvers = optionalStringList(args.resolvers, "resolvers", 100);
   const resolver = new Resolver({ timeout: timeoutMs, tries: 2 });
   if (resolvers.length) resolver.setServers(resolvers);
@@ -109,13 +109,13 @@ export const dnsProbeTool: ToolDefinition = {
   description: "Resolve one or many hostnames using a fast native resolver that runs directly on the farai host (reliable — it does not depend on the container's DNS). Select DNS record types and optionally set custom resolver servers. Returns answer records grouped by name. Use this to validate candidates from asset_subdomains before HTTP or port probing; it is not a passive discovery source.",
   inputSchema: {
     type: "object",
-    required: ["names"],
+    required: ["targets"],
     properties: {
-      names: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2_000, uniqueItems: true }] },
+      targets: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2_000, uniqueItems: true }] },
       recordTypes: { type: "array", items: { type: "string", enum: [...DNS_RECORD_TYPES] }, maxItems: DNS_RECORD_TYPES.length, uniqueItems: true },
       resolvers: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }], description: "optional resolver server ip(s); defaults to the host's system resolver" },
       wildcard: { type: "string", enum: ["off", "auto"], description: "detect sibling wildcard DNS answers; defaults to auto" },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 30 }
+      timeoutSeconds: { type: "integer" }
     },
     additionalProperties: false
   },

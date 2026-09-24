@@ -8,16 +8,16 @@ export const campaignObserveTool: ToolDefinition = {
   description: "Record a structured campaign observation from a tool result or manual investigation, optionally linking it to an asset and session evidence. Use this for factual signals and discovered state; use campaign_hypothesis for an explanatory vulnerability claim that still needs testing.",
   inputSchema: {
     type: "object",
-    required: ["kind", "value"],
+    required: ["observationKind", "value"],
     properties: {
       campaignId: { type: "string" },
       assetId: { type: "string", description: "asset id this factual observation belongs to" },
-      kind: { type: "string", description: "stable observation type such as http_service, technology, route, dns_record, or behavior" },
+      observationKind: { type: "string", description: "stable observation type such as http_service, technology, route, dns_record, or behavior" },
       value: { description: "factual observed value; keep it structured when useful" },
       confidence: { type: "number", minimum: 0, maximum: 1 },
       source: { type: "string", description: "tool name, URL, file, or other provenance" },
       evidenceIds: { type: "array", items: { type: "string" }, uniqueItems: true },
-      status: { type: "string", enum: ["active", "stale", "disproven", "archived"] }
+      observationStatus: { type: "string", enum: ["active", "stale", "disproven", "archived"] }
     },
     additionalProperties: false
   },
@@ -35,12 +35,12 @@ export const campaignObserveTool: ToolDefinition = {
     const evidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.map(String) : [];
     assertCampaignEvidence(context, campaignId, evidenceIds);
     const allowedStatuses = ["active", "stale", "disproven", "archived"] as const;
-    const status = typeof args.status === "string" ? args.status : "active";
+    const status = typeof args.observationStatus === "string" ? args.observationStatus : "active";
     if (!allowedStatuses.includes(status as typeof allowedStatuses[number])) throw new Error(`unsupported observation status: ${status}; use one of: ${allowedStatuses.join(", ")}`);
     const observation = requireCampaignStore(context, "addObservation")({
       campaignId,
       ...(assetId ? { assetId } : {}),
-      kind: asString(args.kind, "kind"),
+      kind: asString(args.observationKind, "observationKind"),
       value: args.value,
       confidence: typeof args.confidence === "number" ? Math.max(0, Math.min(1, args.confidence)) : 0.5,
       source: typeof args.source === "string" ? args.source : "agent",

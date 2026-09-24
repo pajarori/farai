@@ -7,7 +7,7 @@ import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
 import { processOutput } from "../shared/process-output";
 import { timeoutBackgroundResult } from "../shared/background-result";
-import { integer, mapWithConcurrency, projectDiscoveryResult, shellQuote, text, type JsonRecord } from "./projectdiscovery";
+import { integer, mapWithConcurrency, positiveInteger, projectDiscoveryResult, shellQuote, text, type JsonRecord } from "./projectdiscovery";
 
 export type DiscoveredPort = JsonRecord & { host: string; port: number; protocol: string; service?: string };
 
@@ -72,7 +72,7 @@ export function buildNaabuCommand(args: Record<string, unknown>): string {
     "naabu", "-host", target, "-json", "-silent", "-nc", "-duc", "-Pn", "-irt", "10s",
     "-rate", String(integer(args.rateLimit, 1_000, 1, 100_000)),
     "-c", String(integer(args.concurrency, 25, 1, 200)),
-    "-timeout", `${integer(args.timeoutMs, 1_000, 100, 30_000)}ms`,
+    "-timeout", `${positiveInteger(args.connectTimeoutMs, 1_000)}ms`,
     "-retries", String(integer(args.retries, 2, 1, 10))
   ];
   const ports = normalizePortSelection(args.ports);
@@ -95,7 +95,7 @@ async function runNetworkScan(args: unknown, context: Parameters<NonNullable<Too
   assertObject(args, "args");
   const target = asString(args.target, "target");
   const versionDetection = args.versionDetection !== false;
-  const mode = args.mode === "discover" || args.mode === "nmap" || args.mode === "deep" ? args.mode : "fast";
+  const mode = args.scanDepth === "discover" || args.scanDepth === "nmap" || args.scanDepth === "deep" ? args.scanDepth : "fast";
 
   if (mode === "fast") {
     const started = performance.now();
@@ -125,11 +125,11 @@ async function runNetworkScan(args: unknown, context: Parameters<NonNullable<Too
 export async function nativeTcpScan(args: Record<string, unknown>, target: string, signal?: AbortSignal): Promise<DiscoveredPort[]> {
   const host = scanHost(target);
   const selection = normalizePortSelection(args.ports);
-  if (!selection && args.topPorts === "full") throw new Error("fast mode does not scan all 65535 ports; use mode=discover with topPorts=full");
+  if (!selection && args.topPorts === "full") throw new Error("fast mode does not scan all 65535 ports; use scanDepth=discover with topPorts=full");
   const ports = selection ? expandPorts(selection, 65_535) : FAST_PORTS;
-  if (ports.length > 5_000) throw new Error("fast mode accepts at most 5000 explicit ports; use mode=discover for larger scans");
+  if (ports.length > 5_000) throw new Error("fast mode accepts at most 5000 explicit ports; use scanDepth=discover for larger scans");
   const addresses = [...new Map((await lookup(host, { all: true, verbatim: true })).map((entry) => [entry.address, entry])).values()];
-  const timeoutMs = integer(args.timeoutMs, 600, 100, 5_000);
+  const timeoutMs = positiveInteger(args.connectTimeoutMs, 600);
   const concurrency = integer(args.concurrency, 200, 1, 500);
   const attempts = addresses.flatMap((address) => ports.map((port) => ({ address: address.address, family: address.family, port })));
   const results = await mapWithConcurrency(attempts, concurrency, async (attempt) => {
@@ -230,13 +230,13 @@ const portScanSchema = {
   required: ["target"],
   properties: {
     target: { type: "string" },
-    mode: { type: "string", enum: ["fast", "discover", "nmap", "deep"] },
+    scanDepth: { type: "string", enum: ["fast", "discover", "nmap", "deep"], description: "fast (default) uses bounded native TCP connects; discover uses naabu for larger SYN scans; nmap and deep add service enrichment" },
     ports: { type: "string" },
     topPorts: { type: "string", enum: ["100", "1000", "full"] },
     versionDetection: { type: "boolean" },
     rateLimit: { type: "integer", minimum: 1, maximum: 100_000 },
     concurrency: { type: "integer", minimum: 1, maximum: 500 },
-    timeoutMs: { type: "integer", minimum: 100, maximum: 30_000 },
+    connectTimeoutMs: { type: "integer", description: "per-connection timeout in milliseconds, not an overall call budget" },
     retries: { type: "integer", minimum: 1, maximum: 10 }
   },
   additionalProperties: false

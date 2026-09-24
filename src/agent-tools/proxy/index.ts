@@ -193,7 +193,7 @@ export const proxyReplayTool: ToolDefinition = {
       headers: { type: "object", additionalProperties: { type: "string" } },
       body: { type: "string" },
       omitBody: { type: "boolean" },
-      timeoutSeconds: { type: "number", minimum: 1, maximum: 120 }
+      timeoutSeconds: { type: "number" }
     },
     additionalProperties: false
   },

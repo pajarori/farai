@@ -11,7 +11,8 @@ export const fsEditTool: ToolDefinition = {
   inputSchema: {
     type: "object",
     required: ["path", "oldString", "newString"],
-    properties: { path: { type: "string" }, oldString: { type: "string" }, newString: { type: "string" }, replaceAll: { type: "boolean" } }
+    properties: { path: { type: "string" }, oldString: { type: "string" }, newString: { type: "string" }, replaceAll: { type: "boolean" } },
+    additionalProperties: false
   },
   mutates: true,
   timeoutMs: Number.POSITIVE_INFINITY,

@@ -236,7 +236,7 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   web_search: ["query"],
   web_fetch: ["url"],
   image_read: ["path"],
-  notebook_cell: ["path", "operation", "index"],
+  notebook_cell: ["path", "cellOperation", "index"],
   mcp_resource: ["operation", "server", "uri"],
   proxy_scope: ["allowedDomains"],
   proxy_policy: ["tls", "passThroughHosts"],
@@ -247,7 +247,7 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   proxy_intercept: ["action", "flowId"],
   proxy_clear: ["confirm"],
   worktree_manage: ["operation", "name", "ref", "branch", "remove"],
-  browser_context: ["action", "name", "browser"],
+  browser_context: ["contextAction", "name", "browser"],
   browser_click: ["element", "target"],
   browser_type: ["element", "target", "text"],
   browser_find: ["text", "regex"],
@@ -261,10 +261,10 @@ const TOOL_INPUT_KEYS: Record<string, readonly string[]> = {
   email_inbox: ["emailId"],
   email_read: ["messageId"],
   email_wait: ["emailId", "from", "subject"],
-  dns_resolve: ["names", "recordTypes"],
+  dns_resolve: ["targets", "recordTypes"],
   service_probe: ["targets", "ports"],
   tls_inspect: ["targets", "ports"],
-  url_discover: ["domains", "sources"],
+  url_discover: ["targets", "sources"],
   web_crawl: ["targets", "depth"],
   vulnerability_scan: ["targets", "severities", "tags", "templateIds"],
   vulnerability_lookup: ["ids", "query", "products", "vendors"]
@@ -647,7 +647,7 @@ function browserToolTitle(tool: string, input: Record<string, unknown>, active: 
   if (failed && (tool === "browser_context" || tool.startsWith("browser_"))) return toolFailureLabel(tool);
   const action = toolActionLabel(tool, active);
   if (tool === "browser_context") {
-    const contextAction = typeof input.action === "string" ? input.action : "list";
+    const contextAction = typeof input.contextAction === "string" ? input.contextAction : "list";
     const selector = typeof input.name === "string" ? compactToolText(input.name) : typeof input.browser === "string" ? compactToolText(input.browser) : "";
     if (contextAction === "create") return `${active ? "creating" : "created"} browser${selector ? ` ${selector}` : ""}`;
     if (contextAction === "close") return `${active ? "closing" : "closed"} browser${selector ? ` ${selector}` : ""}`;
@@ -727,25 +727,25 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
     const target = typeof input.canonical === "string" ? compactToolTarget(input.canonical) : "asset";
     return `${failed ? "failed to save asset" : active ? "saving asset" : "saved asset"} · ${target}`;
   }
-  if (tool === "asset_subdomains") return reconTitle(failed, active, "enumerate subdomains", "enumerating subdomains", "enumerated subdomains", input.domain, "domains");
+  if (tool === "asset_subdomains") return reconTitle(failed, active, "enumerate subdomains", "enumerating subdomains", "enumerated subdomains", input.target, "domains");
   if (tool === "network_scan") {
-    if (input.mode === "nmap" || input.mode === "deep") return `${failed ? "failed to run" : active ? "running" : "ran"} nmap`;
+    if (input.scanDepth === "nmap" || input.scanDepth === "deep") return `${failed ? "failed to run" : active ? "running" : "ran"} nmap`;
     return reconTitle(failed, active, "scan ports", "scanning ports", "scanned ports", input.target, "targets");
   }
-  if (tool === "dns_resolve") return reconTitle(failed, active, "resolve dns", "resolving dns", "resolved dns", input.names, "names");
+  if (tool === "dns_resolve") return reconTitle(failed, active, "resolve dns", "resolving dns", "resolved dns", input.targets, "names");
   if (tool === "service_probe") return reconTitle(failed, active, "probe http services", "probing http services", "probed http services", input.targets, "targets");
   if (tool === "tls_inspect") return reconTitle(failed, active, "inspect tls", "inspecting tls", "inspected tls", input.targets, "targets");
-  if (tool === "url_discover") return reconTitle(failed, active, "discover urls", "discovering urls", "discovered urls", input.domains, "domains");
+  if (tool === "url_discover") return reconTitle(failed, active, "discover urls", "discovering urls", "discovered urls", input.targets, "domains");
   if (tool === "web_crawl") return reconTitle(failed, active, "crawl", "crawling", "crawled", input.targets, "targets");
   if (tool === "vulnerability_scan") return reconTitle(failed, active, "scan vulnerabilities", "scanning vulnerabilities", "scanned vulnerabilities", input.targets, "targets");
   if (tool === "vulnerability_lookup") return reconTitle(failed, active, "look up vulnerabilities", "looking up vulnerabilities", "looked up vulnerabilities", input.ids ?? input.query, "identifiers");
   if (tool === "http_request") {
     const method = typeof input.method === "string" ? input.method.toLowerCase() : "get";
-    const target = typeof input.url === "string" ? compactToolUrl(input.url) : "request";
+    const target = typeof input.target === "string" ? compactToolUrl(input.target) : "request";
     return `${failed ? "failed to request" : active ? "requesting" : "requested"} ${method} · ${target}`;
   }
   if (tool === "web_directory") {
-    const target = typeof input.url === "string" ? compactToolUrl(input.url) : "target";
+    const target = typeof input.target === "string" ? compactToolUrl(input.target) : "target";
     return `${failed ? "failed to enumerate paths" : active ? "enumerating paths" : "enumerated paths"} · ${target}`;
   }
   if (tool === "web_search") {
@@ -771,7 +771,7 @@ function nativeToolTitle(tool: string, input: Record<string, unknown>, active: b
   if (tool === "callback_host_info") return failed ? "failed to inspect host network" : active ? "inspecting host network" : "inspected host network";
   if (tool === "callback_oast") return failed ? "failed to start oast session" : active ? "starting oast session" : "started oast session";
   if (tool === "notebook_cell") {
-    const operation = typeof input.operation === "string" ? input.operation : "edit";
+    const operation = typeof input.cellOperation === "string" ? input.cellOperation : "edit";
     const path = typeof input.path === "string" ? ` in ${compactToolPath(input.path)}` : "";
     const index = typeof input.index === "number" ? ` ${input.index}` : "";
     const verbs: Record<string, readonly [string, string]> = {

@@ -180,7 +180,7 @@ function applyGroupingPolicy(
     return { ...base, groupKey: `browser:${context}`, groupPast: `browsed · ${label}`, groupActive: `browsing · ${label}` };
   }
   if (base.tool === "http_request") {
-    const origin = urlOrigin(stringValue(base.args.url));
+    const origin = urlOrigin(stringValue(base.args.target));
     const label = origin ? compactToolUrl(origin) : undefined;
     return { ...base, groupKey: `http:${origin ?? "requests"}`, groupPast: label ? `probed · ${label}` : "probed endpoints", groupActive: label ? `probing · ${label}` : "probing endpoints" };
   }

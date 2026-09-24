@@ -17,10 +17,10 @@ export const notebookEditTool: ToolDefinition = {
   description: "Insert, replace, or delete one Jupyter notebook cell by zero-based index while preserving notebook structure and existing cell metadata. Use this instead of treating an .ipynb file as plain text; it edits cells but does not execute the notebook.",
   inputSchema: {
     type: "object",
-    required: ["path", "operation", "index"],
+    required: ["path", "cellOperation", "index"],
     properties: {
       path: { type: "string" },
-      operation: { type: "string", enum: ["insert_cell", "replace_cell", "delete_cell"] },
+      cellOperation: { type: "string", enum: ["insert_cell", "replace_cell", "delete_cell"] },
       index: { type: "number", minimum: 0 },
       cellType: { type: "string", enum: ["code", "markdown", "raw"] },
       source: { type: "string" }
@@ -40,7 +40,7 @@ export const notebookEditTool: ToolDefinition = {
     const notebook = parseNotebook(readBoundedFileTextSync(path, NOTEBOOK_MAX_BYTES, "Jupyter notebook"));
     if (typeof args.index !== "number" || !Number.isFinite(args.index) || !Number.isInteger(args.index)) throw new Error("index must be a finite integer");
     const index = args.index;
-    const operation = asString(args.operation, "operation");
+    const operation = asString(args.cellOperation, "cellOperation");
     const allowedOperations = ["insert_cell", "replace_cell", "delete_cell"] as const;
     if (!allowedOperations.includes(operation as typeof allowedOperations[number])) throw new Error(`unsupported notebook operation: ${operation}; use one of: ${allowedOperations.join(", ")}`);
     if (args.cellType !== undefined && args.cellType !== "code" && args.cellType !== "markdown" && args.cellType !== "raw") {

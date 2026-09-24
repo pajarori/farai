@@ -8,11 +8,11 @@ export const campaignVerifyTool: ToolDefinition = {
   description: "Change a campaign finding's lifecycle state using explicit evidence and a reproducible test attempt. Use only after finding_manage operation=add_finding created the candidate. Use verified only with a passed campaign_manage operation=test at impact_demonstrated or independently_verified; use duplicate only when duplicateOf points to the canonical finding.",
   inputSchema: {
     type: "object",
-    required: ["findingId", "status"],
+    required: ["findingId", "findingStatus"],
     properties: {
       campaignId: { type: "string", description: "campaign id; omit when the active campaign owns the finding" },
       findingId: { type: "string", description: "finding id returned by report_add_finding or campaign search" },
-      status: { type: "string", enum: ["candidate", "needs_verification", "verified", "duplicate", "not_applicable", "reported", "accepted", "rejected"], description: "lifecycle state; verified has strict evidence requirements" },
+      findingStatus: { type: "string", enum: ["candidate", "needs_verification", "verified", "duplicate", "not_applicable", "reported", "accepted", "rejected"], description: "lifecycle state; verified has strict evidence requirements" },
       testAttemptId: { type: "string", description: "required for verified; must reference a passed campaign_test" },
       evidenceIds: { type: "array", items: { type: "string" }, uniqueItems: true, description: "evidence supporting the state; required and linked to the test for verified" },
       duplicateOf: { type: "string", description: "canonical finding id when status is duplicate" },
@@ -31,7 +31,7 @@ export const campaignVerifyTool: ToolDefinition = {
     assertObject(args, "args");
     const campaignId = campaignIdFor(context, args);
     loadCampaign(context, campaignId);
-    const status = asString(args.status, "status") as FindingStatus;
+    const status = asString(args.findingStatus, "findingStatus") as FindingStatus;
     const allowedStatuses = ["candidate", "needs_verification", "verified", "duplicate", "not_applicable", "reported", "accepted", "rejected"] as const;
     if (!allowedStatuses.includes(status)) throw new Error(`unsupported finding status: ${status}; use one of: ${allowedStatuses.join(", ")}`);
     if (status === "verified" && (!Array.isArray(args.evidenceIds) || args.evidenceIds.length === 0)) throw new Error("verified findings require evidenceIds");

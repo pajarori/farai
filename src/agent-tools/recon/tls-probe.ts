@@ -4,7 +4,7 @@ import { assertObject } from "../../utils";
 import { timeoutBackgroundResult } from "../shared/background-result";
 import { backend } from "../shared/backend";
 import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers";
-import { booleanValue, inputFileCommand, integer, mapWithConcurrency, parseJsonLines, projectDiscoveryResult, record, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
+import { booleanValue, inputFileCommand, integer, mapWithConcurrency, parseJsonLines, positiveInteger, projectDiscoveryResult, record, stringList, text, textArray, type JsonRecord } from "./projectdiscovery";
 import type { FeedObservation } from "./shared/campaign-feed";
 
 export type TlsProbeRecord = JsonRecord & {
@@ -36,7 +36,7 @@ export function buildTlsProbeCommand(args: Record<string, unknown>): string {
   const targets = stringList(args.targets, "targets", 500);
   const command = [
     "-json", "-silent", "-nc", "-duc", "-tv", "-cipher", "-hash", "sha256", "-se", "-tps",
-    "-timeout", String(integer(args.timeoutSeconds, 5, 1, 60)), "-retry", String(integer(args.retries, 1, 0, 5)),
+    "-timeout", String(positiveInteger(args.timeoutSeconds, 5)), "-retry", String(integer(args.retries, 1, 0, 5)),
     "-c", String(integer(args.concurrency, 100, 1, 500))
   ];
   if (args.enumerateVersions === true) command.push("-ve");
@@ -144,7 +144,7 @@ function probeTlsOne(host: string, port: number, timeoutMs: number, signal?: Abo
 
 export async function nativeTlsProbe(args: Record<string, unknown>, signal?: AbortSignal): Promise<TlsProbeRecord[]> {
   const targets = tlsTargets(args);
-  const timeoutMs = integer(args.timeoutSeconds, 5, 1, 60) * 1_000;
+  const timeoutMs = positiveInteger(args.timeoutSeconds, 5) * 1_000;
   const concurrency = integer(args.concurrency, 100, 1, 500);
   return mapWithConcurrency(targets, concurrency, (target) => probeTlsOne(target.host, target.port, timeoutMs, signal), signal);
 }
@@ -168,7 +168,7 @@ export const tlsProbeTool: ToolDefinition = {
       jarm: { type: "boolean" },
       ja3: { type: "boolean" },
       verifyCertificate: { type: "boolean" },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 60 },
+      timeoutSeconds: { type: "integer" },
       retries: { type: "integer", minimum: 0, maximum: 5 },
       concurrency: { type: "integer", minimum: 1, maximum: 500 }
     },

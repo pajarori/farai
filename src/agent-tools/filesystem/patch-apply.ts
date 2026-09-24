@@ -10,7 +10,8 @@ export const patchApplyTool: ToolDefinition = {
   inputSchema: {
     type: "object",
     required: ["patch"],
-    properties: { patch: { type: "string" } }
+    properties: { patch: { type: "string" } },
+    additionalProperties: false
   },
   mutates: true,
   timeoutMs: Number.POSITIVE_INFINITY,

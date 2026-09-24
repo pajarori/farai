@@ -80,17 +80,50 @@ function delegateProperties(schema: Record<string, unknown> | undefined): Record
   return collected;
 }
 
+function schemaBranches(schema: Record<string, unknown>): Record<string, unknown>[] {
+  if (Array.isArray(schema.oneOf)) return (schema.oneOf as Record<string, unknown>[]).flatMap(schemaBranches);
+  if (Array.isArray(schema.anyOf)) return (schema.anyOf as Record<string, unknown>[]).flatMap(schemaBranches);
+  return [schema];
+}
+
+function simplifyBranch(branch: Record<string, unknown>): Record<string, unknown> {
+  const type = typeof branch.type === "string" ? branch.type : undefined;
+  if (!type) return {};
+  const simplified: Record<string, unknown> = { type };
+  if (Array.isArray(branch.enum)) simplified.enum = branch.enum;
+  if (type === "array" && branch.items && typeof branch.items === "object" && !Array.isArray(branch.items)) {
+    const itemBranches = dedupeBranches(schemaBranches(branch.items as Record<string, unknown>).map(simplifyBranch).filter((item) => Object.keys(item).length > 0));
+    if (itemBranches.length === 1) simplified.items = itemBranches[0];
+    else if (itemBranches.length > 1) simplified.items = { oneOf: itemBranches };
+  }
+  return simplified;
+}
+
+function canonicalKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalKey).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, item]) => `${key}:${canonicalKey(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function dedupeBranches(branches: Record<string, unknown>[]): Record<string, unknown>[] {
+  const seen = new Map<string, Record<string, unknown>>();
+  for (const branch of branches) {
+    const key = canonicalKey(branch);
+    if (!seen.has(key)) seen.set(key, branch);
+  }
+  return [...seen.values()];
+}
+
 function mergeFieldSchema(existing: Record<string, unknown>, incoming: Record<string, unknown>): Record<string, unknown> {
   if (JSON.stringify(existing) === JSON.stringify(incoming)) return existing;
-  if (existing.type === incoming.type && typeof existing.type === "string") {
-    const merged: Record<string, unknown> = { type: existing.type };
-    const sameEnum = Array.isArray(existing.enum) && Array.isArray(incoming.enum) && JSON.stringify(existing.enum) === JSON.stringify(incoming.enum);
-    if (sameEnum) merged.enum = existing.enum;
-    if (typeof existing.description === "string") merged.description = existing.description;
-    else if (typeof incoming.description === "string") merged.description = incoming.description;
-    return merged;
-  }
-  return {};
+  const branches = dedupeBranches([...schemaBranches(existing), ...schemaBranches(incoming)].map(simplifyBranch).filter((branch) => Object.keys(branch).length > 0));
+  const description = typeof existing.description === "string" ? existing.description : typeof incoming.description === "string" ? incoming.description : undefined;
+  if (branches.length === 0) return description ? { description } : {};
+  if (branches.length === 1) return description ? { ...branches[0], description } : branches[0]!;
+  return description ? { oneOf: branches, description } : { oneOf: branches };
 }
 
 function operationFields(schema: Record<string, unknown> | undefined): string {

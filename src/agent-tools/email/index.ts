@@ -152,7 +152,7 @@ const emailWaitTool: ToolDefinition = {
       subject: { type: "string", description: "Strict case-insensitive subject substring; omit rather than guessing the subject" },
       body: { type: "string", description: "Strict case-insensitive message-body substring; use only when the expected body text is known" },
       unreadOnly: { type: "boolean", description: "Match only unseen IMAP messages" },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 600 }
+      timeoutSeconds: { type: "integer" }
     },
     additionalProperties: false
   },
@@ -167,7 +167,7 @@ const emailWaitTool: ToolDefinition = {
     assertObject(args, "args");
     const emailId = asString(args.emailId, "emailId");
     const source = resolveSource(context.session, context.rootWorkspace ?? context.workspace, emailId);
-    const timeoutMs = integerArg(args.timeoutSeconds, 60, 1, 600) * 1_000;
+    const timeoutMs = (typeof args.timeoutSeconds === "number" && Number.isInteger(args.timeoutSeconds) && args.timeoutSeconds > 0 ? args.timeoutSeconds : 60) * 1_000;
     const match = {
       ...(typeof args.from === "string" && args.from.trim() ? { from: args.from.trim() } : {}),
       ...(typeof args.subject === "string" && args.subject.trim() ? { subject: args.subject.trim() } : {}),

@@ -8,7 +8,8 @@ export const fsListTool: ToolDefinition = {
   description: "Recursively list file paths beneath a workspace directory, excluding Farai state and dependency trees, with a bounded result count. Use this to discover repository structure; use file_read to inspect one file or list only one directory level.",
   inputSchema: {
     type: "object",
-    properties: { path: { type: "string" }, limit: { type: "number" } }
+    properties: { path: { type: "string" }, limit: { type: "number" } },
+    additionalProperties: false
   },
   mutates: false,
   timeoutMs: Number.POSITIVE_INFINITY,

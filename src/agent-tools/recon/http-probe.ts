@@ -4,6 +4,7 @@ import { defaultHumanRenderer, defaultModelRenderer } from "../shared/renderers"
 import {
   integer,
   mapWithConcurrency,
+  positiveInteger,
   projectDiscoveryResult,
   stringList,
   type JsonRecord
@@ -136,7 +137,7 @@ async function probeOne(target: string, timeoutMs: number, follow: boolean, pare
 
 export async function nativeFastProbe(args: Record<string, unknown>, signal?: AbortSignal): Promise<HttpProbeRecord[]> {
   const targets = fastProbeTargets(args);
-  const timeoutMs = integer(args.timeoutSeconds, 3, 1, 15) * 1_000;
+  const timeoutMs = positiveInteger(args.timeoutSeconds, 3) * 1_000;
   const concurrency = integer(args.concurrency, 100, 1, 200);
   const follow = args.redirects === "all" || args.redirects === "same_host";
   return mapWithConcurrency(targets, concurrency, (target) => probeOne(target, timeoutMs, follow, signal), signal);
@@ -151,10 +152,9 @@ export const httpProbeTool: ToolDefinition = {
     required: ["targets"],
     properties: {
       targets: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 500, uniqueItems: true }] },
-      ports: { oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 100, uniqueItems: true }] },
       schemes: { type: "array", items: { type: "string", enum: ["https", "http"] }, minItems: 1, maxItems: 2, uniqueItems: true, description: "schemes to try for bare hosts; defaults to https only for speed, pass [\"https\",\"http\"] to also probe http" },
       redirects: { type: "string", enum: ["none", "same_host", "all"] },
-      timeoutSeconds: { type: "integer", minimum: 1, maximum: 60 },
+      timeoutSeconds: { type: "integer" },
       concurrency: { type: "integer", minimum: 1, maximum: 200 }
     },
     additionalProperties: false
