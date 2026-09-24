@@ -180,7 +180,11 @@ export class FaraiSecretStore implements SecretStore {
   }
 }
 
-export const secretStore = new FaraiSecretStore(process.env.NODE_ENV === "test" ? testBackend : keyringBackend);
+export const secretStore = new FaraiSecretStore(
+  process.env.NODE_ENV === "test" || process.env.FARAI_HEADLESS === "1" || process.env.FARAI_SECRET_STORAGE === "session"
+    ? testBackend
+    : keyringBackend
+);
 
 export function secretAccount(locator: SecretLocator): string {
   const scope = locator.location === "project"

@@ -36,7 +36,10 @@ export function assertCampaignEvidence(context: ToolContext, campaignId: string,
 
 export function assertCampaignAsset(context: ToolContext, campaignId: string, assetId: string | undefined): void {
   if (!assetId) return;
-  const asset = requireCampaignStore(context, "listAssets")(campaignId).find((item) => item.id === assetId);
+  const clean = assetId.trim().toLowerCase();
+  const asset = requireCampaignStore(context, "listAssets")(campaignId).find(
+    (item) => item.id === assetId || item.canonical?.toLowerCase() === clean
+  );
   if (!asset) throw new Error(`asset does not belong to campaign: ${assetId}`);
 }
 

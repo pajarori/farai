@@ -26,7 +26,7 @@ export async function readCredential(
   }
   const legacy = readLegacyCredential(kind, id, location, workspace);
   if (!legacy) {
-    if (secureError) throw secureError;
+    if (secureError && process.env.FARAI_HEADLESS !== "1") throw secureError;
     return undefined;
   }
   if (!secureError) {
@@ -53,7 +53,7 @@ export function readCredentialSync(
   }
   const legacy = readLegacyCredential(kind, id, location, workspace);
   if (!legacy) {
-    if (secureError) throw secureError;
+    if (secureError && process.env.FARAI_HEADLESS !== "1") throw secureError;
     return undefined;
   }
   if (!secureError) {
